@@ -1,0 +1,90 @@
+---
+name: mcp-fleet-builder
+description: "Build or modify a chrischall MCP server (the ~19 *-mcp repos under ~/git) on @chrischall/mcp-utils — skeleton, bearer vs fetchproxy archetypes, bootstrap, and release/CI gotchas."
+---
+
+# Building a chrischall fleet MCP
+
+The fleet is ~19 sibling MCP servers under `~/git/*-mcp`, all on the same skeleton and sharing `@chrischall/mcp-utils` (generic scaffolding), `@fetchproxy/server` (browser-bridge HTTP for sites without an API), and `@chrischall/realty-core` (realty math). Build new ones the same way; don't reinvent the glue.
+
+Canonical examples to copy from: **splitwise-mcp** (bearer/direct-API archetype), **redfin-mcp** / **zillow-mcp** (fetchproxy archetype).
+
+## Skeleton
+
+```
+src/
+  index.ts        # bootstrap — runMcp({ name, version, banner, deps, tools })
+  client.ts       # API client (reads creds, talks to the service)
+  tools/<area>.ts # registerXxxTools(server, deps) → server.registerTool(...)
+tests/            # vitest; no real network (mock fetch / the bridge)
+  version-sync.test.ts   # versionSyncTest from @chrischall/mcp-utils/test
+SKILL.md, manifest.json, server.json, .mcp.json, .claude-plugin/  # packaging
+.github/workflows/   # ci, release-please / tag-and-bump, pr-auto-review, auto-merge
+```
+
+Each `tools/*.ts` exports `registerXxxTools(server, deps)` that calls `server.registerTool(name, { description, annotations, inputSchema }, handler)` (high-level `McpServer` API with zod). `index.ts` only wires them.
+
+## @chrischall/mcp-utils surface
+
+Core entry (zero runtime deps — safe for any MCP):
+- `server`: `createMcpServer`, `runMcp({ name, version, banner?, deps, tools })`, `withGracefulShutdown`, `ToolRegistrar`
+- `response`: `textResult(data)` (the universal `{content:[{type:'text',text:JSON.stringify(data,null,2)}]}`), `errorResult`, `imageResult`, `rawTextResult`, `flattenJsonApi`
+- `errors`: `McpToolError` + `SessionNotAuthenticatedError`/`BotWallError`/`RateLimitError`/`UnreachableError`/`ModeMismatchError`, `createHelpfulError`, `wrapToolError`, `truncateErrorMessage` (redacts Bearer/JWT then caps at 500), `messageOf`
+- `config`: `readEnvVar`/`requireEnvVar` (trim + treat `''`/`'undefined'`/`'null'`/`${...}` as unset), `parseBoolEnv`, `loadDotenvSafely`, `expandPath`
+- `http`: `createApiClient({baseUrl,getToken,retry?})`, `buildQueryString`, `buildOptionalBody`, `formatApiError`, `parseLinkHeader`, `parseCookieJar`, `decodeJwtExp`/`decodeJwtSessionId`/`validateJwtExpiry`
+- `zod`: `paginationSchema`/`pageSchema`, `calculateOffset`, `toolAnnotations`, atoms (`PositiveInt`/`NonNegInt`/`NonEmptyString`/`IsoDate`/`IsoTime`), `extractTime`/`normalizeTime`
+- `auth`: `createAuthResolver`, `resolveAuthPattern`, `sessionLoginFlow`, `createOAuth2Refresher`
+
+Subpath entries (only pull their heavy/optional dep when imported):
+- `@chrischall/mcp-utils/session` — `createSessionRegistry`, `registerSessionTools`, `SessionStore` (disk, 0600/0700), `TokenManager` (race-safe refresh)
+- `@chrischall/mcp-utils/fetchproxy` — `createFetchproxyTransport`, `createBootstrapOpts`, re-exports of `@fetchproxy/server` primitives + `classifyBridgeError`
+- `@chrischall/mcp-utils/html` — `parsePropertyTable`, `extractJsonFromHtml`, etc. (needs `node-html-parser`)
+- `@chrischall/mcp-utils/test` — `createTestHarness`, `parseToolResult`, `versionSyncTest`
+
+## Bootstrap (index.ts) — both archetypes
+
+```ts
+#!/usr/bin/env node
+import { runMcp } from '@chrischall/mcp-utils';
+import { FooClient } from './client.js';
+import { registerThingTools } from './tools/thing.js';
+
+// Build the client in the CALLER so the deferred-config-error pattern holds:
+// the server still boots (and answers the host's install-time tools/list probe)
+// when creds are absent — the error surfaces on the first tool call instead.
+const client = new FooClient();
+
+await runMcp({
+  name: 'foo-mcp',
+  version: '1.0.0', // x-release-please-version
+  banner: '[foo-mcp] This project was developed and is maintained by AI. Use at your own discretion.',
+  deps: client,
+  tools: [registerThingTools],
+});
+```
+
+**Deferred-config-error pattern** (do this in `client.ts`): the constructor reads creds via `readEnvVar`; if missing, store a `configError` instead of throwing, and re-throw it from a `requireKey()` called at request time. Lets the server start without creds.
+
+## Archetypes
+
+- **bearer / direct API** (splitwise, tempo, ioffice, app-store-connect, skylight): `client.ts` does `fetch` with a bearer/token header. Use `createApiClient` if it fits; always route error bodies through `formatApiError`/`truncateErrorMessage`. No fetchproxy.
+- **fetchproxy / browser-bridge** (realty cohort, reservations, finance, school): the site has no public API, so requests go through a signed-in browser tab via `@fetchproxy/server`. `src/transport-fetchproxy.ts` wraps it; session tools expose/select accounts. Use `@chrischall/mcp-utils/fetchproxy` **only on `@fetchproxy/server` >= 0.11** (it re-exports 0.11+ APIs). Repos on older pins keep their own transport until a deliberate bump.
+
+## Gotchas (hard-won)
+
+- **ESM + NodeNext**: every relative import ends in `.js`, even from `.ts`.
+- **`"types": ["node"]`**: NodeNext repos need this in `tsconfig.compilerOptions` once they import a scoped pkg like `@chrischall/mcp-utils`, or `tsc` fails with `Cannot find name 'path'/'url'`. Add `types`, not `typeRoots`.
+- **zod 4**: mcp-utils peer-requires `zod@^4.4.0`. Repos still on zod 3 must bump (schemas are compatible; `z.string().email()` is deprecated-but-works).
+- **Never commit secrets**: `.env` must be gitignored. Real creds live in `.env` (local) or the MCP host's `mcp_config.env`. If `.env` is tracked, `git rm --cached` it.
+- **Version sync**: version is duplicated across `package.json`, `src/index.ts` (`x-release-please-version` marker), `manifest.json`, `server.json`, `.claude-plugin/*`. Keep them equal — `versionSyncTest` from `/test` guards it. Don't hand-bump; release-please / the Tag-&-Bump action does it.
+- **`server.json` description ≤ 100 chars** (MCP registry schema) — over that, `mcp-publisher publish` 422s.
+- **stdio transport**: logs go to **stderr only** — stdout is reserved for JSON-RPC.
+- **Don't merge PRs**: open with one release-notes label; `pr-auto-review` + `auto-merge` ship it. Never add `ready-to-merge` yourself to override a warn/fail.
+
+## New MCP — fast path
+
+1. Copy a same-archetype sibling's skeleton (splitwise for bearer, redfin for fetchproxy). Keep its `.github/`, packaging, tsconfig, vitest.
+2. Add `"@chrischall/mcp-utils"` (published `^x` once available; `file:../mcp-utils/<tarball>` pre-publish).
+3. Write `client.ts` (deferred-config-error), `tools/*.ts` (`registerTool` + `textResult`), wire `index.ts` with `runMcp`.
+4. Tests with `createTestHarness` + `versionSyncTest`; mock the network. Keep them green.
+5. `npm run build && npm test`. Branch + PR; let auto-merge ship it.
