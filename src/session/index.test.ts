@@ -1,0 +1,391 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, statSync, existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createTestHarness, parseToolResult } from '../test/index.js';
+import {
+  createSessionRegistry,
+  SessionRegistry,
+  registerSessionTools,
+  SessionStore,
+  normalizeOrigin,
+  TokenManager,
+  type SessionToken,
+} from './index.js';
+
+// ---------------------------------------------------------------------------
+// SessionRegistry — in-memory
+// ---------------------------------------------------------------------------
+
+describe('SessionRegistry', () => {
+  it('createSessionRegistry returns a SessionRegistry', () => {
+    expect(createSessionRegistry()).toBeInstanceOf(SessionRegistry);
+  });
+
+  it('register returns a session with a label id and marks it active (first wins)', () => {
+    const reg = createSessionRegistry();
+    const s = reg.register({ account_identity: 'a@example.com' });
+    expect(s.session_id).toMatch(/^[a-z0-9]+$/);
+    expect(s.account_identity).toBe('a@example.com');
+    expect(s.auth_ready).toBe(true);
+    expect(reg.getContext().active_session_id).toBe(s.session_id);
+  });
+
+  it('label ids are unique across registrations', () => {
+    const reg = createSessionRegistry();
+    const a = reg.register({ account_identity: 'a' });
+    const b = reg.register({ account_identity: 'b' });
+    expect(a.session_id).not.toBe(b.session_id);
+  });
+
+  it('dedupes by account_identity — re-register updates in place, keeps id', () => {
+    const reg = createSessionRegistry();
+    const a = reg.register({ account_identity: 'a@x.com', auth_expires_at: '2020-01-01' });
+    const a2 = reg.register({ account_identity: 'a@x.com' });
+    expect(a2.session_id).toBe(a.session_id);
+    expect(reg.getContext().sessions).toHaveLength(1);
+    // undefined auth_expires_at means "keep existing"
+    expect(a2.auth_expires_at).toBe('2020-01-01');
+  });
+
+  it('re-register with explicit null clears expiry; with a value replaces it', () => {
+    const reg = createSessionRegistry();
+    reg.register({ account_identity: 'a', auth_expires_at: '2020-01-01' });
+    expect(reg.register({ account_identity: 'a', auth_expires_at: null }).auth_expires_at).toBeNull();
+    expect(reg.register({ account_identity: 'a', auth_expires_at: '2030-01-01' }).auth_expires_at).toBe(
+      '2030-01-01',
+    );
+  });
+
+  it('trims identity and rejects empty', () => {
+    const reg = createSessionRegistry();
+    expect(reg.register({ account_identity: '  a  ' }).account_identity).toBe('a');
+    expect(() => reg.register({ account_identity: '   ' })).toThrow();
+  });
+
+  it('setActive returns false for unknown, true + switches for known', () => {
+    const reg = createSessionRegistry();
+    const a = reg.register({ account_identity: 'a' });
+    const b = reg.register({ account_identity: 'b' });
+    expect(reg.getContext().active_session_id).toBe(a.session_id);
+    expect(reg.setActive('nope')).toBe(false);
+    expect(reg.setActive(b.session_id)).toBe(true);
+    expect(reg.getContext().active_session_id).toBe(b.session_id);
+  });
+
+  it('getContext returns a deep-ish snapshot (mutation does not leak)', () => {
+    const reg = createSessionRegistry();
+    reg.register({ account_identity: 'a' });
+    const ctx = reg.getContext();
+    ctx.sessions[0]!.account_identity = 'mutated';
+    expect(reg.getContext().sessions[0]!.account_identity).toBe('a');
+  });
+
+  it('resolve: known requested → it; unknown → throws; undefined → active; none → null', () => {
+    const reg = createSessionRegistry();
+    expect(reg.resolve(undefined)).toBeNull();
+    const a = reg.register({ account_identity: 'a' });
+    expect(reg.resolve(undefined)).toBe(a.session_id);
+    expect(reg.resolve(a.session_id)).toBe(a.session_id);
+    expect(() => reg.resolve('nope')).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// registerSessionTools — MCP surface
+// ---------------------------------------------------------------------------
+
+describe('registerSessionTools', () => {
+  it('registers the three prefixed tools', async () => {
+    const reg = createSessionRegistry();
+    const h = await createTestHarness((server) => registerSessionTools(server, reg, { prefix: 'zillow' }));
+    const names = (await h.listTools()).map((t) => t.name).sort();
+    expect(names).toEqual([
+      'zillow_get_session_context',
+      'zillow_register_session',
+      'zillow_set_active_session',
+    ]);
+    await h.close();
+  });
+
+  it('register_session adds a session and returns it', async () => {
+    const reg = createSessionRegistry();
+    const h = await createTestHarness((server) => registerSessionTools(server, reg, { prefix: 'redfin' }));
+    const res = await h.callTool('redfin_register_session', { account_identity: 'me@x.com' });
+    const body = parseToolResult<{ session: SessionToken; active_session_id: string }>(res);
+    expect(body.active_session_id).toBe(reg.getContext().active_session_id);
+    expect(reg.getContext().sessions).toHaveLength(1);
+    await h.close();
+  });
+
+  it('set_active_session errors on unknown id', async () => {
+    const reg = createSessionRegistry();
+    const h = await createTestHarness((server) => registerSessionTools(server, reg, { prefix: 'homes' }));
+    const res = await h.callTool('homes_set_active_session', { session_id: 'nope' });
+    expect(res.isError).toBe(true);
+    await h.close();
+  });
+
+  it('get_session_context returns the registry snapshot', async () => {
+    const reg = createSessionRegistry();
+    reg.register({ account_identity: 'a' });
+    const h = await createTestHarness((server) => registerSessionTools(server, reg, { prefix: 'compass' }));
+    const body = parseToolResult<{ sessions: unknown[] }>(
+      await h.callTool('compass_get_session_context', {}),
+    );
+    expect(body.sessions).toHaveLength(1);
+    await h.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// normalizeOrigin
+// ---------------------------------------------------------------------------
+
+describe('normalizeOrigin', () => {
+  it('strips path + trailing slash from a full url', () => {
+    expect(normalizeOrigin('https://x.hbportal.co/app/workspace_file/123')).toBe('https://x.hbportal.co');
+    expect(normalizeOrigin('https://x.hbportal.co/')).toBe('https://x.hbportal.co');
+  });
+  it('passes through a bare origin and trims trailing slash on invalid input', () => {
+    expect(normalizeOrigin('not a url/')).toBe('not a url');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SessionStore — disk-persisted
+// ---------------------------------------------------------------------------
+
+interface TestSession extends Record<string, unknown> {
+  origin: string;
+  token: string;
+}
+
+function makeStore(dir: string) {
+  return new SessionStore<TestSession>({
+    filePath: join(dir, 'nested', 'sessions.json'),
+    keyOf: (s) => s.origin,
+    normalizeKey: normalizeOrigin,
+  });
+}
+
+describe('SessionStore', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'mcp-utils-store-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('add + get by key, normalizing the key', () => {
+    const store = makeStore(dir);
+    store.add({ origin: 'https://a.com/page', token: 't1' });
+    // keyed by the normalized origin, so any path under the origin resolves it
+    expect(store.get('https://a.com')!.token).toBe('t1');
+    expect(store.get('https://a.com/other')!.token).toBe('t1');
+  });
+
+  it('get() with no arg returns the most-recently-added (active) session', () => {
+    const store = makeStore(dir);
+    store.add({ origin: 'https://a.com', token: 't1' });
+    store.add({ origin: 'https://b.com', token: 't2' });
+    expect(store.getActiveSession()!.token).toBe('t2');
+    expect(store.get()!.token).toBe('t2');
+  });
+
+  it('persists to disk and reloads in a new instance', () => {
+    const store = makeStore(dir);
+    store.add({ origin: 'https://a.com', token: 't1' });
+    const reopened = makeStore(dir);
+    expect(reopened.get('https://a.com')!.token).toBe('t1');
+    expect(reopened.getActiveSession()!.origin).toBe('https://a.com');
+  });
+
+  it('writes the file with mode 0600 and the dir with mode 0700', () => {
+    const store = makeStore(dir);
+    store.add({ origin: 'https://a.com', token: 't1' });
+    const filePath = join(dir, 'nested', 'sessions.json');
+    expect(existsSync(filePath)).toBe(true);
+    expect(statSync(filePath).mode & 0o777).toBe(0o600);
+    expect(statSync(join(dir, 'nested')).mode & 0o777).toBe(0o700);
+  });
+
+  it('remove deletes a session and fixes up the active pointer', () => {
+    const store = makeStore(dir);
+    store.add({ origin: 'https://a.com', token: 't1' });
+    store.add({ origin: 'https://b.com', token: 't2' });
+    expect(store.remove('https://b.com')).toBe(true);
+    expect(store.get('https://b.com')).toBeNull();
+    // active falls back to a.com
+    expect(store.getActiveSession()!.origin).toBe('https://a.com');
+    expect(store.remove('https://b.com')).toBe(false);
+  });
+
+  it('list returns all sessions in insertion order', () => {
+    const store = makeStore(dir);
+    store.add({ origin: 'https://a.com', token: 't1' });
+    store.add({ origin: 'https://b.com', token: 't2' });
+    expect(store.list().map((s) => s.origin)).toEqual(['https://a.com', 'https://b.com']);
+  });
+
+  it('tolerates a corrupt disk file (starts empty)', () => {
+    const filePath = join(dir, 'nested', 'sessions.json');
+    mkdirSync(join(dir, 'nested'), { recursive: true });
+    writeFileSync(filePath, '{ not json');
+    const store = makeStore(dir);
+    expect(store.list()).toHaveLength(0);
+  });
+
+  it('serialize/deserialize round-trips through the on-disk JSON array', () => {
+    const store = makeStore(dir);
+    store.add({ origin: 'https://a.com', token: 't1' });
+    const raw = readFileSync(join(dir, 'nested', 'sessions.json'), 'utf8');
+    const parsed = JSON.parse(raw) as TestSession[];
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed[0]!.origin).toBe('https://a.com');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TokenManager — expiry skew, proactive + reactive refresh, race-safety
+// ---------------------------------------------------------------------------
+
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+describe('TokenManager', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('returns the current token when it is far from expiry', async () => {
+    const refresh = vi.fn();
+    const tm = new TokenManager({
+      initial: { accessToken: 'AT', refreshToken: 'RT', expiresAt: 60 * 60 * 1000 },
+      refresh,
+    });
+    expect(await tm.getAccessToken()).toBe('AT');
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('proactively refreshes within the 5-minute skew window', async () => {
+    const refresh = vi.fn().mockResolvedValue({ accessToken: 'AT2', refreshToken: 'RT2', expiresAt: 60 * 60 * 1000 });
+    const tm = new TokenManager({
+      // expires in 4 minutes — inside the 5-min skew
+      initial: { accessToken: 'AT', refreshToken: 'RT', expiresAt: 4 * 60 * 1000 },
+      refresh,
+    });
+    expect(await tm.getAccessToken()).toBe('AT2');
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(refresh).toHaveBeenCalledWith('RT');
+  });
+
+  it('does NOT refresh when expiry is just outside the skew window', async () => {
+    const refresh = vi.fn();
+    const tm = new TokenManager({
+      initial: { accessToken: 'AT', refreshToken: 'RT', expiresAt: 5 * 60 * 1000 + 1000 },
+      refresh,
+    });
+    expect(await tm.getAccessToken()).toBe('AT');
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('keeps the old refresh token when the refresh response omits one', async () => {
+    const refresh = vi
+      .fn()
+      .mockResolvedValueOnce({ accessToken: 'AT2', expiresAt: 60 * 60 * 1000 })
+      .mockResolvedValueOnce({ accessToken: 'AT3', expiresAt: 60 * 60 * 1000 });
+    const tm = new TokenManager({
+      initial: { accessToken: 'AT', refreshToken: 'RT', expiresAt: -1 },
+      refresh,
+    });
+    await tm.getAccessToken();
+    await tm.refreshNow();
+    expect(refresh).toHaveBeenNthCalledWith(2, 'RT');
+  });
+
+  it('reactively refreshes once on a 401 then replays via withAuth', async () => {
+    const refresh = vi.fn().mockResolvedValue({ accessToken: 'AT2', refreshToken: 'RT2', expiresAt: 60 * 60 * 1000 });
+    const tm = new TokenManager({
+      initial: { accessToken: 'AT', refreshToken: 'RT', expiresAt: 60 * 60 * 1000 },
+      refresh,
+    });
+    const seen: string[] = [];
+    const call = vi.fn(async (token: string) => {
+      seen.push(token);
+      return new Response(null, { status: seen.length === 1 ? 401 : 200 });
+    });
+    const res = await tm.withAuth(call);
+    expect(res.status).toBe(200);
+    expect(seen).toEqual(['AT', 'AT2']);
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+
+  it('does not loop forever — a second 401 after refresh is surfaced', async () => {
+    const refresh = vi.fn().mockResolvedValue({ accessToken: 'AT2', expiresAt: 60 * 60 * 1000 });
+    const tm = new TokenManager({
+      initial: { accessToken: 'AT', refreshToken: 'RT', expiresAt: 60 * 60 * 1000 },
+      refresh,
+    });
+    const call = vi.fn(async () => new Response(null, { status: 401 }));
+    const res = await tm.withAuth(call);
+    expect(res.status).toBe(401);
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(call).toHaveBeenCalledTimes(2);
+  });
+
+  it('coalesces concurrent refreshes into a SINGLE refresh call (race-safe)', async () => {
+    const d = deferred<SessionToken>();
+    const refresh = vi.fn().mockReturnValue(d.promise);
+    const tm = new TokenManager({
+      // already expired → both callers hit the proactive-refresh branch
+      initial: { accessToken: 'OLD', refreshToken: 'RT', expiresAt: -1 },
+      refresh,
+    });
+    const p1 = tm.getAccessToken();
+    const p2 = tm.getAccessToken();
+    // both started before the single refresh resolves
+    expect(refresh).toHaveBeenCalledOnce();
+    d.resolve({ accessToken: 'NEW', refreshToken: 'RT2', expiresAt: 60 * 60 * 1000 });
+    expect(await p1).toBe('NEW');
+    expect(await p2).toBe('NEW');
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+
+  it('a failed refresh rejects and clears the in-flight promise so a retry can run', async () => {
+    const refresh = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce({ accessToken: 'AT2', refreshToken: 'RT2', expiresAt: 60 * 60 * 1000 });
+    const tm = new TokenManager({
+      initial: { accessToken: 'AT', refreshToken: 'RT', expiresAt: -1 },
+      refresh,
+    });
+    await expect(tm.getAccessToken()).rejects.toThrow('boom');
+    // in-flight cleared — second attempt issues a fresh refresh and succeeds
+    expect(await tm.getAccessToken()).toBe('AT2');
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it('throws when no refresh token is available and a refresh is needed', async () => {
+    const refresh = vi.fn();
+    const tm = new TokenManager({
+      initial: { accessToken: 'AT', expiresAt: -1 },
+      refresh,
+    });
+    await expect(tm.getAccessToken()).rejects.toThrow();
+    expect(refresh).not.toHaveBeenCalled();
+  });
+});

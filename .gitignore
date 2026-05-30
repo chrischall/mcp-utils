@@ -1,0 +1,9 @@
+node_modules
+dist
+coverage
+*.tsbuildinfo
+.DS_Store
+.env
+
+# local pack for pre-publish file: consumption
+*.tgz

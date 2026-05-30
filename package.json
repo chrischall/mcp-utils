@@ -1,0 +1,77 @@
+{
+  "name": "@chrischall/mcp-utils",
+  "version": "0.1.0",
+  "description": "Shared scaffolding for the chrischall MCP fleet — server bootstrap, tool-result formatting, helpful errors, hardened env/config, a bearer API-client kit, zod atoms, session registries, a fetchproxy transport adapter, auth resolver skeletons, an in-memory test harness, and opt-in HTML helpers. The generic MCP glue hoisted out of ~19 sibling servers.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Claude Code (AI) <https://www.anthropic.com/claude>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chrischall/mcp-utils.git"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./test": {
+      "import": "./dist/test/index.js",
+      "types": "./dist/test/index.d.ts"
+    },
+    "./fetchproxy": {
+      "import": "./dist/fetchproxy/index.js",
+      "types": "./dist/fetchproxy/index.d.ts"
+    },
+    "./session": {
+      "import": "./dist/session/index.js",
+      "types": "./dist/session/index.d.ts"
+    },
+    "./html": {
+      "import": "./dist/html/index.js",
+      "types": "./dist/html/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --noEmit false",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "peerDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.0",
+    "@fetchproxy/server": "^0.11.0",
+    "node-html-parser": "^7.1.0",
+    "vitest": "^4.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@fetchproxy/server": {
+      "optional": true
+    },
+    "node-html-parser": {
+      "optional": true
+    },
+    "vitest": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@fetchproxy/server": "^0.11.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@types/node": "^24.0.0",
+    "@vitest/coverage-v8": "^4.1.0",
+    "node-html-parser": "^7.1.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.0",
+    "zod": "^4.4.0"
+  }
+}
