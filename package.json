@@ -49,9 +49,9 @@
   "peerDependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.4.0",
-    "@fetchproxy/server": "^0.11.0",
-    "node-html-parser": "^7.1.0",
-    "vitest": "^4.1.0"
+    "@fetchproxy/server": "*",
+    "node-html-parser": "*",
+    "vitest": "*"
   },
   "peerDependenciesMeta": {
     "@fetchproxy/server": {

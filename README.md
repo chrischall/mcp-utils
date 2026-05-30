@@ -12,7 +12,12 @@ npm install @chrischall/mcp-utils
 
 Peer dependencies: `@modelcontextprotocol/sdk` and `zod`. The `@fetchproxy/server`
 and `node-html-parser` peers are **optional** — only needed if you import the
-`/fetchproxy` or `/html` subpaths respectively.
+`/fetchproxy` or `/html` subpaths respectively. Their declared range is `*` so a
+consumer pinning any version installs cleanly; the real requirement is enforced
+at the subpath: **`/fetchproxy` needs `@fetchproxy/server` >= 0.11** (it
+re-exports APIs added there — `withDeadline`, `backoffDelayMs`, `BRIDGE_CONCURRENCY`,
+the bridge-error classifier). MCPs on older `@fetchproxy/server` can use the core
+barrel freely; adopt `/fetchproxy` only after bumping to 0.11+.
 
 ## Entry points
 
