@@ -50,6 +50,15 @@ export {
   classifyFetchError,
   backoffDelayMs,
   BRIDGE_CONCURRENCY,
+  // Page-state / scrape + small async helpers. Re-exported so a consumer can
+  // route its ENTIRE `@fetchproxy/server` surface through this subpath (single
+  // import site) — the realty MCPs use these alongside the bridge primitives.
+  chunk,
+  sleep,
+  extractGlobalAssign,
+  extractBalancedObject,
+  extractImgTags,
+  lastPathSegment,
 } from '@fetchproxy/server';
 // NOTE: `classifyBridgeError` and `classifyRowError` above are fetchproxy's RAW
 // classifiers (they return a bare kind STRING). They are re-exported verbatim so

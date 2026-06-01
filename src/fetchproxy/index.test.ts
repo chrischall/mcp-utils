@@ -18,6 +18,12 @@ import {
   FetchproxyTimeoutError,
   classifyBridgeError,
   classifyRowError,
+  chunk,
+  sleep,
+  extractGlobalAssign,
+  extractBalancedObject,
+  extractImgTags,
+  lastPathSegment,
   bridgeErrorInfo,
 } from './index.js';
 
@@ -40,6 +46,16 @@ describe('re-exports from @fetchproxy/server', () => {
     expect(typeof TokenBucket).toBe('function'); // class
     expect(typeof classifyBotWall).toBe('function');
     expect(typeof retryOnceOnTimeout).toBe('function');
+  });
+
+  it('re-exports the FULL @fetchproxy/server surface incl. page-state/scrape + async helpers', () => {
+    // So a consumer can route its ENTIRE @fetchproxy/server import through this
+    // subpath (single import site) without splitting onto two sources.
+    for (const fn of [chunk, sleep, extractGlobalAssign, extractBalancedObject, extractImgTags, lastPathSegment]) {
+      expect(typeof fn).toBe('function');
+    }
+    expect(lastPathSegment('https://x.test/a/b/c')).toBe('c');
+    expect(chunk([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
   });
 
   it('re-exports the Fetchproxy* error hierarchy', () => {
