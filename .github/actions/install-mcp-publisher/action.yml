@@ -1,0 +1,47 @@
+name: Install mcp-publisher
+description: >-
+  Download a pinned, SHA-256-verified `mcp-publisher` binary (linux/amd64) and put
+  it on PATH. Shared across the chrischall MCP fleet so the version + checksum are
+  bumped in ONE place instead of in every repo's release workflow.
+
+# Why this exists: the upstream MCP docs install mcp-publisher via
+# `releases/latest | tar xz` with no verification. That binary runs in the publish
+# job with the OIDC token + RELEASE_PAT + CLAWHUB_TOKEN, so a mutated `latest`
+# asset would execute with real privileges. Pinning a version and verifying its
+# SHA-256 (fail-closed) removes that exposure. The job runs on ubuntu-latest, so
+# the linux/amd64 asset is the only one needed.
+#
+# To bump: set a new `default-version` + `default-sha256` below (sha from the
+# release's `registry_<version>_checksums.txt`). Every fleet repo that references
+# this action picks it up automatically.
+
+inputs:
+  version:
+    description: mcp-publisher release version (no leading "v").
+    required: false
+    default: "1.7.9"
+  sha256:
+    description: SHA-256 of mcp-publisher_linux_amd64.tar.gz for that version.
+    required: false
+    default: "ab128162b0616090b47cf245afe0a23f3ef08936fdce19074f5ba0a4469281ac"
+
+runs:
+  using: composite
+  steps:
+    - name: Download + verify mcp-publisher
+      shell: bash
+      env:
+        MCP_PUBLISHER_VERSION: ${{ inputs.version }}
+        MCP_PUBLISHER_SHA256: ${{ inputs.sha256 }}
+      run: |
+        set -euo pipefail
+        dest="${RUNNER_TEMP:-/tmp}/mcp-publisher-bin"
+        tarball="${RUNNER_TEMP:-/tmp}/mcp-publisher.tar.gz"
+        mkdir -p "$dest"
+        curl -fsSL \
+          "https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz" \
+          -o "$tarball"
+        echo "${MCP_PUBLISHER_SHA256}  ${tarball}" | sha256sum -c -
+        tar xzf "$tarball" -C "$dest" mcp-publisher
+        echo "$dest" >> "$GITHUB_PATH"
+        echo "Installed pinned mcp-publisher v${MCP_PUBLISHER_VERSION} to ${dest}"
