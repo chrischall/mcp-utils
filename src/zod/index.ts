@@ -119,42 +119,45 @@ export function calculateOffset(page: number, size: number): number {
 
 /** The MCP tool-annotation block, as consumed by `server.registerTool`. */
 export interface ToolAnnotations {
-  title: string;
+  title?: string;
   readOnlyHint: boolean;
-  idempotentHint: boolean;
-  openWorldHint: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
 }
 
 /** Options for {@link toolAnnotations}. */
 export interface ToolAnnotationsInput {
-  /** Human-readable tool title (shown in clients). */
-  title: string;
+  /** Human-readable tool title (shown in clients). Omitted from output when unset. */
+  title?: string;
   /** Tool does not modify state. Default `true` (most fleet tools are reads). */
   readOnly?: boolean;
-  /** Repeated identical calls have the same effect. Default `true`. */
+  /** Repeated identical calls have the same effect. Emitted ONLY when set. */
   idempotent?: boolean;
   /**
    * Tool reaches an open/unbounded external world (the live web/API) rather
-   * than a closed local computation. Default `true`.
+   * than a closed local computation. Emitted ONLY when set.
    */
   openWorld?: boolean;
 }
 
 /**
- * Build the `annotations` block repeated across ~15 tools per MCP. Defaults
- * encode the fleet's common case (a read-only, idempotent, open-world fetch);
- * mutating/local tools override the relevant hint.
+ * Build the `annotations` block for `server.registerTool`. Only `readOnlyHint`
+ * is always emitted (defaulting to `true` — most fleet tools are reads); `title`,
+ * `idempotentHint`, and `openWorldHint` are emitted ONLY when you pass them. This
+ * makes it a clean drop-in for the common `{ readOnlyHint: true }` shape without
+ * injecting hints a tool didn't declare.
  *
- * @example toolAnnotations({ title: 'Search properties' })
+ * @example toolAnnotations({ title: 'Search properties' })  // { title, readOnlyHint: true }
+ * @example toolAnnotations({ readOnly: false })             // { readOnlyHint: false }
+ * @example toolAnnotations({ title: 'Search', idempotent: true, openWorld: true })
  *   // { title, readOnlyHint: true, idempotentHint: true, openWorldHint: true }
- * @example toolAnnotations({ title: 'Book', readOnly: false, idempotent: false })
  */
-export function toolAnnotations(opts: ToolAnnotationsInput): ToolAnnotations {
+export function toolAnnotations(opts: ToolAnnotationsInput = {}): ToolAnnotations {
   return {
-    title: opts.title,
+    ...(opts.title !== undefined ? { title: opts.title } : {}),
     readOnlyHint: opts.readOnly ?? true,
-    idempotentHint: opts.idempotent ?? true,
-    openWorldHint: opts.openWorld ?? true,
+    ...(opts.idempotent !== undefined ? { idempotentHint: opts.idempotent } : {}),
+    ...(opts.openWorld !== undefined ? { openWorldHint: opts.openWorld } : {}),
   };
 }
 

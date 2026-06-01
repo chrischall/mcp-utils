@@ -141,22 +141,21 @@ describe('pagination', () => {
 });
 
 describe('toolAnnotations', () => {
-  it('defaults to read-only, idempotent, open-world', () => {
+  it('emits only title + readOnlyHint by default (hints are opt-in)', () => {
     expect(toolAnnotations({ title: 'Search' })).toEqual({
       title: 'Search',
       readOnlyHint: true,
-      idempotentHint: true,
-      openWorldHint: true,
     });
   });
-  it('honors overrides for mutating/local tools', () => {
+  it('omits title when not provided', () => {
+    expect(toolAnnotations({ readOnly: false })).toEqual({ readOnlyHint: false });
+  });
+  it('works with no args (read-only default)', () => {
+    expect(toolAnnotations()).toEqual({ readOnlyHint: true });
+  });
+  it('emits idempotentHint / openWorldHint ONLY when set', () => {
     expect(
-      toolAnnotations({
-        title: 'Book',
-        readOnly: false,
-        idempotent: false,
-        openWorld: true,
-      })
+      toolAnnotations({ title: 'Book', readOnly: false, idempotent: false, openWorld: true })
     ).toEqual({
       title: 'Book',
       readOnlyHint: false,
@@ -164,10 +163,10 @@ describe('toolAnnotations', () => {
       openWorldHint: true,
     });
   });
-  it('supports closed-world (local compute) tools', () => {
+  it('does not inject openWorldHint/idempotentHint that were not declared', () => {
     const a = toolAnnotations({ title: 'Calc mortgage', openWorld: false });
-    expect(a.openWorldHint).toBe(false);
-    expect(a.readOnlyHint).toBe(true);
+    expect(a).toEqual({ title: 'Calc mortgage', readOnlyHint: true, openWorldHint: false });
+    expect('idempotentHint' in a).toBe(false);
   });
 });
 
