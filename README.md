@@ -81,8 +81,9 @@ return textResult(flattenJsonApi(payload));   // collapse JSON:API envelopes
 `BotWallError`, `RateLimitError`, `UnreachableError`, `ModeMismatchError`),
 plus `createHelpfulError`, `wrapToolError`, `truncateErrorMessage`, and
 `messageOf`. This core module has **no runtime dependencies** — the fetchproxy
-typed-error hierarchy (`Fetchproxy*Error`) and the `classifyBridgeError`
-discriminator live in the [`/fetchproxy`](#fetchproxy) subpath instead, so
+typed-error hierarchy (`Fetchproxy*Error`), the raw `classifyBridgeError` /
+`classifyRowError` re-exports, and the `bridgeErrorInfo` envelope helper live in
+the [`/fetchproxy`](#fetchproxy) subpath instead, so
 bearer-only MCPs can import the core barrel without installing
 `@fetchproxy/server`.
 

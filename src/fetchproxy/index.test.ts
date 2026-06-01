@@ -17,6 +17,8 @@ import {
   FetchproxyBridgeDownError,
   FetchproxyTimeoutError,
   classifyBridgeError,
+  classifyRowError,
+  bridgeErrorInfo,
 } from './index.js';
 
 let identityDir: string;
@@ -267,7 +269,19 @@ describe('createBootstrapOpts', () => {
   });
 });
 
-describe('classifyBridgeError', () => {
+describe('raw re-exports (drop-in for @fetchproxy/server)', () => {
+  it('re-exports the RAW classifyBridgeError that returns a bare kind string', () => {
+    // Consumers compare the result against string kinds (e.g. === 'bridge_down').
+    expect(typeof classifyBridgeError(new FetchproxyBridgeDownError({ originalError: 'x' }))).toBe('string');
+    expect(classifyBridgeError(new FetchproxyTimeoutError({ url: 'https://x', timeoutMs: 1, elapsedMs: 2, role: 'host', port: 1 }))).toBe('timeout');
+  });
+
+  it('re-exports classifyRowError as a function', () => {
+    expect(typeof classifyRowError).toBe('function');
+  });
+});
+
+describe('bridgeErrorInfo (envelope)', () => {
   it('classifies a FetchproxyTimeoutError as timeout with a hint', () => {
     const err = new FetchproxyTimeoutError({
       url: 'https://x',
@@ -276,7 +290,7 @@ describe('classifyBridgeError', () => {
       role: 'host',
       port: 1,
     });
-    const out = classifyBridgeError(err);
+    const out = bridgeErrorInfo(err);
     expect(out.type).toBe('timeout');
     expect(out.message).toBeTruthy();
     expect(out.hint).toBeTruthy();
@@ -284,7 +298,7 @@ describe('classifyBridgeError', () => {
 
   it('classifies a FetchproxyBridgeDownError as bridge_down and surfaces its hint', () => {
     const err = new FetchproxyBridgeDownError({ originalError: 'sw gone' });
-    const out = classifyBridgeError(err);
+    const out = bridgeErrorInfo(err);
     expect(out.type).toBe('bridge_down');
     expect(out.hint).toBeTruthy();
   });
@@ -294,31 +308,31 @@ describe('classifyBridgeError', () => {
       { status: 503, statusText: 'x', url: 'https://x', body: '', headers: {} } as never,
       'upstream 503',
     );
-    const out = classifyBridgeError(err);
+    const out = bridgeErrorInfo(err);
     expect(out.type).toBe('http');
     expect(out.message).toMatch(/503|upstream/);
   });
 
   it('classifies a base FetchproxyProtocolError as protocol', () => {
-    const out = classifyBridgeError(new FetchproxyProtocolError('no_tab'));
+    const out = bridgeErrorInfo(new FetchproxyProtocolError('no_tab'));
     expect(out.type).toBe('protocol');
     expect(out.message).toMatch(/no_tab/);
   });
 
   it('classifies anything else as unknown', () => {
-    const out = classifyBridgeError(new Error('random'));
+    const out = bridgeErrorInfo(new Error('random'));
     expect(out.type).toBe('unknown');
     expect(out.message).toMatch(/random/);
   });
 
   it('handles non-Error throwables as unknown', () => {
-    const out = classifyBridgeError('a string');
+    const out = bridgeErrorInfo('a string');
     expect(out.type).toBe('unknown');
     expect(out.message).toMatch(/a string/);
   });
 
   it('redacts/truncates the surfaced message (security)', () => {
-    const out = classifyBridgeError(new Error('Bearer eyJleaktoken99999.p.s here'));
+    const out = bridgeErrorInfo(new Error('Bearer eyJleaktoken99999.p.s here'));
     expect(out.message).not.toMatch(/eyJleaktoken99999/);
   });
 });

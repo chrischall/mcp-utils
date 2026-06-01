@@ -45,14 +45,18 @@ export {
   FetchproxyHttpError,
   FetchproxyBridgeDownError,
   FetchproxyTimeoutError,
+  classifyBridgeError,
+  classifyRowError,
   classifyFetchError,
   backoffDelayMs,
   BRIDGE_CONCURRENCY,
 } from '@fetchproxy/server';
-// NOTE: the rich `classifyBridgeError` (returning a { type, message, hint }
-// envelope) is defined below — it wraps fetchproxy's bare-kind classifier. We
-// intentionally do NOT re-export fetchproxy's raw `classifyBridgeError` here so
-// the envelope version owns that name across the fleet.
+// NOTE: `classifyBridgeError` and `classifyRowError` above are fetchproxy's RAW
+// classifiers (they return a bare kind STRING). They are re-exported verbatim so
+// an MCP can swap `from '@fetchproxy/server'` → `from '@chrischall/mcp-utils/fetchproxy'`
+// as a pure drop-in. The richer { type, message, hint } envelope is a SEPARATE
+// helper exported as `bridgeErrorInfo` (defined below) — it does not squat the
+// `classifyBridgeError` name.
 export type {
   FetchproxyServerOpts,
   FetchResult,
@@ -344,12 +348,14 @@ export interface BridgeErrorInfo {
 
 /**
  * Thin discriminator over the `@fetchproxy/server` typed-error hierarchy. Folds
- * the fetchproxy `classifyBridgeError` (which returns a bare kind string) into a
- * `{ type, message, hint? }` envelope, mapping fetchproxy's `'other'` to
- * `'unknown'` and lifting the per-class remediation `hint` where one exists. The
- * surfaced message is redacted + truncated.
+ * the re-exported raw {@link classifyBridgeError} (which returns a bare kind
+ * string) into a `{ type, message, hint? }` envelope, mapping fetchproxy's
+ * `'other'` to `'unknown'` and lifting the per-class remediation `hint` where one
+ * exists. The surfaced message is redacted + truncated. Use this when you want
+ * the structured envelope; use the re-exported `classifyBridgeError` for the raw
+ * string kind (drop-in compatible with `@fetchproxy/server`).
  */
-export function classifyBridgeError(err: unknown): BridgeErrorInfo {
+export function bridgeErrorInfo(err: unknown): BridgeErrorInfo {
   const kind = classifyBridgeErrorKind(err);
   const message = truncateErrorMessage(messageOf(err));
 
