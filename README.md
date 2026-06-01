@@ -223,6 +223,22 @@ expect(parseToolResult(result)).toEqual({ ok: true });
 Also includes `versionSyncTest`, `mockFetchproxyBootstrap`, `setupClientMocks`,
 and `makeBootstrapResult`.
 
+## Shared CI actions
+
+This repo also hosts composite GitHub Actions the MCP fleet reuses, under
+[`.github/actions/`](.github/actions/):
+
+- [`install-mcp-publisher`](.github/actions/install-mcp-publisher) — download a
+  **pinned, SHA-256-verified** `mcp-publisher` binary (the registry-publish CLI)
+  onto `PATH`, instead of the upstream unverified `releases/latest | tar xz`. Fleet
+  release workflows reference it by tag so the pinned version bumps in one place:
+
+  ```yaml
+  - uses: chrischall/mcp-utils/.github/actions/install-mcp-publisher@v0.2.1
+  - run: mcp-publisher login github-oidc
+  - run: mcp-publisher publish
+  ```
+
 ## Development
 
 ```sh
