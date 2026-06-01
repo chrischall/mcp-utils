@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/chrischall/mcp-utils/compare/v0.2.0...v0.2.1) (2026-06-01)
+
+
+### Documentation
+
+* document the shared install-mcp-publisher action ([#4](https://github.com/chrischall/mcp-utils/issues/4)) ([b3d0444](https://github.com/chrischall/mcp-utils/commit/b3d0444ec8c882d4d28f5131a8f9feb90d053db5))
+
 ## [0.2.0](https://github.com/chrischall/mcp-utils/compare/v0.1.1...v0.2.0) (2026-06-01)
 
 
