@@ -35,7 +35,11 @@ jobs:
       - uses: googleapis/release-please-action@v5
         id: release
         with:
-          token: ${{ secrets.RELEASE_PAT }}
+          # RELEASE_PAT (a fine-grained PAT) lets the release PR's events trigger
+          # downstream workflows (CI on the PR) + auto-merge arming. Falls back to
+          # the built-in GITHUB_TOKEN when RELEASE_PAT isn't set — release-please
+          # still opens the PR, it just won't trigger other workflows on it.
+          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
