@@ -48,6 +48,19 @@ export interface ApiClientOptions {
   retry?: RetryPolicy;
   /** Human name of the upstream service, used in error messages. Defaults to the host. */
   serviceName?: string;
+  /**
+   * Override the error thrown on a 401. Lets a repo surface its own documented
+   * message (e.g. `TEMPO_API_TOKEN is invalid or expired`) without wrapping the
+   * client in a try/catch. The factory receives no arguments — it is never
+   * passed the token, preserving the no-token-in-message guarantee. Defaults to
+   * {@link UnauthorizedError}.
+   */
+  onUnauthorized?: () => Error;
+  /**
+   * Override the error thrown when a 429 persists past the retry budget.
+   * Defaults to {@link RateLimitedError}.
+   */
+  onRateLimited?: () => Error;
   /** Injectable fetch (for tests). Defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
   /** Injectable sleep (for tests). Defaults to `setTimeout`. */
@@ -125,6 +138,8 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   const service = opts.serviceName ?? hostOf(opts.baseUrl);
   const doFetch = opts.fetchImpl ?? fetch;
   const sleep = opts.sleep ?? defaultSleep;
+  const unauthorized = (): Error => (opts.onUnauthorized ? opts.onUnauthorized() : new UnauthorizedError(service));
+  const rateLimited = (): Error => (opts.onRateLimited ? opts.onRateLimited() : new RateLimitedError(service));
 
   async function send(method: string, path: string, opt: RequestOptions): Promise<Response> {
     const token = await opts.getToken();
@@ -158,8 +173,8 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   async function fetchJson<T>(method: string, path: string, opt: RequestOptions = {}): Promise<T> {
     const res = await send(method, path, opt);
 
-    if (res.status === 401) throw new UnauthorizedError(service);
-    if (res.status === 429) throw new RateLimitedError(service);
+    if (res.status === 401) throw unauthorized();
+    if (res.status === 429) throw rateLimited();
     if (res.status === 204) return undefined as T;
 
     const text = await res.text();
@@ -174,8 +189,8 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     const headers = { Accept: 'text/html,*/*', ...opt.headers };
     const res = await send(method, path, { ...opt, headers });
 
-    if (res.status === 401) throw new UnauthorizedError(service);
-    if (res.status === 429) throw new RateLimitedError(service);
+    if (res.status === 401) throw unauthorized();
+    if (res.status === 429) throw rateLimited();
 
     const text = await res.text();
     if (!res.ok) {

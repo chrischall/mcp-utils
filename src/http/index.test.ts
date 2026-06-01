@@ -147,6 +147,35 @@ describe('createApiClient.fetchJson', () => {
     expect(calls).toHaveLength(2); // initial + 1 retry
   });
 
+  it('uses a custom onUnauthorized error on 401 (preserving no-token-in-message)', async () => {
+    const { fn } = stubFetch([new Response('bad token tok-secret', { status: 401 })]);
+    const client = createApiClient({
+      baseUrl: 'https://x.test',
+      getToken: () => 'tok-secret',
+      serviceName: 'Tempo',
+      fetchImpl: fn,
+      onUnauthorized: () => new Error('TEMPO_API_TOKEN is invalid or expired'),
+    });
+    const err = await client.fetchJson('GET', '/a').catch((e) => e);
+    expect((err as Error).message).toBe('TEMPO_API_TOKEN is invalid or expired');
+    expect((err as Error).message).not.toContain('tok-secret');
+  });
+
+  it('uses a custom onRateLimited error when 429 persists', async () => {
+    const sleep = vi.fn(async () => {});
+    const { fn } = stubFetch([new Response('slow', { status: 429 })]);
+    const client = createApiClient({
+      baseUrl: 'https://x.test',
+      getToken: () => 't',
+      fetchImpl: fn,
+      sleep,
+      retry: { count: 0, delayMs: 0 },
+      onRateLimited: () => new Error('Rate limited by Tempo API'),
+    });
+    const err = await client.fetchJson('GET', '/a').catch((e) => e);
+    expect((err as Error).message).toBe('Rate limited by Tempo API');
+  });
+
   it('honors a custom retry policy (count: 0 disables retry)', async () => {
     const sleep = vi.fn(async () => {});
     const { fn, calls } = stubFetch([new Response('slow', { status: 429 })]);
