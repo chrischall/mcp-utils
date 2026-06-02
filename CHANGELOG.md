@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/chrischall/mcp-utils/compare/v0.3.0...v0.4.0) (2026-06-02)
+
+
+### Features
+
+* **fs:** fileBlob + readFileHead — stream uploads instead of buffering ([#9](https://github.com/chrischall/mcp-utils/issues/9)) ([df797bd](https://github.com/chrischall/mcp-utils/commit/df797bdcdc850a8a762551772db9d3eac2b9b0c6))
+
 ## [0.3.0](https://github.com/chrischall/mcp-utils/compare/v0.2.1...v0.3.0) (2026-06-02)
 
 
