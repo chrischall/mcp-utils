@@ -84,6 +84,28 @@ describe('createApiClient.fetchJson', () => {
     expect((calls[1]!.init.headers as Record<string, string>)['Content-Type']).toBeUndefined();
   });
 
+  it('sends a FormData body as multipart, without overriding Content-Type', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({ id: '1' })]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn });
+    const fd = new FormData();
+    fd.append('file', new Blob([Buffer.from('img')], { type: 'image/png' }), 'a.png');
+    await client.fetchJson('PUT', '/a', { formData: fd });
+    // body is passed through verbatim so fetch derives the multipart boundary itself.
+    expect(calls[0]!.init.body).toBe(fd);
+    expect((calls[0]!.init.headers as Record<string, string>)['Content-Type']).toBeUndefined();
+    expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBe('Bearer t');
+  });
+
+  it('prefers formData over a JSON body when both are given', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn });
+    const fd = new FormData();
+    fd.append('x', '1');
+    await client.fetchJson('POST', '/a', { formData: fd, body: { ignored: true } });
+    expect(calls[0]!.init.body).toBe(fd);
+    expect((calls[0]!.init.headers as Record<string, string>)['Content-Type']).toBeUndefined();
+  });
+
   it('appends query params', async () => {
     const { fn, calls } = stubFetch([jsonResponse({})]);
     const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn });

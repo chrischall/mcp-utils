@@ -71,6 +71,12 @@ export interface ApiClientOptions {
 export interface RequestOptions {
   /** JSON-serialized into the request body when present. */
   body?: unknown;
+  /**
+   * Multipart body (e.g. a file/image upload). Sent verbatim with no
+   * `Content-Type` so `fetch` sets the multipart boundary itself. Takes
+   * precedence over {@link body} when both are present.
+   */
+  formData?: FormData;
   /** Extra request headers, merged over the defaults. */
   headers?: Record<string, string>;
   /** Query params appended via {@link buildQueryString} when present. */
@@ -143,9 +149,13 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
 
   async function send(method: string, path: string, opt: RequestOptions): Promise<Response> {
     const token = await opts.getToken();
+    // formData wins over a JSON body; it's sent verbatim so fetch sets the boundary.
+    const isMultipart = opt.formData !== undefined;
+    const hasJsonBody = !isMultipart && opt.body !== undefined;
+    const reqBody: FormData | string | undefined = isMultipart ? opt.formData : hasJsonBody ? JSON.stringify(opt.body) : undefined;
     const headers: Record<string, string> = {
       Accept: 'application/json',
-      ...(opt.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      ...(hasJsonBody ? { 'Content-Type': 'application/json' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...opt.headers,
     };
@@ -158,7 +168,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
       const res = await doFetch(url, {
         method,
         headers,
-        ...(opt.body !== undefined ? { body: JSON.stringify(opt.body) } : {}),
+        ...(reqBody !== undefined ? { body: reqBody } : {}),
       });
 
       if (res.status === 429 && attempt < retry.count) {
