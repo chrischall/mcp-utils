@@ -70,6 +70,34 @@ await runMcp({
 - **bearer / direct API** (splitwise, tempo, ioffice, app-store-connect, skylight): `client.ts` does `fetch` with a bearer/token header. Use `createApiClient` if it fits; always route error bodies through `formatApiError`/`truncateErrorMessage`. No fetchproxy.
 - **fetchproxy / browser-bridge** (realty cohort, reservations, finance, school): the site has no public API, so requests go through a signed-in browser tab via `@fetchproxy/server`. `src/transport-fetchproxy.ts` wraps it; session tools expose/select accounts. Use `@chrischall/mcp-utils/fetchproxy` **only on `@fetchproxy/server` >= 0.11** (it re-exports 0.11+ APIs). Repos on older pins keep their own transport until a deliberate bump.
 
+## Conventions (how chris likes them)
+
+- **TDD, always.** Failing test → minimal code → green. Especially for write tools.
+- **Verify endpoints before building them.** For no-API sites, capture the real request (DevTools → Network → "Copy as cURL", or a HAR) and pin the request *shape* in `docs/<SERVICE>-API.md`. Never code a write against an assumed body. Extract only the shape — **never commit captured cookies/tokens/signatures** (secret-scan before committing).
+- **Confirm-gated writes.** Every mutating tool takes `confirm` (`schemaConfirm` from `zod`). Without `confirm: true` it makes **no** network call and returns a dry-run `preview()` of exactly what would be sent. Route every mutation through one private `client.write()` that attaches auth (cookie/CSRF or bearer) centrally.
+- **Stream file uploads.** Never `readFileSync` a file just to wrap it in `new Blob([buf])` — use `fileBlob` / `readFileHead` from `@chrischall/mcp-utils` (or `fs.openAsBlob` directly) so a 20 MB upload isn't a 20 MB heap buffer.
+- **Results:** `textResult(data)` for everything; errors via the typed `McpToolError` subclasses with an actionable `hint`.
+- **Secrets:** `.env` gitignored; throwaway-test writes go only to blackholed addresses (`@example.com`); only the user's own account/data.
+- **Never merge PRs or add `ready-to-merge` yourself.** Squash-merge is the default; `pr-auto-review` + `auto-merge` ship it. On a `warn`/`fail` verdict, surface the findings and ask — don't override.
+
+## Repo bootstrap — git, labels, release-please
+
+A new fleet repo isn't done until ALL of this exists. Each line below was a real failure when missing (CI red, review step erroring, `main` unprotected, bundle bloat).
+
+**Workflows** (`.github/workflows/`, copy from a sibling): `ci.yml` (build+test), `pr-auto-review.yml` (Claude structured verdict → arms `ready-to-merge` on `pass` via `RELEASE_PAT`), `claude.yml` (`@claude` dispatch), `auto-merge.yml` (squash on `ready-to-merge`/dependabot), `release-please.yml` (publish: npm `--provenance` + `.mcpb` + MCP registry + ClawHub), `dependabot.yml`. **Node:** CI/publish `node-version: 26` (Current).
+
+**Labels** — per-repo (`chrischall` is a *User* account: no org-wide labels/secrets). Create `auto-review`, `ready-to-merge`, `review-with-opus`, `autorelease: pending`, `autorelease: tagged`, plus dependabot categories (`ci`, `security`, `test`, `javascript`, `github_actions`, `ignore-for-release`). Missing `auto-review`/`ready-to-merge` → pr-auto-review's first step (`gh pr edit --add-label auto-review`) errors and arming can't happen.
+
+**Branch protection** — two rulesets on `~DEFAULT_BRANCH` (personal account uses rulesets, not classic protection): (1) block `deletion` + `non_fast_forward`; (2) require a PR + the `ci` required status check.
+
+**Secrets** — per-repo, set by the **human** (an agent must never set credential values): `CLAUDE_CODE_OAUTH_TOKEN` (review), `RELEASE_PAT` (release-please + the auto-merge/arm step — a `GITHUB_TOKEN`-added label won't fire downstream workflows), optional `CLAWHUB_TOKEN`; plus npm **trusted publishing** for the `--provenance` publish.
+
+**release-please** — `release-please-config.json` (`package-name`, `release-type: node`, `changelog-sections`, `extra-files`) + `.release-please-manifest.json`. **`extra-files` MUST list every file that carries the version**, or `versionSyncTest` fails the release PR's CI: `manifest.json` `$.version`; `server.json` `$.version` + `$.packages[*].version`; `.claude-plugin/plugin.json` `$.version`; `.claude-plugin/marketplace.json` `$.plugins[*].version` + `$.metadata.version`; and **every `src/*.ts` with an `// x-release-please-version` marker** — usually `src/index.ts` AND a `SERVER_VERSION` in `src/auth.ts` (it's easy to forget the second one). Don't hand-bump; release-please does it.
+
+**Publish scaffold** (also list in package.json `files`): `manifest.json` (mcpb; `runtimes.node` floor stays at an **LTS** like `>=22.5`, not 26, so LTS users install), `server.json` (registry; description **≤ 100 chars** or `mcp-publisher` 422s), `.claude-plugin/plugin.json` + `marketplace.json`, `.mcp.json`, `skills/<name>/SKILL.md`, and **`.mcpbignore`** so `mcpb pack` ships only `dist/bundle.js` + `manifest.json` + `package.json` — exclude `src/`, `tests/`, `docs/`, `node_modules/`, `.env*`, the registry/plugin manifests, **and** `release-please-config.json` / `.release-please-manifest.json` / `CHANGELOG.md`.
+
+**mcp-publisher** — install via the shared pinned, SHA-256-verified action `chrischall/mcp-utils/.github/actions/install-mcp-publisher@<tag>`, NOT the upstream `releases/latest | tar xz` (that binary runs with the OIDC + RELEASE_PAT + CLAWHUB tokens).
+
 ## Gotchas (hard-won)
 
 - **ESM + NodeNext**: every relative import ends in `.js`, even from `.ts`.
@@ -83,8 +111,8 @@ await runMcp({
 
 ## New MCP — fast path
 
-1. Copy a same-archetype sibling's skeleton (splitwise for bearer, redfin for fetchproxy). Keep its `.github/`, packaging, tsconfig, vitest.
+1. Copy a same-archetype sibling's skeleton (splitwise for bearer, redfin for fetchproxy) — including its `.github/`, packaging, tsconfig, vitest. Then do the full **Repo bootstrap** (workflows, labels, rulesets, secrets, release-please extra-files, publish scaffold, `.mcpbignore`) — it's the part that's easy to half-do.
 2. Add `"@chrischall/mcp-utils"` (published `^x` once available; `file:../mcp-utils/<tarball>` pre-publish).
-3. Write `client.ts` (deferred-config-error), `tools/*.ts` (`registerTool` + `textResult`), wire `index.ts` with `runMcp`.
+3. Write `client.ts` (deferred-config-error + one central `write()`), `tools/*.ts` (`registerTool` + `textResult`, **`confirm`-gated** writes with a dry-run `preview()`), wire `index.ts` with `runMcp`. TDD; verify endpoints from a capture before coding writes.
 4. Tests with `createTestHarness` + `versionSyncTest`; mock the network. Keep them green.
-5. `npm run build && npm test`. Branch + PR; let auto-merge ship it.
+5. `npm run build && npm test`. Branch + PR; let auto-merge ship it (never merge it yourself).
