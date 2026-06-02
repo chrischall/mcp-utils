@@ -27,7 +27,7 @@ import light:
 
 | Import | Contents |
 | --- | --- |
-| `@chrischall/mcp-utils` | core barrel: `server` + `response` + `errors` + `config` + `http` + `zod` + `auth` |
+| `@chrischall/mcp-utils` | core barrel: `server` + `response` + `errors` + `config` + `fs` + `http` + `zod` + `auth` |
 | `@chrischall/mcp-utils/session` | session registry, session store, token manager |
 | `@chrischall/mcp-utils/fetchproxy` | fetchproxy transport adapter, bot-wall / retry / concurrency helpers |
 | `@chrischall/mcp-utils/html` | opt-in HTML scraping helpers (needs `node-html-parser`) |
@@ -114,6 +114,26 @@ const home = expandPath('~/.config/my-mcp');
 
 `loadDotenvSafely` is a no-throw `.env` loader (returns `false` instead of
 failing when the file is absent).
+
+### `fs` — streaming file helpers (uploads)
+
+`fileBlob`, `readFileHead`.
+
+```ts
+import { fileBlob, readFileHead } from '@chrischall/mcp-utils';
+
+// A file-backed Blob: fetch streams it from disk, never buffered in memory.
+const blob = await fileBlob(path, { type: 'image/jpeg', maxBytes: 20_000_000, label: 'Image' });
+const form = new FormData();
+form.append('file', blob, 'photo.jpg');
+
+// Sniff a header (image dimensions, magic bytes) without reading the whole file.
+const head = await readFileHead(path, 65_536);
+```
+
+Use `fileBlob` in place of `new Blob([readFileSync(path)])` for `FormData` uploads
+— `fs.openAsBlob` backs the Blob with the file on disk, so a 20 MB upload uses
+constant memory instead of a 20 MB Buffer.
 
 ### `http` — bearer API-client kit
 

@@ -18,6 +18,7 @@ export * from './server/index.js';
 export * from './response/index.js';
 export * from './errors/index.js';
 export * from './config/index.js';
+export * from './fs/index.js';
 export * from './http/index.js';
 export * from './zod/index.js';
 export * from './auth/index.js';
