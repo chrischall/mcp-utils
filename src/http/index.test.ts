@@ -84,6 +84,66 @@ describe('createApiClient.fetchJson', () => {
     expect((calls[1]!.init.headers as Record<string, string>)['Content-Type']).toBeUndefined();
   });
 
+  it('sends a FormData body as multipart, without overriding Content-Type', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({ id: '1' })]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn });
+    const fd = new FormData();
+    fd.append('file', new Blob([Buffer.from('img')], { type: 'image/png' }), 'a.png');
+    await client.fetchJson('PUT', '/a', { formData: fd });
+    // body is passed through verbatim so fetch derives the multipart boundary itself.
+    expect(calls[0]!.init.body).toBe(fd);
+    expect((calls[0]!.init.headers as Record<string, string>)['Content-Type']).toBeUndefined();
+    expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBe('Bearer t');
+  });
+
+  it('prefers formData over a JSON body when both are given', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn });
+    const fd = new FormData();
+    fd.append('x', '1');
+    await client.fetchJson('POST', '/a', { formData: fd, body: { ignored: true } });
+    expect(calls[0]!.init.body).toBe(fd);
+    expect((calls[0]!.init.headers as Record<string, string>)['Content-Type']).toBeUndefined();
+  });
+
+  it('omits Authorization when neither getToken nor tokenManager is given', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://x.test', fetchImpl: fn });
+    await client.fetchJson('GET', '/a');
+    expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBeUndefined();
+  });
+
+  it('sends baseHeaders on every request, overridable per-request', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({}), jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn, baseHeaders: { 'x-api-version': '2026-05-01' } });
+    await client.fetchJson('GET', '/a');
+    expect((calls[0]!.init.headers as Record<string, string>)['x-api-version']).toBe('2026-05-01');
+    // a per-request header overrides a base header of the same name
+    await client.fetchJson('GET', '/b', { headers: { 'x-api-version': 'override' } });
+    expect((calls[1]!.init.headers as Record<string, string>)['x-api-version']).toBe('override');
+  });
+
+  it('routes auth through tokenManager.withAuth (and ignores getToken) when given', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({ ok: true })]);
+    const getToken = vi.fn(() => 'GT');
+    const withAuth = vi.fn((call: (t: string) => Promise<Response>) => call('TM-TOKEN'));
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken, fetchImpl: fn, tokenManager: { withAuth } });
+    await client.fetchJson('GET', '/a');
+    expect(withAuth).toHaveBeenCalledOnce();
+    expect(getToken).not.toHaveBeenCalled();
+    expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBe('Bearer TM-TOKEN');
+  });
+
+  it('still applies the 429 retry around tokenManager mode', async () => {
+    const { fn } = stubFetch([jsonResponse({}, 429), jsonResponse({ ok: true })]);
+    const withAuth = vi.fn((call: (t: string) => Promise<Response>) => call('TM'));
+    const sleep = vi.fn(async () => {});
+    const client = createApiClient({ baseUrl: 'https://x.test', fetchImpl: fn, tokenManager: { withAuth }, sleep });
+    await client.fetchJson('GET', '/a');
+    expect(withAuth).toHaveBeenCalledTimes(2); // 429 → retry replays through withAuth
+    expect(sleep).toHaveBeenCalledOnce();
+  });
+
   it('appends query params', async () => {
     const { fn, calls } = stubFetch([jsonResponse({})]);
     const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn });
