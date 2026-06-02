@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/chrischall/mcp-utils/compare/v0.2.1...v0.3.0) (2026-06-02)
+
+
+### Features
+
+* **http:** multipart, reactive tokenManager, and baseHeaders in createApiClient ([#6](https://github.com/chrischall/mcp-utils/issues/6)) ([86ee3f6](https://github.com/chrischall/mcp-utils/commit/86ee3f6e799ed83f7076d66f5f092e7533a50b74))
+
 ## [0.2.1](https://github.com/chrischall/mcp-utils/compare/v0.2.0...v0.2.1) (2026-06-01)
 
 
