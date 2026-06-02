@@ -32,6 +32,19 @@ export interface RetryPolicy {
 }
 
 /** Options for {@link createApiClient}. */
+/**
+ * Minimal structural view of a reactive bearer-token source (e.g. the
+ * `TokenManager` from `@chrischall/mcp-utils/session`). Kept structural so the
+ * core `http` module stays decoupled from the optional `session` module.
+ */
+export interface ReactiveTokenSource {
+  /**
+   * Run `call` with a valid access token, refreshing proactively and replaying
+   * once on a 401. Returns the final `Response`.
+   */
+  withAuth(call: (accessToken: string) => Promise<Response>): Promise<Response>;
+}
+
 export interface ApiClientOptions {
   /** Absolute base URL; request paths are appended verbatim. A trailing slash is trimmed. */
   baseUrl: string;
@@ -39,8 +52,20 @@ export interface ApiClientOptions {
    * Resolve the current bearer token. Called per request so the caller can
    * refresh/rotate transparently. May be sync or async. Return `undefined`/`''`
    * to send no `Authorization` header (e.g. cookie-authenticated APIs).
+   * Optional when {@link ApiClientOptions.tokenManager} is provided.
    */
-  getToken: () => string | undefined | Promise<string | undefined>;
+  getToken?: () => string | undefined | Promise<string | undefined>;
+  /**
+   * A reactive token source (e.g. `TokenManager`). When set, every request is
+   * routed through {@link ReactiveTokenSource.withAuth} — proactive refresh +
+   * one reactive 401-replay — instead of {@link ApiClientOptions.getToken}.
+   */
+  tokenManager?: ReactiveTokenSource;
+  /**
+   * Default headers sent on every request (e.g. an API-version or client-id
+   * header). A per-request `headers` entry of the same name overrides them.
+   */
+  baseHeaders?: Record<string, string>;
   /**
    * 429 retry policy. Defaults to `{ count: 1, delayMs: 2000 }` — the
    * fleet-wide "retry once after 2s" behavior. Set `count: 0` to disable.
@@ -148,28 +173,38 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   const rateLimited = (): Error => (opts.onRateLimited ? opts.onRateLimited() : new RateLimitedError(service));
 
   async function send(method: string, path: string, opt: RequestOptions): Promise<Response> {
-    const token = await opts.getToken();
     // formData wins over a JSON body; it's sent verbatim so fetch sets the boundary.
     const isMultipart = opt.formData !== undefined;
     const hasJsonBody = !isMultipart && opt.body !== undefined;
     const reqBody: FormData | string | undefined = isMultipart ? opt.formData : hasJsonBody ? JSON.stringify(opt.body) : undefined;
-    const headers: Record<string, string> = {
-      Accept: 'application/json',
-      ...(hasJsonBody ? { 'Content-Type': 'application/json' } : {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...opt.headers,
-    };
     const query = opt.query ? buildQueryString(opt.query) : '';
     const url = `${base}${path}${query}`;
+    const bodyInit = reqBody !== undefined ? { body: reqBody } : {};
+
+    // One fetch with the given token; Authorization comes last from the auth
+    // mechanism, then per-request headers can still override it if needed.
+    const fetchWith = (token: string | undefined): Promise<Response> =>
+      doFetch(url, {
+        method,
+        headers: {
+          Accept: 'application/json',
+          ...(hasJsonBody ? { 'Content-Type': 'application/json' } : {}),
+          ...opts.baseHeaders,
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...opt.headers,
+        },
+        ...bodyInit,
+      });
+
+    // tokenManager (reactive refresh + 401-replay) takes precedence over getToken.
+    const once = opts.tokenManager
+      ? (): Promise<Response> => opts.tokenManager!.withAuth(fetchWith)
+      : async (): Promise<Response> => fetchWith((await opts.getToken?.()) || undefined);
 
     let attempt = 0;
     // attempt 0 is the initial request; up to `retry.count` further attempts on 429.
     for (;;) {
-      const res = await doFetch(url, {
-        method,
-        headers,
-        ...(reqBody !== undefined ? { body: reqBody } : {}),
-      });
+      const res = await once();
 
       if (res.status === 429 && attempt < retry.count) {
         attempt += 1;
