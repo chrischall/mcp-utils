@@ -69,4 +69,8 @@ describe('readFileHead', () => {
     expect(head).toEqual(Buffer.from('AB'));
     expect(head.length).toBe(2);
   });
+
+  it('throws the same clean error as fileBlob for a missing file', async () => {
+    await expect(readFileHead('/no/such/file.bin', 16)).rejects.toThrow(/^Cannot read file: /);
+  });
 });

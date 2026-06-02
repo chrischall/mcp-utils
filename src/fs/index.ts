@@ -10,7 +10,7 @@
 // ────────────────────────────────────────────────────────────────────────────
 
 import { openAsBlob } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { open, type FileHandle } from 'node:fs/promises';
 
 /** Options for {@link fileBlob}. */
 export interface FileBlobOptions {
@@ -51,7 +51,14 @@ export async function fileBlob(path: string, opts: FileBlobOptions = {}): Promis
  * as many bytes as were actually read (a short file yields a short buffer).
  */
 export async function readFileHead(path: string, bytes: number): Promise<Buffer> {
-  const fh = await open(path, 'r');
+  // Wrap the open like `fileBlob` does, so a missing file yields the same clean,
+  // non-leaking message instead of a raw Node ENOENT (path + stack).
+  let fh: FileHandle;
+  try {
+    fh = await open(path, 'r');
+  } catch {
+    throw new Error(`Cannot read file: ${path}`);
+  }
   try {
     const buf = Buffer.alloc(bytes);
     const { bytesRead } = await fh.read(buf, 0, bytes, 0);
