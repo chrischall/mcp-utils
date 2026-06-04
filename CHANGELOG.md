@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0](https://github.com/chrischall/mcp-utils/compare/v0.4.0...v0.5.0) (2026-06-04)
+
+
+### Features
+
+* adopt [@fetchproxy](https://github.com/fetchproxy) 1.0.0 (captureHeaders { host, path?, headerName }) ([#18](https://github.com/chrischall/mcp-utils/issues/18)) ([45f6c4c](https://github.com/chrischall/mcp-utils/commit/45f6c4cd1ae80a6778b3d819b48ff235113e39be))
+
+
+### Documentation
+
+* **skill:** add auto-merge orphan gotcha + recover the private-repo provenance one ([#16](https://github.com/chrischall/mcp-utils/issues/16)) ([79fe6e8](https://github.com/chrischall/mcp-utils/commit/79fe6e81ad9e1634b30e6f3ba7eab2691f45f793))
+* **skill:** capture fetchproxy lessons from the musescore-mcp build ([#15](https://github.com/chrischall/mcp-utils/issues/15)) ([66094d0](https://github.com/chrischall/mcp-utils/commit/66094d0ff6e548509edcafa6f5a29baf5f92aa52))
+* **skill:** teach conventions + full git/release-please bootstrap ([#12](https://github.com/chrischall/mcp-utils/issues/12)) ([d0235c5](https://github.com/chrischall/mcp-utils/commit/d0235c514efb69101a94fc286edfa710221e2158))
+
 ## [0.4.0](https://github.com/chrischall/mcp-utils/compare/v0.3.0...v0.4.0) (2026-06-02)
 
 
