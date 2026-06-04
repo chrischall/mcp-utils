@@ -217,14 +217,14 @@ describe('createBootstrapOpts', () => {
       storageDomain: 'portal.onehome.com',
       bootstrap: {
         captureHeaders: [
-          { urlPattern: 'https://portal.onehome.com/api/graphql*', headerName: 'Authorization' },
+          { host: 'portal.onehome.com', path: '/api/graphql*', headerName: 'Authorization' },
         ],
       },
     });
     expect(opts.domains).toEqual(['onehome.com']);
     expect(opts.capabilities).toContain('capture_request_header');
     expect(opts.captureHeaders).toEqual([
-      { urlPattern: 'https://portal.onehome.com/api/graphql*', headerName: 'Authorization' },
+      { host: 'portal.onehome.com', path: '/api/graphql*', headerName: 'Authorization' },
     ]);
   });
 
@@ -252,8 +252,8 @@ describe('createBootstrapOpts', () => {
       domains: ['resy.com'],
       bootstrap: {
         captureHeaders: [
-          { urlPattern: 'https://resy.com/a*', headerName: 'Authorization' },
-          { urlPattern: 'https://resy.com/b*', headerName: 'X-Resy-Auth-Token' },
+          { host: 'resy.com', path: '/a*', headerName: 'Authorization' },
+          { host: 'resy.com', path: '/b*', headerName: 'X-Resy-Auth-Token' },
         ],
       },
     });
@@ -271,7 +271,7 @@ describe('createBootstrapOpts', () => {
       storageDomain: 'portal.onehome.com',
       bootstrap: {
         captureHeaders: [
-          { urlPattern: 'https://portal.onehome.com/graphql*', headerName: 'Authorization' },
+          { host: 'portal.onehome.com', path: '/graphql*', headerName: 'Authorization' },
         ],
       },
     });

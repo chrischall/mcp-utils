@@ -241,7 +241,7 @@ export interface BootstrapDecls {
   localStoragePointers?: StoragePointerDecl[];
   /** JSON-pointer extractions over sessionStorage values (implies `read_session_storage`). */
   sessionStoragePointers?: StoragePointerDecl[];
-  /** `capture_request_header`: (urlPattern, headerName) pairs to snapshot. */
+  /** `capture_request_header`: (host, path?, headerName) decls to snapshot. */
   captureHeaders?: CaptureHeaderDecl[];
   /** `read_indexed_db`: declared IndexedDB scopes. */
   indexedDbScopes?: IndexedDbScopeDecl[];
@@ -284,7 +284,7 @@ function nonEmpty<T>(arr: T[] | undefined): arr is T[] {
  * const opts = createBootstrapOpts({
  *   domains: 'onehome.com',
  *   storageDomain: 'portal.onehome.com',
- *   bootstrap: { captureHeaders: [{ urlPattern: 'https://portal.onehome.com/graphql*', headerName: 'Authorization' }] },
+ *   bootstrap: { captureHeaders: [{ host: 'portal.onehome.com', path: '/graphql*', headerName: 'Authorization' }] },
  * });
  * createFetchproxyTransport({ ...opts, serverName: 'onehome-mcp', version });
  */
