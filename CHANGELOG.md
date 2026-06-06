@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/chrischall/mcp-utils/compare/v0.5.1...v0.5.2) (2026-06-06)
+
+
+### Documentation
+
+* **fleet-skill:** codify auth preference order (minimize fetchproxy) ([#21](https://github.com/chrischall/mcp-utils/issues/21)) ([f8b611e](https://github.com/chrischall/mcp-utils/commit/f8b611efbed6658624e905f3fb2ae95a8f0ff29c))
+
 ## [0.5.1](https://github.com/chrischall/mcp-utils/compare/v0.5.0...v0.5.1) (2026-06-06)
 
 
