@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/chrischall/mcp-utils/compare/v0.5.0...v0.5.1) (2026-06-06)
+
+
+### Documentation
+
+* **fleet-skill:** add cookie-session archetype + lessons from artsonia-mcp ([#19](https://github.com/chrischall/mcp-utils/issues/19)) ([3bcee90](https://github.com/chrischall/mcp-utils/commit/3bcee90ea1c9ba8fd93c59c6019d0b1223e17178))
+
 ## [0.5.0](https://github.com/chrischall/mcp-utils/compare/v0.4.0...v0.5.0) (2026-06-04)
 
 
