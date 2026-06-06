@@ -67,9 +67,18 @@ await runMcp({
 
 ## Archetypes
 
+**Auth preference order — avoid requiring the browser bridge at runtime.** fetchproxy needs the Transporter extension + a signed-in tab, so it's the heaviest thing to ask of a user. Pick the FIRST that authenticates cleanly, and even then keep the bridge off the hot path:
+
+1. **username/password in `.env`** — a real server-side login (the cookie-session archetype below; or a bearer/token if the API offers one). No browser, no extension. Always try this first.
+2. **fetchproxy *bootstrap*** — use the bridge ONCE to capture auth from the signed-in tab (its session cookie / storage, via `createBootstrapOpts({ bootstrap: { cookieKeys: [...] } })` → the `read_cookies`/`read_local_storage` capabilities), then make every actual request with plain node `fetch` carrying that cookie. The bridge touches only the handshake, not the workload.
+3. **full-on fetchproxy** — every request routed through the signed-in tab. Only when the site can't be reached server-side at all (a hard bot-wall on every endpoint).
+4. **other** — if none of the above authenticate cleanly, propose changes (to `@fetchproxy/server` / the bridge, or a different capture) to get a working *minimal-bridge* auth; don't silently settle for full-on fetchproxy.
+
+**Whichever you land on, use node `fetch`/GET for everything the bridge isn't strictly needed for** — route only the unavoidable calls (auth, or specific walled endpoints) through fetchproxy and node-fetch the rest. Don't reach for fetchproxy just because a sibling did; reach for it only when server-side auth/fetch genuinely fails.
+
 - **bearer / direct API** (splitwise, tempo, ioffice, app-store-connect, skylight): `client.ts` does `fetch` with a bearer/token header. Use `createApiClient` if it fits; always route error bodies through `formatApiError`/`truncateErrorMessage`. No fetchproxy.
 - **cookie-session / username+password** (artsonia; many school/portal sites): a classic server-rendered `.asp`/`.php` site — no public API, no JSON store, no bot-wall — that accepts a real **username/password form POST** and hands back an **HttpOnly session cookie**. No browser bridge needed. `src/auth.ts` posts the login form and captures all `Set-Cookie`s into a cookie jar (use `parseCookieJar`); `src/client.ts` fetches with the jar over plain node `fetch` (`redirect: 'manual'` on the login POST so the 302's `Set-Cookie` is readable). Detect session expiry by a redirect back to the login page → **single-flight re-login** (one shared in-flight promise, à la `TokenManager`). Deferred-config reads `<SVC>_USERNAME`/`<SVC>_PASSWORD`. Parse the server-rendered HTML with `node-html-parser`. Keep `@fetchproxy/server` only as an OPTIONAL, env-selected fallback — not the default. See the **cookie-session / classic-form specifics** below.
-- **fetchproxy / browser-bridge** (realty cohort, reservations, finance, school): the site has no public API, so requests go through a signed-in browser tab via `@fetchproxy/server`. `src/transport-fetchproxy.ts` wraps it; session tools expose/select accounts. Use `@chrischall/mcp-utils/fetchproxy` **only on `@fetchproxy/server` >= 0.11** (it re-exports 0.11+ APIs). Repos on older pins keep their own transport until a deliberate bump.
+- **fetchproxy / browser-bridge** (realty cohort, reservations, finance, school): the site has no public API AND can't be authed/fetched server-side (try options 1–2 above first), so requests go through a signed-in browser tab via `@fetchproxy/server`. `src/transport-fetchproxy.ts` wraps it; session tools expose/select accounts. Use `@chrischall/mcp-utils/fetchproxy` **only on `@fetchproxy/server` >= 0.11** (it re-exports 0.11+ APIs). Repos on older pins keep their own transport until a deliberate bump. Even here, node-fetch any endpoint that doesn't actually need the bridge.
 
 ### fetchproxy specifics (hard-won — each was a real failure in the musescore-mcp build)
 
