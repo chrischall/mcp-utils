@@ -107,6 +107,7 @@ await runMcp({
 - **Results:** `textResult(data)` for everything; errors via the typed `McpToolError` subclasses with an actionable `hint`.
 - **Secrets:** `.env` gitignored; throwaway-test writes go only to blackholed addresses (`@example.com`); only the user's own account/data.
 - **Never merge PRs or add `ready-to-merge` yourself.** Squash-merge is the default; `pr-auto-review` + `auto-merge` ship it. On a `warn`/`fail` verdict, surface the findings and ask — don't override.
+- **Describe what it does, neutrally.** Public descriptions (`marketplace.json` `metadata.description`, `server.json`, the GitHub repo About) state the *mechanism* — e.g. "routes through the user's signed-in `<site>` tab via the fetchproxy bridge, reusing their authenticated session" — not bot-evasion framing ("to dodge bot detection"). Same factual tone as CLAUDE.md's "every request rides the user's own browser session."
 
 ## Repo bootstrap — git, labels, release-please
 
@@ -117,6 +118,8 @@ A new fleet repo isn't done until ALL of this exists. Each line below was a real
 **Labels** — per-repo (`chrischall` is a *User* account: no org-wide labels/secrets). Create `auto-review`, `ready-to-merge`, `review-with-opus`, `autorelease: pending`, `autorelease: tagged`, plus dependabot categories (`ci`, `security`, `test`, `javascript`, `github_actions`, `ignore-for-release`). Missing `auto-review`/`ready-to-merge` → pr-auto-review's first step (`gh pr edit --add-label auto-review`) errors and arming can't happen.
 
 **Branch protection** — two rulesets on `~DEFAULT_BRANCH` (personal account uses rulesets, not classic protection): (1) block `deletion` + `non_fast_forward`; (2) require a PR + the `ci` required status check.
+
+**Repo setting: Allow auto-merge** — turn it on (`gh api -X PATCH repos/chrischall/<repo> -F allow_auto_merge=true`). This is separate from the workflow and the ruleset, and easy to miss: with it OFF, `auto-merge.yml`'s `gh pr merge --auto` silently fails to arm, so Dependabot / `ready-to-merge` PRs sit OPEN forever even with green CI. The workflow + `RELEASE_PAT` + `ci` ruleset are all necessary but NOT sufficient without this toggle. (Check the fleet: `gh api repos/chrischall/<repo> --jq .allow_auto_merge`.)
 
 **Secrets** — per-repo, set by the **human** (an agent must never set credential values): `CLAUDE_CODE_OAUTH_TOKEN` (review), `RELEASE_PAT` (release-please + the auto-merge/arm step — a `GITHUB_TOKEN`-added label won't fire downstream workflows), optional `CLAWHUB_TOKEN`; plus npm **trusted publishing** for the `--provenance` publish.
 
