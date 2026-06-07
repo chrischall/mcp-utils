@@ -31,4 +31,9 @@ describe('isoToCompactTimestamp', () => {
   it('passes an already-compact 14-digit value through', () => {
     expect(isoToCompactTimestamp('20250131143000')).toBe('20250131143000');
   });
+  it('passes timezone-aware / sub-second inputs through untouched (no silent offset loss)', () => {
+    expect(isoToCompactTimestamp('2025-01-31T14:30:00Z')).toBe('2025-01-31T14:30:00Z');
+    expect(isoToCompactTimestamp('2025-01-31T14:30:00+05:30')).toBe('2025-01-31T14:30:00+05:30');
+    expect(isoToCompactTimestamp('2025-01-31T14:30:00.806')).toBe('2025-01-31T14:30:00.806');
+  });
 });

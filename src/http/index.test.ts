@@ -536,4 +536,18 @@ describe('createApiClient timeout', () => {
     const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl, timeout: 5000 });
     await expect(client.fetchJson('GET', '/a')).rejects.toThrow('network boom');
   });
+
+  it('threads the AbortSignal through tokenManager.withAuth', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const withAuth = (call: (t: string) => Promise<Response>) => call('TM-TOKEN');
+    const client = createApiClient({
+      baseUrl: 'https://x.test',
+      fetchImpl: fn,
+      tokenManager: { withAuth },
+      timeout: 5000,
+    });
+    await client.fetchJson('GET', '/a');
+    expect((calls[0]!.init as { signal?: unknown }).signal).toBeInstanceOf(AbortSignal);
+    expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBe('Bearer TM-TOKEN');
+  });
 });

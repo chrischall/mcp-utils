@@ -7,9 +7,15 @@
  * `deepMapStringField(data, 'eventDate', dmyToIso)`.
  */
 
+// These are pure *lexical* reformats — no Date/Intl on purpose. `new Date('2025-08-28')`
+// parses as UTC midnight, so reading it back with local getters shifts the day in any
+// behind-UTC zone (the classic date-only off-by-one), and Intl can't emit dd-MM-yyyy /
+// yyyyMMddHHmmss anyway. Reformatting the digits is timezone-safe and dependency-free.
+// Inputs that don't match a known shape (incl. timezone-aware ones) pass through; we don't
+// validate the calendar — the upstream API is the source of truth for that.
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const DMY_DATE = /^(\d{2})-(\d{2})-(\d{4})$/;
-const ISO_DATETIME = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/;
+const ISO_DATETIME = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/;
 
 /** ISO `yyyy-MM-dd` → `dd-MM-yyyy`. Non-ISO input is trimmed and passed through. */
 export function isoToDmy(date: string): string {
