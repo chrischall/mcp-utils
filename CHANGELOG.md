@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/chrischall/mcp-utils/compare/v0.5.3...v0.6.0) (2026-06-07)
+
+
+### Features
+
+* add request timeout to createApiClient and date-format helpers ([#25](https://github.com/chrischall/mcp-utils/issues/25)) ([ae0ec11](https://github.com/chrischall/mcp-utils/commit/ae0ec113b01269517de32ae4fde053b3703f232f))
+
 ## [0.5.3](https://github.com/chrischall/mcp-utils/compare/v0.5.2...v0.5.3) (2026-06-07)
 
 
