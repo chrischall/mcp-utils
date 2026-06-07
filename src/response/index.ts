@@ -60,3 +60,24 @@ export function flattenJsonApi(payload: unknown): unknown {
   if (Array.isArray(data)) return data.map(flattenOne);
   return flattenOne(data);
 }
+
+/**
+ * Recursively rewrite every occurrence of a named **string** field in a parsed
+ * JSON value, in place, returning the same value. Non-string values of that key
+ * and all other keys are left untouched. Handy for normalizing a date/format
+ * field out of an API response, e.g.
+ * `deepMapStringField(data, 'eventDate', dmyToIso)`.
+ */
+export function deepMapStringField<T>(value: T, field: string, map: (v: string) => string): T {
+  if (Array.isArray(value)) {
+    for (const item of value) deepMapStringField(item, field, map);
+  } else if (value !== null && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    for (const key of Object.keys(obj)) {
+      const v = obj[key];
+      if (key === field && typeof v === 'string') obj[key] = map(v);
+      else deepMapStringField(v, field, map);
+    }
+  }
+  return value;
+}

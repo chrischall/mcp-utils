@@ -90,6 +90,13 @@ export interface ApiClientOptions {
   fetchImpl?: typeof fetch;
   /** Injectable sleep (for tests). Defaults to `setTimeout`. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Per-attempt request timeout in milliseconds. When set (> 0), each fetch is
+   * bounded by an {@link AbortController}; on expiry it throws a
+   * {@link RequestTimeoutError} instead of hanging until the host kills the
+   * tool call. A 429 retry gets a fresh timeout. Omit/0 to disable (default).
+   */
+  timeout?: number;
 }
 
 /** A request body and/or extra headers for a single call. */
@@ -144,6 +151,17 @@ export class RateLimitedError extends Error {
   }
 }
 
+/** Thrown when a request exceeds {@link ApiClientOptions.timeout}. */
+export class RequestTimeoutError extends Error {
+  readonly timeoutMs: number;
+  constructor(service: string, timeoutMs: number) {
+    super(`Request to ${service} timed out after ${timeoutMs}ms.`);
+    this.name = 'RequestTimeoutError';
+    this.timeoutMs = timeoutMs;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 function hostOf(baseUrl: string): string {
   try {
     return new URL(baseUrl).host;
@@ -171,6 +189,21 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   const sleep = opts.sleep ?? defaultSleep;
   const unauthorized = (): Error => (opts.onUnauthorized ? opts.onUnauthorized() : new UnauthorizedError(service));
   const rateLimited = (): Error => (opts.onRateLimited ? opts.onRateLimited() : new RateLimitedError(service));
+  const timeoutMs = opts.timeout;
+
+  // Bound `run` with an AbortController when a timeout is configured, mapping the
+  // abort to a RequestTimeoutError. No timeout → run as-is (no signal).
+  function withTimeout(run: (signal?: AbortSignal) => Promise<Response>): Promise<Response> {
+    if (timeoutMs == null || timeoutMs <= 0) return run(undefined);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    return run(controller.signal)
+      .catch((err: unknown) => {
+        if (err instanceof Error && err.name === 'AbortError') throw new RequestTimeoutError(service, timeoutMs);
+        throw err;
+      })
+      .finally(() => clearTimeout(timer));
+  }
 
   async function send(method: string, path: string, opt: RequestOptions): Promise<Response> {
     // formData wins over a JSON body; it's sent verbatim so fetch sets the boundary.
@@ -183,7 +216,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
 
     // One fetch with the given token; Authorization comes last from the auth
     // mechanism, then per-request headers can still override it if needed.
-    const fetchWith = (token: string | undefined): Promise<Response> =>
+    const fetchWith = (token: string | undefined, signal?: AbortSignal): Promise<Response> =>
       doFetch(url, {
         method,
         headers: {
@@ -193,13 +226,19 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
           ...opt.headers,
         },
+        ...(signal ? { signal } : {}),
         ...bodyInit,
       });
 
     // tokenManager (reactive refresh + 401-replay) takes precedence over getToken.
-    const once = opts.tokenManager
-      ? (): Promise<Response> => opts.tokenManager!.withAuth(fetchWith)
-      : async (): Promise<Response> => fetchWith((await opts.getToken?.()) || undefined);
+    // Each attempt is wrapped by withTimeout, so the abort signal reaches fetch
+    // through whichever auth path is in play.
+    const once = (): Promise<Response> =>
+      withTimeout((signal) =>
+        opts.tokenManager
+          ? opts.tokenManager.withAuth((token) => fetchWith(token, signal))
+          : (async () => fetchWith((await opts.getToken?.()) || undefined, signal))(),
+      );
 
     let attempt = 0;
     // attempt 0 is the initial request; up to `retry.count` further attempts on 429.

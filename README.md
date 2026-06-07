@@ -65,14 +65,17 @@ the server instance without connecting a transport.
 ### `response` — tool-result formatting
 
 `textResult` / `jsonResult` (alias), `rawTextResult`, `imageResult`,
-`errorResult`, `flattenJsonApi`.
+`errorResult`, `flattenJsonApi`, `deepMapStringField`.
 
 ```ts
-import { textResult, errorResult, flattenJsonApi } from '@chrischall/mcp-utils';
+import { textResult, errorResult, flattenJsonApi, deepMapStringField } from '@chrischall/mcp-utils';
 
 return textResult({ items });                 // pretty-printed JSON
 return errorResult('not found');              // { isError: true }
 return textResult(flattenJsonApi(payload));   // collapse JSON:API envelopes
+
+// Rewrite a string field throughout a response (e.g. normalize a date format):
+deepMapStringField(payload, 'eventDate', dmyToIso);
 ```
 
 ### `errors` — helpful errors
@@ -140,7 +143,7 @@ constant memory instead of a 20 MB Buffer.
 `createApiClient` plus building blocks: `buildQueryString`, `buildOptionalBody`,
 `formatApiError`, `parseLinkHeader`, `parseCookieJar`, JWT helpers
 (`decodeJwtExp`, `decodeJwtSessionId`, `validateJwtExpiry`), and the
-`UnauthorizedError` / `RateLimitedError` classes.
+`UnauthorizedError` / `RateLimitedError` / `RequestTimeoutError` classes.
 
 ```ts
 import { createApiClient } from '@chrischall/mcp-utils';
@@ -150,9 +153,28 @@ const api = createApiClient({
   getToken: () => store.currentToken(),  // resolved per-request; sync or async
   serviceName: 'Example',
   retry: { count: 1, delayMs: 2000 },    // fleet-wide "retry once after 2s" default
+  timeout: 15_000,                        // abort a hung request, throw RequestTimeoutError
 });
 
 const data = await api.get('/v1/things', { query: { page: 2 } });
+```
+
+`timeout` (ms) bounds each attempt with an `AbortController`; on expiry it throws
+`RequestTimeoutError` instead of hanging the tool call. A 429 retry gets a fresh
+timeout. Omit it to keep the previous unbounded behavior.
+
+### `dates` — date-format converters
+
+`isoToDmy`, `dmyToIso`, `isoToCompactTimestamp`. For upstreams that don't speak
+ISO 8601, so a server can keep its surface ISO (`yyyy-MM-dd`) and translate at
+the API boundary. Pair with `deepMapStringField` to normalize a date field
+across a whole response.
+
+```ts
+import { dmyToIso, isoToDmy, deepMapStringField } from '@chrischall/mcp-utils';
+
+const apiDate = isoToDmy('2025-08-28');                 // '28-08-2025' (request)
+deepMapStringField(payload, 'eventDate', dmyToIso);     // '28-08-2025' → '2025-08-28' (response)
 ```
 
 ### `zod` — schema atoms
