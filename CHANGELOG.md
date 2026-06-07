@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.3](https://github.com/chrischall/mcp-utils/compare/v0.5.2...v0.5.3) (2026-06-07)
+
+
+### Documentation
+
+* **skill:** add allow_auto_merge repo setting + neutral-description convention ([#23](https://github.com/chrischall/mcp-utils/issues/23)) ([0b92e75](https://github.com/chrischall/mcp-utils/commit/0b92e753702cc8702a7966f653f6c40d55fddded))
+
 ## [0.5.2](https://github.com/chrischall/mcp-utils/compare/v0.5.1...v0.5.2) (2026-06-06)
 
 
