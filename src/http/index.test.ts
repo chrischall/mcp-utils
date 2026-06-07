@@ -11,6 +11,7 @@ import {
   validateJwtExpiry,
   UnauthorizedError,
   RateLimitedError,
+  RequestTimeoutError,
 } from './index.js';
 
 // --- helpers ---------------------------------------------------------------
@@ -493,5 +494,60 @@ describe('validateJwtExpiry', () => {
     expect(r.expired).toBe(true);
     expect(r.expiresIn).toBeUndefined();
     expect(r.warning).toBeTruthy();
+  });
+});
+
+describe('createApiClient timeout', () => {
+  it('throws RequestTimeoutError when a request exceeds the timeout', async () => {
+    vi.useFakeTimers();
+    const fetchImpl = ((_url: string, init: { signal: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => {
+          const e = new Error('aborted');
+          (e as { name: string }).name = 'AbortError';
+          reject(e);
+        });
+      })) as unknown as typeof fetch;
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl, timeout: 5000 });
+
+    const p = client.fetchJson('GET', '/a');
+    const assertion = expect(p).rejects.toBeInstanceOf(RequestTimeoutError);
+    await vi.advanceTimersByTimeAsync(5000);
+    await assertion;
+    vi.useRealTimers();
+  });
+
+  it('passes an AbortSignal to fetch when a timeout is set', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn, timeout: 5000 });
+    await client.fetchJson('GET', '/a');
+    expect((calls[0]!.init as { signal?: unknown }).signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('sets no signal when no timeout is configured', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn });
+    await client.fetchJson('GET', '/a');
+    expect((calls[0]!.init as { signal?: unknown }).signal).toBeUndefined();
+  });
+
+  it('passes a non-abort fetch error through unchanged', async () => {
+    const fetchImpl = (() => Promise.reject(new Error('network boom'))) as unknown as typeof fetch;
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl, timeout: 5000 });
+    await expect(client.fetchJson('GET', '/a')).rejects.toThrow('network boom');
+  });
+
+  it('threads the AbortSignal through tokenManager.withAuth', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const withAuth = (call: (t: string) => Promise<Response>) => call('TM-TOKEN');
+    const client = createApiClient({
+      baseUrl: 'https://x.test',
+      fetchImpl: fn,
+      tokenManager: { withAuth },
+      timeout: 5000,
+    });
+    await client.fetchJson('GET', '/a');
+    expect((calls[0]!.init as { signal?: unknown }).signal).toBeInstanceOf(AbortSignal);
+    expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBe('Bearer TM-TOKEN');
   });
 });

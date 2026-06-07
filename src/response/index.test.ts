@@ -6,6 +6,7 @@ import {
   imageResult,
   errorResult,
   flattenJsonApi,
+  deepMapStringField,
 } from './index.js';
 
 describe('textResult', () => {
@@ -64,5 +65,26 @@ describe('flattenJsonApi', () => {
 
   it('passes through primitives', () => {
     expect(flattenJsonApi('x')).toBe('x');
+  });
+});
+
+describe('deepMapStringField', () => {
+  it('rewrites the named string field at any depth, leaving other data alone', () => {
+    const input = {
+      total: 1,
+      list: [{ id: 'a', d: '28-08-2025', nested: { d: '01-02-2020', keep: 7 } }],
+      d: 5, // non-string value of the target key is left untouched
+    };
+    const out = deepMapStringField(input, 'd', (v) => `<${v}>`);
+    expect(out.list[0].d).toBe('<28-08-2025>');
+    expect(out.list[0].nested.d).toBe('<01-02-2020>');
+    expect(out.list[0].nested.keep).toBe(7);
+    expect(out.d).toBe(5);
+    expect(out.total).toBe(1);
+  });
+
+  it('returns primitives and undefined unchanged', () => {
+    expect(deepMapStringField('x', 'd', (v) => v + '!')).toBe('x');
+    expect(deepMapStringField(undefined, 'd', (v) => v)).toBeUndefined();
   });
 });
