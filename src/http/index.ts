@@ -19,16 +19,25 @@
 
 import { truncateErrorMessage } from '../errors/index.js';
 
+export * from './throttle.js';
+
 // ---------------------------------------------------------------------------
 // createApiClient
 // ---------------------------------------------------------------------------
 
-/** Retry policy for transient (HTTP 429) responses. */
+/** Retry policy for transient responses (HTTP 429 by default). */
 export interface RetryPolicy {
   /** Number of retries after the initial attempt. The fleet default is 1. */
   count: number;
   /** Delay before each retry, in milliseconds. The fleet default is 2000. */
   delayMs: number;
+  /**
+   * Statuses that trigger a retry. Defaults to `[429]` — the historical
+   * fleet-wide behavior. Add transient 5xx codes (e.g. `[429, 500, 502, 503,
+   * 504]`) for upstreams that flake; an exhausted non-429 retried status
+   * surfaces through the normal non-2xx path (an {@link ApiError}).
+   */
+  statuses?: number[];
 }
 
 /** Options for {@link createApiClient}. */
@@ -55,6 +64,16 @@ export interface ApiClientOptions {
    * Optional when {@link ApiClientOptions.tokenManager} is provided.
    */
   getToken?: () => string | undefined | Promise<string | undefined>;
+  /**
+   * Send the token in this named request header instead of
+   * `Authorization: Bearer <token>`. The raw token is sent verbatim — no
+   * `Bearer ` prefix (e.g. `tokenHeader: 'x-goog-api-key'` /
+   * `'x-auth-token'` / `'x-api-key'`). Unset keeps the default
+   * `Authorization: Bearer` behavior. Applies to both
+   * {@link ApiClientOptions.getToken} and
+   * {@link ApiClientOptions.tokenManager} tokens.
+   */
+  tokenHeader?: string;
   /**
    * A reactive token source (e.g. `TokenManager`). When set, every request is
    * routed through {@link ReactiveTokenSource.withAuth} — proactive refresh +
@@ -162,6 +181,25 @@ export class RequestTimeoutError extends Error {
   }
 }
 
+/**
+ * Thrown by {@link ApiClient.fetchJson} / {@link ApiClient.fetchHtml} for a
+ * non-2xx response that isn't a 401/429 (those map to
+ * {@link UnauthorizedError} / {@link RateLimitedError}). The message is exactly
+ * the redacted, truncated {@link formatApiError} string the client has always
+ * thrown — this class only adds the `status` so callers can branch
+ * (`err instanceof ApiError && err.status === 404`) instead of regexing the
+ * message.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 function hostOf(baseUrl: string): string {
   try {
     return new URL(baseUrl).host;
@@ -189,7 +227,13 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   const sleep = opts.sleep ?? defaultSleep;
   const unauthorized = (): Error => (opts.onUnauthorized ? opts.onUnauthorized() : new UnauthorizedError(service));
   const rateLimited = (): Error => (opts.onRateLimited ? opts.onRateLimited() : new RateLimitedError(service));
+  const retryStatuses = retry.statuses ?? [429];
   const timeoutMs = opts.timeout;
+
+  // Default: `Authorization: Bearer <token>`. With `tokenHeader`, the raw
+  // token goes in that named header instead (no `Bearer ` prefix).
+  const authHeader = (token: string | undefined): Record<string, string> =>
+    !token ? {} : opts.tokenHeader ? { [opts.tokenHeader]: token } : { Authorization: `Bearer ${token}` };
 
   // Bound `run` with an AbortController when a timeout is configured, mapping the
   // abort to a RequestTimeoutError. No timeout → run as-is (no signal).
@@ -223,7 +267,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
           Accept: 'application/json',
           ...(hasJsonBody ? { 'Content-Type': 'application/json' } : {}),
           ...opts.baseHeaders,
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...authHeader(token || undefined),
           ...opt.headers,
         },
         ...(signal ? { signal } : {}),
@@ -245,7 +289,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     for (;;) {
       const res = await once();
 
-      if (res.status === 429 && attempt < retry.count) {
+      if (retryStatuses.includes(res.status) && attempt < retry.count) {
         attempt += 1;
         await sleep(retry.delayMs);
         continue;
@@ -263,7 +307,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
 
     const text = await res.text();
     if (!res.ok) {
-      throw new Error(formatApiError(res.status, method, path, text, { service }));
+      throw new ApiError(res.status, formatApiError(res.status, method, path, text, { service }));
     }
     if (text.length === 0) return undefined as T;
     return JSON.parse(text) as T;
@@ -278,7 +322,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
 
     const text = await res.text();
     if (!res.ok) {
-      throw new Error(formatApiError(res.status, method, path, text, { service }));
+      throw new ApiError(res.status, formatApiError(res.status, method, path, text, { service }));
     }
     return text;
   }
@@ -412,16 +456,51 @@ export function parseLinkHeader(header: string | null | undefined): ParsedLinkHe
 // parseCookieJar
 // ---------------------------------------------------------------------------
 
-/** A parsed Set-Cookie jar: deduplicated name→value plus a ready `Cookie` header. */
-export interface CookieJar {
+/**
+ * A parsed Set-Cookie jar: deduplicated name→value plus a ready `Cookie`
+ * header. (Renamed from `CookieJar` to free that name for the stateful
+ * {@link CookieJar} class; no fleet consumer imported the type.)
+ */
+export interface ParsedCookieJar {
   /** Surviving cookies, name → value (last value wins, deletions removed). */
   cookies: Record<string, string>;
   /** Pre-joined `name=value; name2=value2` string for the `Cookie` request header. */
   cookieHeader: string;
 }
 
-const MAX_AGE_ZERO_RE = /(?:^|;)\s*Max-Age\s*=\s*0\s*(?:;|$)/i;
-const EXPIRES_EPOCH_RE = /(?:^|;)\s*Expires\s*=\s*Thu,\s*01\s*Jan\s*1970/i;
+const MAX_AGE_RE = /(?:^|;)\s*Max-Age\s*=\s*(-?\d+)\s*(?:;|$)/i;
+const EXPIRES_RE = /(?:^|;)\s*Expires\s*=\s*([^;]+)/i;
+
+/** `Expires` dates before this year are treated as deletion markers. Fixed (not
+ * `Date.now()`-relative) so parsing stays deterministic; real session cookies
+ * are never legitimately set to expire in the previous millennium. */
+const EXPIRES_DELETION_YEAR = 2000;
+
+/**
+ * True when a `Set-Cookie` entry is a deletion marker: `Max-Age <= 0`
+ * (including the common `Max-Age=-1`), or — when no `Max-Age` is present
+ * (RFC 6265 §5.3: `Max-Age` outranks `Expires`) — an `Expires` date that
+ * parses to before {@link EXPIRES_DELETION_YEAR}. Both RFC 1123
+ * (`Thu, 01 Jan 1970`) and the legacy dash format (`Thu, 01-Jan-1970`) parse.
+ */
+function isDeletionCookie(entry: string): boolean {
+  const maxAge = MAX_AGE_RE.exec(entry);
+  if (maxAge) return Number(maxAge[1]) <= 0;
+  const expires = EXPIRES_RE.exec(entry);
+  if (expires && expires[1]) {
+    const when = new Date(expires[1].trim());
+    if (!Number.isNaN(when.getTime())) return when.getUTCFullYear() < EXPIRES_DELETION_YEAR;
+  }
+  return false;
+}
+
+/** Parse the leading `name=value` pair of a `Set-Cookie` entry (attrs ignored). */
+function parseNameValue(entry: string): { name: string; value: string } | null {
+  const nameValue = (entry.split(';')[0] ?? '').trim();
+  const eqIdx = nameValue.indexOf('=');
+  if (eqIdx < 1) return null;
+  return { name: nameValue.slice(0, eqIdx).trim(), value: nameValue.slice(eqIdx + 1).trim() };
+}
 
 /**
  * Parse `Set-Cookie` headers into a deduplicated {@link CookieJar}.
@@ -439,30 +518,90 @@ const EXPIRES_EPOCH_RE = /(?:^|;)\s*Expires\s*=\s*Thu,\s*01\s*Jan\s*1970/i;
  *
  * Consolidates the IC/signupgenius cookie-jar logic.
  */
-export function parseCookieJar(setCookieHeaders: string[] | string | null | undefined): CookieJar {
-  const entries =
-    setCookieHeaders == null
-      ? []
-      : Array.isArray(setCookieHeaders)
-        ? setCookieHeaders
-        : splitSetCookie(setCookieHeaders);
+export function parseCookieJar(setCookieHeaders: string[] | string | null | undefined): ParsedCookieJar {
+  const entries = setCookieEntries(setCookieHeaders);
 
   const jar = new Map<string, string>();
   for (const entry of entries) {
-    if (MAX_AGE_ZERO_RE.test(entry) || EXPIRES_EPOCH_RE.test(entry)) continue;
-    const nameValue = (entry.split(';')[0] ?? '').trim();
-    const eqIdx = nameValue.indexOf('=');
-    if (eqIdx < 1) continue;
-    const name = nameValue.slice(0, eqIdx).trim();
-    const value = nameValue.slice(eqIdx + 1).trim();
-    if (!value) continue;
-    jar.set(name, value);
+    if (isDeletionCookie(entry)) continue;
+    const pair = parseNameValue(entry);
+    if (!pair || !pair.value) continue;
+    jar.set(pair.name, pair.value);
   }
 
   const cookies: Record<string, string> = {};
   for (const [k, v] of jar) cookies[k] = v;
   const cookieHeader = [...jar.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
   return { cookies, cookieHeader };
+}
+
+/**
+ * Anything {@link CookieJar.absorb} can read `Set-Cookie`s from: the array from
+ * `Headers.getSetCookie()`, a single (possibly comma-joined) header string, or
+ * a `Headers`-like object (prefers `getSetCookie()`, falls back to splitting
+ * `get('set-cookie')` safely around `Expires` commas).
+ */
+export type SetCookieSource =
+  | string[]
+  | string
+  | null
+  | undefined
+  | { getSetCookie?: () => string[]; get(name: string): string | null };
+
+/** Normalize a {@link SetCookieSource} to individual `Set-Cookie` strings. */
+function setCookieEntries(source: SetCookieSource): string[] {
+  if (source == null) return [];
+  if (Array.isArray(source)) return source;
+  if (typeof source === 'string') return splitSetCookie(source);
+  if (typeof source.getSetCookie === 'function') return source.getSetCookie();
+  const joined = source.get('set-cookie');
+  return joined ? splitSetCookie(joined) : [];
+}
+
+/**
+ * Stateful cookie jar for multi-step session logins (login page → CSRF prime →
+ * credential POST → API calls), built on the {@link parseCookieJar} semantics.
+ *
+ * Consolidates the five drifted hand-rolled jars across
+ * artsonia/canvas-parent/evite/signupgenius/skylight:
+ *  - `absorb` merges each response's `Set-Cookie`s into the jar — later values
+ *    override earlier ones by name, and deletion markers (`Max-Age <= 0` or a
+ *    pre-2000 `Expires`, both comma- and dash-format epochs) **remove** the
+ *    name from the jar,
+ *  - empty-value non-deletion cookies are ignored (an existing value survives),
+ *  - `header()` renders the `Cookie` request-header value in insertion order.
+ */
+export class CookieJar {
+  private readonly jar = new Map<string, string>();
+
+  /** Merge `Set-Cookie`s into the jar (later wins; deletion markers remove). */
+  absorb(setCookies: SetCookieSource): void {
+    for (const entry of setCookieEntries(setCookies)) {
+      const pair = parseNameValue(entry);
+      if (!pair) continue;
+      if (isDeletionCookie(entry)) {
+        this.jar.delete(pair.name);
+        continue;
+      }
+      if (!pair.value) continue;
+      this.jar.set(pair.name, pair.value);
+    }
+  }
+
+  /** The current value of a cookie, or `undefined` when absent/deleted. */
+  get(name: string): string | undefined {
+    return this.jar.get(name);
+  }
+
+  /** Render the `Cookie` request-header value: `name=value; name2=value2`. */
+  header(): string {
+    return [...this.jar.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
+  }
+
+  /** Number of cookies currently in the jar. */
+  get size(): number {
+    return this.jar.size;
+  }
 }
 
 /** Best-effort split of a single joined `set-cookie` string (no `getSetCookie()`). */
