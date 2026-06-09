@@ -6,6 +6,8 @@ import {
   formatApiError,
   parseLinkHeader,
   parseCookieJar,
+  CookieJar,
+  ApiError,
   decodeJwtExp,
   decodeJwtSessionId,
   validateJwtExpiry,
@@ -549,5 +551,252 @@ describe('createApiClient timeout', () => {
     await client.fetchJson('GET', '/a');
     expect((calls[0]!.init as { signal?: unknown }).signal).toBeInstanceOf(AbortSignal);
     expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBe('Bearer TM-TOKEN');
+  });
+});
+
+// --- parseCookieJar deletion detection (MU-B2) -------------------------------
+
+describe('parseCookieJar deletion detection', () => {
+  it('drops dash-format epoch Expires deletion markers (RFC-6265-era servers)', () => {
+    const jar = parseCookieJar(['sess=gone; Expires=Thu, 01-Jan-1970 00:00:00 GMT', 'keep=yes']);
+    expect(jar.cookies).toEqual({ keep: 'yes' });
+  });
+
+  it('drops negative Max-Age deletion markers', () => {
+    const jar = parseCookieJar(['sess=gone; Max-Age=-1; Path=/', 'keep=yes']);
+    expect(jar.cookies).toEqual({ keep: 'yes' });
+  });
+
+  it('drops any pre-2000 Expires, keeps a future Expires', () => {
+    const jar = parseCookieJar([
+      'old=x; Expires=Fri, 02 Jan 1970 00:00:00 GMT',
+      'live=y; Expires=Wed, 21 Oct 2099 07:28:00 GMT',
+    ]);
+    expect(jar.cookies).toEqual({ live: 'y' });
+  });
+
+  it('keeps a cookie whose positive Max-Age outranks an epoch Expires (RFC 6265 precedence)', () => {
+    const jar = parseCookieJar(['a=1; Max-Age=3600; Expires=Thu, 01 Jan 1970 00:00:00 GMT']);
+    expect(jar.cookies).toEqual({ a: '1' });
+  });
+
+  it('keeps live cookies with a positive Max-Age or an unparseable Expires', () => {
+    expect(parseCookieJar(['a=1; Max-Age=86400; Path=/']).cookies).toEqual({ a: '1' });
+    expect(parseCookieJar(['a=1; Expires=banana']).cookies).toEqual({ a: '1' });
+  });
+});
+
+// --- CookieJar (stateful) ----------------------------------------------------
+
+describe('CookieJar', () => {
+  it('absorbs an array of Set-Cookie strings; get/header/size', () => {
+    const jar = new CookieJar();
+    jar.absorb(['a=1; Path=/', 'b=2; HttpOnly']);
+    expect(jar.get('a')).toBe('1');
+    expect(jar.get('b')).toBe('2');
+    expect(jar.get('missing')).toBeUndefined();
+    expect(jar.header()).toBe('a=1; b=2');
+    expect(jar.size).toBe(2);
+  });
+
+  it('later Set-Cookies override earlier ones by name, across absorbs', () => {
+    const jar = new CookieJar();
+    jar.absorb(['sess=first', 'sess=mid']);
+    jar.absorb(['sess=last; Path=/']);
+    expect(jar.get('sess')).toBe('last');
+    expect(jar.size).toBe(1);
+  });
+
+  it('deletion cookies REMOVE the name from the jar', () => {
+    const jar = new CookieJar();
+    jar.absorb(['sess=abc; Path=/', 'other=1']);
+    jar.absorb(['sess=; Max-Age=0']);
+    expect(jar.get('sess')).toBeUndefined();
+    expect(jar.header()).toBe('other=1');
+    expect(jar.size).toBe(1);
+  });
+
+  it('removes on dash-format epoch Expires and negative Max-Age too', () => {
+    const jar = new CookieJar();
+    jar.absorb(['a=1', 'b=2']);
+    jar.absorb(['a=gone; Expires=Thu, 01-Jan-1970 00:00:00 GMT', 'b=gone; Max-Age=-1']);
+    expect(jar.size).toBe(0);
+    expect(jar.header()).toBe('');
+  });
+
+  it('absorbs a Headers via getSetCookie() (canvas/skylight/signupgenius shape)', () => {
+    const h = new Headers();
+    h.append('set-cookie', 'canvas_session=tok; Path=/; HttpOnly');
+    h.append('set-cookie', 'pseudonym_credentials=cred; Expires=Wed, 21 Oct 2099 07:28:00 GMT');
+    const jar = new CookieJar();
+    jar.absorb(h);
+    expect(jar.get('canvas_session')).toBe('tok');
+    expect(jar.header()).toBe('canvas_session=tok; pseudonym_credentials=cred');
+  });
+
+  it('falls back to a joined get("set-cookie") when getSetCookie is unavailable', () => {
+    const jar = new CookieJar();
+    jar.absorb({ get: (n: string) => (n === 'set-cookie' ? 'a=1; Expires=Wed, 21 Oct 2099 07:28:00 GMT, b=2' : null) });
+    expect(jar.header()).toBe('a=1; b=2');
+  });
+
+  it('absorbs a single joined string, splitting safely around Expires commas', () => {
+    const jar = new CookieJar();
+    jar.absorb('a=1; Expires=Wed, 21 Oct 2099 07:28:00 GMT, b=2');
+    expect(jar.get('a')).toBe('1');
+    expect(jar.get('b')).toBe('2');
+  });
+
+  it('ignores empty-value cookies without deletion attributes (keeps the existing value)', () => {
+    const jar = new CookieJar();
+    jar.absorb(['a=1']);
+    jar.absorb(['a=']);
+    expect(jar.get('a')).toBe('1');
+  });
+
+  it('tolerates null/undefined/empty sources', () => {
+    const jar = new CookieJar();
+    jar.absorb(null);
+    jar.absorb(undefined);
+    jar.absorb([]);
+    jar.absorb('');
+    expect(jar.size).toBe(0);
+    expect(jar.header()).toBe('');
+  });
+});
+
+// --- ApiError ----------------------------------------------------------------
+
+describe('createApiClient ApiError', () => {
+  it('throws ApiError carrying status for non-2xx, message identical to formatApiError', async () => {
+    const { fn } = stubFetch([new Response('missing', { status: 404 })]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', serviceName: 'X', fetchImpl: fn });
+    const err = await client.fetchJson('GET', '/a').catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as ApiError).status).toBe(404);
+    expect((err as Error).message).toBe(formatApiError(404, 'GET', '/a', 'missing', { service: 'X' }));
+  });
+
+  it('still redacts/truncates the upstream body in the ApiError message', async () => {
+    const { fn } = stubFetch([new Response('Authorization: Bearer leak-me-secret-token', { status: 500 })]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', serviceName: 'X', fetchImpl: fn });
+    const err = await client.fetchJson('get', '/a').catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(500);
+    expect((err as Error).message).not.toContain('leak-me-secret-token');
+  });
+
+  it('fetchHtml also throws ApiError with status', async () => {
+    const { fn } = stubFetch([new Response('nope', { status: 503 })]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn });
+    const err = await client.fetchHtml('GET', '/p').catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(503);
+  });
+});
+
+// --- retry statuses ------------------------------------------------------------
+
+describe('createApiClient retry statuses', () => {
+  it('retries the configured statuses (e.g. 5xx) then succeeds', async () => {
+    const sleep = vi.fn(async () => {});
+    const { fn, calls } = stubFetch([new Response('bad gateway', { status: 502 }), jsonResponse({ ok: 1 })]);
+    const client = createApiClient({
+      baseUrl: 'https://x.test',
+      getToken: () => 't',
+      fetchImpl: fn,
+      sleep,
+      retry: { count: 1, delayMs: 100, statuses: [429, 500, 502, 503, 504] },
+    });
+    expect(await client.fetchJson('GET', '/a')).toEqual({ ok: 1 });
+    expect(calls).toHaveLength(2);
+    expect(sleep).toHaveBeenCalledWith(100);
+  });
+
+  it('an exhausted retried 5xx surfaces as ApiError (not RateLimitedError)', async () => {
+    const sleep = vi.fn(async () => {});
+    const { fn, calls } = stubFetch([new Response('boom', { status: 502 })]);
+    const client = createApiClient({
+      baseUrl: 'https://x.test',
+      getToken: () => 't',
+      fetchImpl: fn,
+      sleep,
+      retry: { count: 1, delayMs: 0, statuses: [502] },
+    });
+    const err = await client.fetchJson('GET', '/a').catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(502);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('does not retry statuses outside the default [429]', async () => {
+    const sleep = vi.fn(async () => {});
+    const { fn, calls } = stubFetch([new Response('boom', { status: 502 })]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn, sleep });
+    await client.fetchJson('GET', '/a').catch(() => {});
+    expect(calls).toHaveLength(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it('a 429 exhausted under custom statuses still maps to RateLimitedError', async () => {
+    const sleep = vi.fn(async () => {});
+    const { fn } = stubFetch([new Response('slow', { status: 429 })]);
+    const client = createApiClient({
+      baseUrl: 'https://x.test',
+      getToken: () => 't',
+      fetchImpl: fn,
+      sleep,
+      retry: { count: 1, delayMs: 0, statuses: [429, 502] },
+    });
+    const err = await client.fetchJson('GET', '/a').catch((e) => e);
+    expect(err).toBeInstanceOf(RateLimitedError);
+  });
+});
+
+// --- tokenHeader -----------------------------------------------------------
+
+describe('createApiClient tokenHeader', () => {
+  it('sends the raw token in the named header (no Bearer prefix, no Authorization)', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const client = createApiClient({
+      baseUrl: 'https://x.test',
+      getToken: () => 'gk-123',
+      tokenHeader: 'x-goog-api-key',
+      fetchImpl: fn,
+    });
+    await client.fetchJson('GET', '/a');
+    const headers = calls[0]!.init.headers as Record<string, string>;
+    expect(headers['x-goog-api-key']).toBe('gk-123');
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  it('sends neither header when the token resolves empty', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const client = createApiClient({
+      baseUrl: 'https://x.test',
+      getToken: () => undefined,
+      tokenHeader: 'x-api-key',
+      fetchImpl: fn,
+    });
+    await client.fetchJson('GET', '/a');
+    const headers = calls[0]!.init.headers as Record<string, string>;
+    expect(headers['x-api-key']).toBeUndefined();
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  it('applies tokenHeader to tokenManager-supplied tokens too', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const withAuth = (call: (t: string) => Promise<Response>) => call('TM-TOKEN');
+    const client = createApiClient({
+      baseUrl: 'https://x.test',
+      tokenManager: { withAuth },
+      tokenHeader: 'x-auth-token',
+      fetchImpl: fn,
+    });
+    await client.fetchJson('GET', '/a');
+    const headers = calls[0]!.init.headers as Record<string, string>;
+    expect(headers['x-auth-token']).toBe('TM-TOKEN');
+    expect(headers.Authorization).toBeUndefined();
   });
 });
