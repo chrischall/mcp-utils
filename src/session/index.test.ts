@@ -1,5 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, statSync, existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  rmSync,
+  statSync,
+  existsSync,
+  readFileSync,
+  mkdirSync,
+  writeFileSync,
+  chmodSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTestHarness, parseToolResult } from '../test/index.js';
@@ -230,11 +239,113 @@ describe('SessionStore', () => {
   });
 
   it('tolerates a corrupt disk file (starts empty)', () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const filePath = join(dir, 'nested', 'sessions.json');
+      mkdirSync(join(dir, 'nested'), { recursive: true });
+      writeFileSync(filePath, '{ not json');
+      const store = makeStore(dir);
+      expect(store.list()).toHaveLength(0);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it('preserves a corrupt disk file as a backup and warns on stderr', () => {
     const filePath = join(dir, 'nested', 'sessions.json');
     mkdirSync(join(dir, 'nested'), { recursive: true });
-    writeFileSync(filePath, '{ not json');
+    const corruptBytes = '{ not json';
+    writeFileSync(filePath, corruptBytes);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const store = makeStore(dir);
+      expect(store.list()).toHaveLength(0);
+      // original bytes preserved next to the store file before anything can overwrite them
+      const backupPath = `${filePath}.corrupt`;
+      expect(existsSync(backupPath)).toBe(true);
+      expect(readFileSync(backupPath, 'utf8')).toBe(corruptBytes);
+      // one-line warning on stderr (stdout is reserved for JSON-RPC)
+      expect(errSpy).toHaveBeenCalledOnce();
+      expect(String(errSpy.mock.calls[0]![0])).toContain('sessions.json');
+      // a subsequent save writes a fresh store file but never clobbers the backup
+      store.add({ origin: 'https://a.com', token: 't1' });
+      expect(readFileSync(backupPath, 'utf8')).toBe(corruptBytes);
+      expect(makeStore(dir).get('https://a.com')!.token).toBe('t1');
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it('does not clobber an existing backup of a previous corruption', () => {
+    const filePath = join(dir, 'nested', 'sessions.json');
+    mkdirSync(join(dir, 'nested'), { recursive: true });
+    writeFileSync(`${filePath}.corrupt`, 'first corruption');
+    writeFileSync(filePath, '{ second corruption');
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      makeStore(dir);
+      expect(readFileSync(`${filePath}.corrupt`, 'utf8')).toBe('first corruption');
+      expect(readFileSync(`${filePath}.corrupt-1`, 'utf8')).toBe('{ second corruption');
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it('refuses to clobber the last backup slot when all 101 are taken', () => {
+    const filePath = join(dir, 'nested', 'sessions.json');
+    mkdirSync(join(dir, 'nested'), { recursive: true });
+    writeFileSync(`${filePath}.corrupt`, 'slot 0');
+    for (let n = 1; n <= 100; n++) writeFileSync(`${filePath}.corrupt-${n}`, `slot ${n}`);
+    writeFileSync(filePath, '{ one corruption too many');
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      makeStore(dir);
+      // The exhausted-slots path must not overwrite any existing backup...
+      expect(readFileSync(`${filePath}.corrupt-100`, 'utf8')).toBe('slot 100');
+      // ...and leaves the corrupt file in place (the "could not preserve" path).
+      expect(readFileSync(filePath, 'utf8')).toBe('{ one corruption too many');
+      expect(errSpy.mock.calls.flat().join(' ')).toMatch(/could not preserve/i);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it('creates intermediate directories with mode 0700', () => {
+    const filePath = join(dir, 'a', 'b', 'sessions.json');
+    const store = new SessionStore<TestSession>({
+      filePath,
+      keyOf: (s) => s.origin,
+      normalizeKey: normalizeOrigin,
+    });
+    store.add({ origin: 'https://a.com', token: 't1' });
+    // BOTH created dirs must be 0700 — the intermediate one is only covered by
+    // mkdirSync's mode (the trailing chmod only touches dirname(filePath)).
+    expect(statSync(join(dir, 'a')).mode & 0o777).toBe(0o700);
+    expect(statSync(join(dir, 'a', 'b')).mode & 0o777).toBe(0o700);
+  });
+
+  it('tightens a pre-existing loose file to 0600 BEFORE writing new secret content', () => {
+    const filePath = join(dir, 'nested', 'sessions.json');
+    mkdirSync(join(dir, 'nested'), { recursive: true });
+    writeFileSync(filePath, JSON.stringify([{ origin: 'https://old.com', token: 'old' }]));
+    // owner-read-only: the save can only succeed if the store chmods the file
+    // BEFORE opening it for write (chmod-then-write-then-chmod ordering)
+    chmodSync(filePath, 0o444);
     const store = makeStore(dir);
-    expect(store.list()).toHaveLength(0);
+    store.add({ origin: 'https://a.com', token: 't1' });
+    expect(statSync(filePath).mode & 0o777).toBe(0o600);
+    const onDisk = JSON.parse(readFileSync(filePath, 'utf8')) as TestSession[];
+    expect(onDisk.map((s) => s.origin)).toContain('https://a.com');
+  });
+
+  it('re-tightens a pre-existing 0644 file to 0600 after a save', () => {
+    const filePath = join(dir, 'nested', 'sessions.json');
+    mkdirSync(join(dir, 'nested'), { recursive: true });
+    writeFileSync(filePath, '[]');
+    chmodSync(filePath, 0o644);
+    const store = makeStore(dir);
+    store.add({ origin: 'https://a.com', token: 't1' });
+    expect(statSync(filePath).mode & 0o777).toBe(0o600);
   });
 
   it('serialize/deserialize round-trips through the on-disk JSON array', () => {
@@ -377,6 +488,44 @@ describe('TokenManager', () => {
     // in-flight cleared — second attempt issues a fresh refresh and succeeds
     expect(await tm.getAccessToken()).toBe('AT2');
     expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not double-refresh when a late 401 lands after another caller already refreshed', async () => {
+    const refresh = vi
+      .fn()
+      .mockResolvedValue({ accessToken: 'AT2', refreshToken: 'RT2', expiresAt: 60 * 60 * 1000 });
+    const tm = new TokenManager({
+      initial: { accessToken: 'AT', refreshToken: 'RT', expiresAt: 60 * 60 * 1000 },
+      refresh,
+    });
+
+    // Caller A's request hangs; its 401 (sent under the OLD token) lands late.
+    const lateA = deferred<Response>();
+    const tokensA: string[] = [];
+    const callA = vi.fn(async (token: string) => {
+      tokensA.push(token);
+      if (tokensA.length === 1) return lateA.promise;
+      return new Response(null, { status: 200 });
+    });
+
+    // Caller B 401s immediately under the old token, refreshes, replays fine.
+    const callB = vi.fn(async (token: string) =>
+      new Response(null, { status: token === 'AT' ? 401 : 200 }),
+    );
+
+    const pA = tm.withAuth(callA);
+    const pB = tm.withAuth(callB);
+    expect((await pB).status).toBe(200);
+    expect(refresh).toHaveBeenCalledOnce();
+
+    // Now A's stale-token 401 arrives — AFTER B's refresh settled and cleared
+    // the single-flight promise. A must NOT trigger a second refresh (under
+    // rotation that would consume/invalidate the freshly-issued refresh token);
+    // it should just replay with the already-refreshed token.
+    lateA.resolve(new Response(null, { status: 401 }));
+    expect((await pA).status).toBe(200);
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(tokensA).toEqual(['AT', 'AT2']);
   });
 
   it('throws when no refresh token is available and a refresh is needed', async () => {

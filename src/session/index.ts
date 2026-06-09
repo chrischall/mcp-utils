@@ -28,6 +28,7 @@ import {
   writeFileSync,
   mkdirSync,
   chmodSync,
+  renameSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -352,9 +353,44 @@ export class SessionStore<T extends Record<string, unknown>> {
       this.sessions = this.deserialize(readFileSync(this.filePath, 'utf8'));
       const keys = Array.from(this.sessions.keys());
       this.mostRecentKey = keys[keys.length - 1] ?? null;
-    } catch {
+    } catch (err) {
+      // A corrupt cache must not brick the server, but it also must not be
+      // silently destroyed: the next save() would otherwise overwrite the file
+      // and permanently lose the prior credentials. Preserve the original
+      // bytes out of the way first, then start empty.
+      const backupPath = this.preserveCorruptFile();
+      const detail = err instanceof Error ? err.message : String(err);
+      // stderr only — stdout is reserved for JSON-RPC in MCP servers.
+      console.error(
+        `[mcp-utils] SessionStore: failed to parse ${this.filePath} (${detail}); ` +
+          (backupPath !== null
+            ? `preserved the corrupt file at ${backupPath}; `
+            : 'could not preserve the corrupt file; ') +
+          'starting with an empty store.',
+      );
       this.sessions = new Map();
       this.mostRecentKey = null;
+    }
+  }
+
+  /**
+   * Move a corrupt store file to `<filePath>.corrupt` (or `.corrupt-<n>` if a
+   * previous backup exists) so a subsequent save cannot overwrite the only
+   * copy of the prior credentials. Best-effort: returns the backup path, or
+   * `null` if the rename failed.
+   */
+  private preserveCorruptFile(): string | null {
+    try {
+      let candidate = `${this.filePath}.corrupt`;
+      for (let n = 1; existsSync(candidate) && n <= 100; n++) {
+        candidate = `${this.filePath}.corrupt-${n}`;
+      }
+      // All 101 slots taken — refuse rather than clobber the last backup.
+      if (existsSync(candidate)) return null;
+      renameSync(this.filePath, candidate);
+      return candidate;
+    } catch {
+      return null;
     }
   }
 
@@ -379,13 +415,26 @@ export class SessionStore<T extends Record<string, unknown>> {
   }
 
   private saveToDisk(): void {
-    mkdirSync(dirname(this.filePath), { recursive: true });
+    const dir = dirname(this.filePath);
+    // mode applies to every directory this call creates, so intermediate dirs
+    // are never left at the umask default (0755).
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // Tighten a pre-existing file BEFORE writing new secret content — the
+    // write-then-chmod ordering leaves a window where fresh secrets sit in a
+    // file that may still be world-readable.
+    if (existsSync(this.filePath)) {
+      try {
+        chmodSync(this.filePath, 0o600);
+      } catch {
+        /* best-effort */
+      }
+    }
     writeFileSync(this.filePath, this.serialize(), { mode: 0o600 });
-    // Best-effort tighten existing file + dir (writeFileSync respects umask on
-    // pre-existing files, so re-assert 0600/0700 explicitly).
+    // Re-assert file + dir perms (writeFileSync's mode and mkdirSync's mode
+    // only apply on creation, not to pre-existing loose entries).
     try {
       chmodSync(this.filePath, 0o600);
-      chmodSync(dirname(this.filePath), 0o700);
+      chmodSync(dir, 0o700);
     } catch {
       /* best-effort */
     }
@@ -550,11 +599,19 @@ export class TokenManager {
    * Run an authenticated request with reactive 401-replay. `call` receives a
    * valid access token and returns a `Response`. On `401`, the token is
    * refreshed once and `call` is invoked again exactly once.
+   *
+   * Guarded against double-refresh: if a concurrent caller already rotated the
+   * token while this request was in flight (single-flight settled and cleared),
+   * a late `401` from a request sent under the OLD token does NOT trigger a
+   * second refresh — under refresh-token rotation that would consume and
+   * invalidate the freshly-issued refresh token. It just replays with the
+   * current token.
    */
   async withAuth(call: (accessToken: string) => Promise<Response>): Promise<Response> {
-    let res = await call(await this.getAccessToken());
+    const usedToken = await this.getAccessToken();
+    let res = await call(usedToken);
     if (res.status === 401) {
-      await this.refreshNow();
+      if (this.accessToken === usedToken) await this.refreshNow();
       res = await call(this.accessToken);
     }
     return res;
