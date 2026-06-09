@@ -28,7 +28,7 @@ import light:
 | Import | Contents |
 | --- | --- |
 | `@chrischall/mcp-utils` | core barrel: `server` + `response` + `errors` + `config` + `fs` + `http` + `zod` + `auth` |
-| `@chrischall/mcp-utils/session` | session registry, session store, token manager |
+| `@chrischall/mcp-utils/session` | session registry, session store, token manager, cookie-session manager |
 | `@chrischall/mcp-utils/fetchproxy` | fetchproxy transport adapter, bot-wall / retry / concurrency helpers |
 | `@chrischall/mcp-utils/html` | opt-in HTML scraping helpers (needs `node-html-parser`) |
 | `@chrischall/mcp-utils/test` | in-memory test harness for tool registration |
@@ -209,13 +209,14 @@ const resolver = createAuthResolver({ /* ... */ });
 const refresh = createOAuth2Refresher({ /* ... */ });
 ```
 
-### `session` — session registry & token manager *(subpath)*
+### `session` — session registry, token manager & cookie-session manager *(subpath)*
 
 ```ts
 import {
   createSessionRegistry,
   registerSessionTools,
   TokenManager,
+  CookieSessionManager,
 } from '@chrischall/mcp-utils/session';
 
 const registry = createSessionRegistry();
@@ -224,6 +225,33 @@ registerSessionTools(server, { registry /* ... */ });
 
 Includes `SessionStore`, `normalizeOrigin`, `AuthMode`, and `TokenManager`
 (with `TOKEN_REFRESH_SKEW_MS` for proactive refresh).
+
+`CookieSessionManager<S>` is the cookie-session analog of `TokenManager` for
+sites authenticated by a browser-style cookie session rather than a bearer
+token. It owns *when* to log in (single-flight, so concurrent callers coalesce
+into ONE login), clears the in-flight promise on settle (a rejected login never
+sticks — the next `ensure()` retries), and `withSession()` re-logs-in and
+replays a request **exactly once** on a detected expiry (no infinite loop). The
+injected `isExpired(res)` predicate is the hook for body/URL heuristics — so a
+`200` serving an HTML login page or a redirect away from the target is treated
+as expired, not just `401`/`403`. An optional `isPermanentError` caches genuine
+missing-config errors while leaving transient login failures retryable.
+
+```ts
+const sessions = new CookieSessionManager<{ cookieHeader: string; csrfToken?: string }>({
+  login: () => loginWithPassword(),                 // mints a fresh cookie session
+  isExpired: async (res) =>
+    res.status === 401 || /<form[^>]*id="login"/i.test(await res.clone().text()),
+});
+
+const res = await sessions.withSession((s) =>
+  fetch(url, { headers: { cookie: s.cookieHeader } }),
+);
+```
+
+Replaces the hand-rolled re-login / single-flight / 401-replay code in
+`artsonia-mcp`, `canvas-parent-mcp`, `evite-mcp`, `signupgenius-mcp`, and
+`skylight-mcp`.
 
 ### `fetchproxy` — transport adapter *(subpath, optional peer)*
 
