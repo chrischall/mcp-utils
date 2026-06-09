@@ -6,8 +6,11 @@ import {
   formatApiError,
   parseLinkHeader,
   parseCookieJar,
+  parseCookieHeader,
   CookieJar,
   ApiError,
+  UpstreamHttpError,
+  runBoundedBatch,
   decodeJwtExp,
   decodeJwtSessionId,
   decodeJwtClaim,
@@ -819,5 +822,255 @@ describe('createApiClient tokenHeader', () => {
     const headers = calls[0]!.init.headers as Record<string, string>;
     expect(headers['x-auth-token']).toBe('TM-TOKEN');
     expect(headers.Authorization).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseCookieHeader
+// ---------------------------------------------------------------------------
+
+describe('parseCookieHeader', () => {
+  it('parses a basic `name=value; name2=value2` header', () => {
+    expect(parseCookieHeader('a=1; b=2')).toEqual({ a: '1', b: '2' });
+  });
+
+  it('keeps `=` inside a value (only the first `=` splits)', () => {
+    expect(parseCookieHeader('jwt=ab%3D%3D; sid=x=y=z')).toEqual({
+      jwt: 'ab%3D%3D',
+      sid: 'x=y=z',
+    });
+  });
+
+  it('trims surrounding whitespace from names and values', () => {
+    expect(parseCookieHeader('  a = 1 ;  b= 2 ')).toEqual({ a: '1', b: '2' });
+  });
+
+  it('skips pairs with a missing name (leading `=`)', () => {
+    expect(parseCookieHeader('=oops; a=1')).toEqual({ a: '1' });
+  });
+
+  it('skips bare attribute fragments with no `=`', () => {
+    expect(parseCookieHeader('a=1; HttpOnly; b=2')).toEqual({ a: '1', b: '2' });
+  });
+
+  it('returns {} for an empty / whitespace header', () => {
+    expect(parseCookieHeader('')).toEqual({});
+    expect(parseCookieHeader('   ')).toEqual({});
+  });
+
+  it('keeps an empty value when the name is present (`a=`)', () => {
+    expect(parseCookieHeader('a=; b=2')).toEqual({ a: '', b: '2' });
+  });
+
+  it('last value wins for a duplicate name', () => {
+    expect(parseCookieHeader('a=1; a=2')).toEqual({ a: '2' });
+  });
+
+  it('matches extractCookieValue semantics for a single name lookup', () => {
+    // creditkarma `extractCookieValue(cookieString, 'CKTRKID')` returns the
+    // first/leading value; for a unique name our map yields the same value.
+    const header = 'CKTRKID=abc123; other=zzz';
+    expect(parseCookieHeader(header)['CKTRKID']).toBe('abc123');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// UpstreamHttpError
+// ---------------------------------------------------------------------------
+
+describe('UpstreamHttpError', () => {
+  it('carries the status and message and is directly constructible', () => {
+    const err = new UpstreamHttpError(404, 'not found');
+    expect(err.status).toBe(404);
+    expect(err.message).toBe('not found');
+    expect(err.name).toBe('UpstreamHttpError');
+  });
+
+  it('is an instance of ApiError and Error (so existing status-branch checks hold)', () => {
+    const err = new UpstreamHttpError(503, 'down');
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).toBeInstanceOf(UpstreamHttpError);
+  });
+
+  it('supports the 404-branch pattern via instanceof + status', () => {
+    const branch = (err: unknown): string => {
+      if (err instanceof UpstreamHttpError && err.status === 404) return 'fallback';
+      throw err;
+    };
+    expect(branch(new UpstreamHttpError(404, 'x'))).toBe('fallback');
+    expect(() => branch(new UpstreamHttpError(500, 'x'))).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runBoundedBatch
+// ---------------------------------------------------------------------------
+
+describe('runBoundedBatch', () => {
+  it('returns real results when everything settles before the deadline', async () => {
+    const result = await runBoundedBatch([1, 2, 3], async (n) => n * 10, {
+      deadlineMs: 1000,
+      onTimeout: () => -1,
+    });
+    expect(result).toEqual([10, 20, 30]);
+  });
+
+  it('preserves input order regardless of completion order', async () => {
+    const result = await runBoundedBatch([3, 1, 2], async (n) => {
+      await Promise.resolve();
+      return `v${n}`;
+    }, {
+      deadlineMs: 1000,
+      onTimeout: () => 'pending',
+    });
+    expect(result).toEqual(['v3', 'v1', 'v2']);
+  });
+
+  it('backfills only the hung item via onTimeout, keeping the others real', async () => {
+    let fireTimer: () => void = () => {};
+    const fakeTimer = (_ms: number, cb: () => void): unknown => {
+      fireTimer = cb;
+      return 0 as unknown;
+    };
+    let releaseHung: () => void = () => {};
+
+    const promise = runBoundedBatch(
+      ['fast-a', 'hung', 'fast-b'],
+      async (item) => {
+        if (item === 'hung') {
+          await new Promise<void>((r) => {
+            releaseHung = r;
+          });
+          return 'hung-real';
+        }
+        return `${item}-ok`;
+      },
+      {
+        deadlineMs: 45_000,
+        onTimeout: (item, index) => `pending:${item}:${index}`,
+        setTimer: fakeTimer as never,
+        clearTimer: () => {},
+      },
+    );
+
+    // Let the two fast workers settle, then trip the deadline.
+    await Promise.resolve();
+    await Promise.resolve();
+    fireTimer();
+
+    const result = await promise;
+    expect(result).toEqual(['fast-a-ok', 'pending:hung:1', 'fast-b-ok']);
+    releaseHung(); // the abandoned worker can settle harmlessly afterward
+  });
+
+  it('passes an abort signal to the worker when timing out', async () => {
+    let fireTimer: () => void = () => {};
+    const fakeTimer = (_ms: number, cb: () => void): unknown => {
+      fireTimer = cb;
+      return 0 as unknown;
+    };
+    let seenSignal: AbortSignal | undefined;
+    const promise = runBoundedBatch(
+      ['hung'],
+      async (_item, signal) => {
+        seenSignal = signal;
+        await new Promise<void>(() => {}); // never settles
+        return 'unreachable';
+      },
+      {
+        deadlineMs: 10,
+        onTimeout: () => 'pending',
+        setTimer: fakeTimer as never,
+        clearTimer: () => {},
+      },
+    );
+    await Promise.resolve();
+    fireTimer();
+    const result = await promise;
+    expect(result).toEqual(['pending']);
+    expect(seenSignal?.aborted).toBe(true);
+  });
+
+  it('honors the concurrency cap (never more than N workers in flight)', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const result = await runBoundedBatch(
+      [1, 2, 3, 4, 5],
+      async (n) => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await Promise.resolve();
+        await Promise.resolve();
+        inFlight -= 1;
+        return n;
+      },
+      { deadlineMs: 1000, onTimeout: () => -1, concurrency: 2 },
+    );
+    expect(result).toEqual([1, 2, 3, 4, 5]);
+    expect(maxInFlight).toBeLessThanOrEqual(2);
+  });
+
+  it('returns [] for an empty item list without arming a timer', () => {
+    let armed = false;
+    const out = runBoundedBatch([], async (n) => n, {
+      deadlineMs: 1000,
+      onTimeout: () => -1,
+      setTimer: (() => {
+        armed = true;
+        return 0;
+      }) as never,
+      clearTimer: () => {},
+    });
+    return out.then((r) => {
+      expect(r).toEqual([]);
+      expect(armed).toBe(false);
+    });
+  });
+
+  it('isolates a worker rejection to its slot — others complete, batch does not reject', async () => {
+    const result = await runBoundedBatch(
+      [1, 2, 3],
+      async (n) => {
+        if (n === 2) throw new Error('boom');
+        return n * 10;
+      },
+      { deadlineMs: 1000, onTimeout: (item) => `timeout:${item}` as unknown as number },
+    );
+    // The throwing item falls back to onTimeout (default); the rest succeed.
+    expect(result).toEqual([10, 'timeout:2', 30]);
+  });
+
+  it('routes a worker rejection through onError when provided (distinct from a timeout)', async () => {
+    const result = await runBoundedBatch(
+      [1, 2, 3],
+      async (n) => {
+        if (n === 2) throw new Error('boom');
+        return n * 10;
+      },
+      {
+        deadlineMs: 1000,
+        onTimeout: (item) => `timeout:${item}` as unknown as number,
+        onError: (item, _i, err) => `error:${item}:${(err as Error).message}` as unknown as number,
+      },
+    );
+    expect(result).toEqual([10, 'error:2:boom', 30]);
+  });
+
+  it('a worker rejection under a concurrency cap does not strand queued items', async () => {
+    // limit=1 so all items share one runner; the throw on item 2 must not stop
+    // it from reaching item 3.
+    const seen: number[] = [];
+    const result = await runBoundedBatch(
+      [1, 2, 3],
+      async (n) => {
+        seen.push(n);
+        if (n === 2) throw new Error('boom');
+        return n;
+      },
+      { deadlineMs: 1000, concurrency: 1, onTimeout: () => -1 },
+    );
+    expect(seen).toEqual([1, 2, 3]); // item 3 still ran
+    expect(result).toEqual([1, -1, 3]);
   });
 });

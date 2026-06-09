@@ -28,7 +28,7 @@ import light:
 | Import | Contents |
 | --- | --- |
 | `@chrischall/mcp-utils` | core barrel: `server` + `response` + `errors` + `config` + `fs` + `http` + `zod` + `auth` |
-| `@chrischall/mcp-utils/session` | session registry, session store, token manager |
+| `@chrischall/mcp-utils/session` | session registry, session store, token manager, cookie-session manager |
 | `@chrischall/mcp-utils/fetchproxy` | fetchproxy transport adapter, bot-wall / retry / concurrency helpers |
 | `@chrischall/mcp-utils/html` | opt-in HTML scraping helpers (needs `node-html-parser`) |
 | `@chrischall/mcp-utils/test` | in-memory test harness for tool registration |
@@ -172,9 +172,10 @@ constant memory instead of a 20 MB Buffer.
 ### `http` — bearer API-client kit
 
 `createApiClient` plus building blocks: `buildQueryString`, `buildOptionalBody`,
-`formatApiError`, `parseLinkHeader`, `parseCookieJar`, JWT helpers
-(`decodeJwtExp`, `decodeJwtSessionId`, `decodeJwtClaim`, `validateJwtExpiry`),
-and the `UnauthorizedError` / `RateLimitedError` / `RequestTimeoutError` classes.
+`formatApiError`, `parseLinkHeader`, `parseCookieJar`, `parseCookieHeader`,
+`runBoundedBatch`, JWT helpers (`decodeJwtExp`, `decodeJwtSessionId`,
+`decodeJwtClaim`, `validateJwtExpiry`), and the `ApiError` / `UpstreamHttpError` /
+`UnauthorizedError` / `RateLimitedError` / `RequestTimeoutError` classes.
 
 `decodeJwtClaim(token, claim)` is the generic single-claim reader — returns the
 raw claim value (`unknown`) or `undefined` for an undecodable token / absent
@@ -197,6 +198,37 @@ const data = await api.get('/v1/things', { query: { page: 2 } });
 `timeout` (ms) bounds each attempt with an `AbortController`; on expiry it throws
 `RequestTimeoutError` instead of hanging the tool call. A 429 retry gets a fresh
 timeout. Omit it to keep the previous unbounded behavior.
+
+`parseCookieHeader(header)` parses an inbound *request* `Cookie:` header
+(`name=value; name2=value2`) into a `Record<string, string>` (first `=` splits,
+so values may contain `=`; last value wins on a duplicate name). It's the
+counterpart to `parseCookieJar`, which parses *response* `Set-Cookie` headers
+with their attributes and deletion semantics.
+
+`UpstreamHttpError(status, message)` is a directly-`throw new`-able,
+status-carrying HTTP error — the manual-throw parallel to `ApiError` (which
+`createApiClient` throws internally). It `extends ApiError`, so both the
+`err instanceof ApiError && err.status === 404` branch and a narrower
+`instanceof UpstreamHttpError` check work. Use it from a transport/bridge code
+path that doesn't route through `createApiClient` but still needs to branch on a
+404.
+
+```ts
+import { runBoundedBatch } from '@chrischall/mcp-utils';
+
+const rows = await runBoundedBatch(ids, (id, signal) => fetchRow(id, signal), {
+  deadlineMs: 45_000,                        // overall hard deadline for the whole batch
+  concurrency: 4,                            // optional fan-out cap
+  onTimeout: (id, i) => ({ id, pending: true }), // backfill any row the deadline cut off
+});
+```
+
+`runBoundedBatch(items, worker, opts)` races the whole batch against one overall
+`deadlineMs`; any item still unsettled when it fires is filled by
+`onTimeout(item, index)` (and its worker abandoned + `AbortSignal`-signalled) so
+a single hung row can't wedge the call. It always returns a full-length,
+input-ordered array. `setTimer`/`clearTimer` are injectable for tests. This
+hoists zillow's bulk-tool deadline + `pending`-backfill primitive.
 
 ### `dates` — date-format converters
 
@@ -246,13 +278,14 @@ const resolver = createAuthResolver({ /* ... */ });
 const refresh = createOAuth2Refresher({ /* ... */ });
 ```
 
-### `session` — session registry & token manager *(subpath)*
+### `session` — session registry, token manager & cookie-session manager *(subpath)*
 
 ```ts
 import {
   createSessionRegistry,
   registerSessionTools,
   TokenManager,
+  CookieSessionManager,
 } from '@chrischall/mcp-utils/session';
 
 const registry = createSessionRegistry();
@@ -261,6 +294,33 @@ registerSessionTools(server, { registry /* ... */ });
 
 Includes `SessionStore`, `normalizeOrigin`, `AuthMode`, and `TokenManager`
 (with `TOKEN_REFRESH_SKEW_MS` for proactive refresh).
+
+`CookieSessionManager<S>` is the cookie-session analog of `TokenManager` for
+sites authenticated by a browser-style cookie session rather than a bearer
+token. It owns *when* to log in (single-flight, so concurrent callers coalesce
+into ONE login), clears the in-flight promise on settle (a rejected login never
+sticks — the next `ensure()` retries), and `withSession()` re-logs-in and
+replays a request **exactly once** on a detected expiry (no infinite loop). The
+injected `isExpired(res)` predicate is the hook for body/URL heuristics — so a
+`200` serving an HTML login page or a redirect away from the target is treated
+as expired, not just `401`/`403`. An optional `isPermanentError` caches genuine
+missing-config errors while leaving transient login failures retryable.
+
+```ts
+const sessions = new CookieSessionManager<{ cookieHeader: string; csrfToken?: string }>({
+  login: () => loginWithPassword(),                 // mints a fresh cookie session
+  isExpired: async (res) =>
+    res.status === 401 || /<form[^>]*id="login"/i.test(await res.clone().text()),
+});
+
+const res = await sessions.withSession((s) =>
+  fetch(url, { headers: { cookie: s.cookieHeader } }),
+);
+```
+
+Replaces the hand-rolled re-login / single-flight / 401-replay code in
+`artsonia-mcp`, `canvas-parent-mcp`, `evite-mcp`, `signupgenius-mcp`, and
+`skylight-mcp`.
 
 ### `fetchproxy` — transport adapter *(subpath, optional peer)*
 
