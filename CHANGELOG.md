@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.8.0](https://github.com/chrischall/mcp-utils/compare/v0.7.0...v0.8.0) (2026-06-09)
+
+
+### Features
+
+* config/zod helpers for the fleet (cached JSON loader, readPortEnv, path-segment atoms, decodeJwtClaim) ([#37](https://github.com/chrischall/mcp-utils/issues/37)) ([fdbaecd](https://github.com/chrischall/mcp-utils/commit/fdbaecd6782c0474b3b9ffa1e41076fa551638a0))
+* **fetchproxy:** transport verb adapters + bridge-healthcheck tool factory ([#38](https://github.com/chrischall/mcp-utils/issues/38)) ([624f45e](https://github.com/chrischall/mcp-utils/commit/624f45e20ee19e2aee811216a4cb44a2ce4e7b68))
+* **http:** add parseCookieHeader, UpstreamHttpError, runBoundedBatch ([#35](https://github.com/chrischall/mcp-utils/issues/35)) ([60c9680](https://github.com/chrischall/mcp-utils/commit/60c96803c637e39d47e73376e48266dbd17973f0))
+* **session:** add CookieSessionManager (cookie-session analog of TokenManager) ([#36](https://github.com/chrischall/mcp-utils/issues/36)) ([6a17874](https://github.com/chrischall/mcp-utils/commit/6a178746b08497d1d64f51db79628aeb7577dd81))
+
 ## [0.7.0](https://github.com/chrischall/mcp-utils/compare/v0.6.0...v0.7.0) (2026-06-09)
 
 
