@@ -662,6 +662,22 @@ export function decodeJwtSessionId(token: string): string | null {
   return typeof sid === 'string' ? sid : null;
 }
 
+/**
+ * Generic single-claim extractor for a JWT payload. Returns the raw claim
+ * value (`unknown` — cast or narrow at the call site), or `undefined` for an
+ * undecodable token or an absent claim. Never throws.
+ *
+ * Generalizes the hand-rolled per-claim readers across the fleet (e.g.
+ * creditkarma's `extractGlidFromJwt`): `decodeJwtClaim(token, 'glid')` instead
+ * of a bespoke decode + payload-field pluck. Reuses the same base64url payload
+ * decode as {@link decodeJwtExp} / {@link decodeJwtSessionId}.
+ */
+export function decodeJwtClaim(token: string, claim: string): unknown {
+  const payload = decodeJwtPayload(token);
+  if (!payload) return undefined;
+  return payload[claim];
+}
+
 /** Result of {@link validateJwtExpiry}. */
 export interface JwtExpiryStatus {
   /** True when the token is past its `exp` (or undecodable / lacks `exp`). */

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
@@ -123,6 +124,138 @@ export function expandPath(p: string): string {
     expanded = join(homedir(), p.slice(2));
   }
   return isAbsolute(expanded) ? expanded : resolve(expanded);
+}
+
+/** Options for {@link readPortEnv}. */
+export interface ReadPortEnvOptions {
+  /** The source to read from. Defaults to {@link process.env}. */
+  env?: EnvSource;
+}
+
+/**
+ * Read a TCP port from an environment variable, hardened the way
+ * {@link readEnvVar} hardens any var (trim, treat blank / `'undefined'` /
+ * `'null'` / unsubstituted `${...}` placeholder as unset) PLUS numeric
+ * validation: the value must parse to an integer in the valid port range
+ * `1..65535`.
+ *
+ * Returns `fallback` when the variable is unset, a placeholder, non-numeric, or
+ * out of range. Consolidates the bare `Number(process.env.X_WS_PORT)` pattern
+ * across compass/redfin/homes/musescore, which yields `NaN` on an unexpanded
+ * `${...}` placeholder or junk and then hands `NaN` to the server.
+ *
+ * @example readPortEnv('REDFIN_WS_PORT', 37149)
+ */
+export function readPortEnv(key: string, fallback: number, opts: ReadPortEnvOptions = {}): number {
+  const raw = readEnvVar(key, { env: opts.env });
+  if (raw === undefined) return fallback;
+  // Strict integer parse: reject `12abc`, `1.5`, `0x10`, etc. that `Number`
+  // would otherwise coerce or accept.
+  if (!/^\d+$/.test(raw)) return fallback;
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return fallback;
+  return port;
+}
+
+/** A minimal injectable file reader: returns the file's UTF-8 contents. */
+export type ReadFileSyncFn = (path: string) => string;
+
+/** Options for {@link createCachedJsonArrayLoader}. */
+export interface CachedJsonArrayLoaderOptions {
+  /** Name of the env var holding the path to a JSON string-array file. */
+  envVar: string;
+  /** Returned when the var is unset, or the file is missing/unreadable/invalid. */
+  defaults: string[];
+  /** The source to read env from. Defaults to {@link process.env}. */
+  env?: EnvSource;
+  /**
+   * Injectable file reader (for tests). Defaults to a `node:fs` reader that
+   * throws when the file is missing — a missing file is caught and
+   * negative-cached like any other read failure.
+   */
+  readFile?: ReadFileSyncFn;
+  /**
+   * Label woven into the stderr warning on a missing/invalid file (e.g.
+   * `'redfin-mcp'`). Defaults to the env-var name.
+   */
+  label?: string;
+}
+
+/**
+ * Build a cached, negative-cached loader for an env-named JSON string-array
+ * file — the `loadCommunities` + `DEFAULT_COMMUNITIES` pattern quadruplicated
+ * across redfin/zillow/homes/onehome (only the env var differs:
+ * `REDFIN_/ZILLOW_/HOMES_/ONEHOME_COMMUNITIES_FILE`).
+ *
+ * The returned function:
+ *  - reads the file path from `envVar` via {@link readEnvVar} (placeholder
+ *    hardening), returning `defaults` when unset (and clearing any cache),
+ *  - parses the file as a JSON array of strings; on success caches and returns
+ *    it (keyed by the env-var value, so a path change re-reads),
+ *  - on a missing / unreadable file, invalid JSON, or non-string-array,
+ *    logs a single stderr warning and **negative-caches** — it returns
+ *    `defaults` without re-reading on subsequent calls for the same path,
+ *  - never re-reads a successfully-cached file.
+ *
+ * @example
+ * const loadCommunities = createCachedJsonArrayLoader({
+ *   envVar: 'REDFIN_COMMUNITIES_FILE',
+ *   defaults: DEFAULT_COMMUNITIES,
+ *   label: 'redfin-mcp',
+ * });
+ */
+export function createCachedJsonArrayLoader(opts: CachedJsonArrayLoaderOptions): () => string[] {
+  const env = opts.env ?? process.env;
+  const label = opts.label ?? opts.envVar;
+  // Default reader: `node:fs#readFileSync` (utf8). A missing file throws, which
+  // the catch below turns into a negative-cached fallback — mirroring redfin's
+  // original `existsSync` guard without the extra stat.
+  const readFile = opts.readFile ?? ((path: string): string => readFileSync(path, 'utf8'));
+
+  let cached: string[] | null = null;
+  // Path the cache (positive OR negative) is keyed to. A negative cache is
+  // `cached === null && cachedPath === <path>`: we resolved that path to
+  // defaults and won't re-read it.
+  let cachedPath: string | null = null;
+
+  return function load(): string[] {
+    const path = readEnvVar(opts.envVar, { env });
+    if (!path) {
+      // Unset: never cache (the var may be set later) and return defaults.
+      cached = null;
+      cachedPath = null;
+      return opts.defaults;
+    }
+    if (cachedPath === path) {
+      // Same path as last time — positive cache (return it) or negative cache
+      // (cached === null → return defaults without re-reading).
+      return cached ?? opts.defaults;
+    }
+    try {
+      const raw = readFile(path);
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed) || !parsed.every((s) => typeof s === 'string')) {
+        console.error(
+          `[${label}] ${opts.envVar}="${path}" must be a JSON string array — falling back to defaults.`,
+        );
+        cached = null;
+        cachedPath = path; // negative-cache this path
+        return opts.defaults;
+      }
+      cached = parsed;
+      cachedPath = path;
+      return cached;
+    } catch (err) {
+      console.error(
+        `[${label}] failed to load ${opts.envVar}="${path}": ${
+          err instanceof Error ? err.message : String(err)
+        } — falling back to defaults.`,
+      );
+      cached = null;
+      cachedPath = path; // negative-cache this path
+      return opts.defaults;
+    }
+  };
 }
 
 /** Options for {@link loadDotenvSafely}. */
