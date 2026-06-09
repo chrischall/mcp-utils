@@ -231,6 +231,7 @@ Includes `SessionStore`, `normalizeOrigin`, `AuthMode`, and `TokenManager`
 import {
   createFetchproxyTransport,
   createBootstrapOpts,
+  registerBridgeHealthcheckTool,
   mapWithConcurrency,
   TokenBucket,
   classifyBotWall,
@@ -240,6 +241,43 @@ import {
 Wraps `@fetchproxy/server` with the fleet's transport, bot-wall classification,
 deadline/retry, token-bucket rate limiting, and bounded-concurrency helpers, and
 re-exports the fetchproxy typed-error hierarchy.
+
+**Transport verb adapters.** Beyond the `start` / `close` / `status` lifecycle,
+`createFetchproxyTransport` exposes the verb passthroughs redfin / homes /
+compass / musescore had each hand-rolled over the server:
+
+- `fetch(init)` → `{ status, body, url }` via `server.request(...)`;
+- `requestJson(method, path, init?)` → `{ data, result }` via
+  `server.requestJson(...)` (serialization + header defaults + 204→null +
+  `JSON.parse`; the caller keeps its per-site `throwIfNotOk` over `result`);
+- `runProbe(fetchFn, probePath)` → the healthcheck probe loop.
+
+The one per-site bit is the subdomain: pass `defaultSubdomain: 'www'` for sites
+served from `www` (redfin/homes/compass); omit it for apex-served sites
+(musescore). A per-call `subdomain` always overrides the default, and absolute
+`http(s)://` paths self-describe their host. Other per-site verbs (e.g.
+musescore's `download` capability) stay caller-supplied — the factory covers the
+common subset, not the long tail.
+
+**Bridge-healthcheck tool factory.** `registerBridgeHealthcheckTool({ server,
+prefix, probePath, hostLabel, transport, probeFn })` registers a
+`<prefix>_healthcheck` tool that round-trips `probePath` through the bridge and
+reports bridge role / port / timing plus an actionable hint ladder
+(`bridge_down` → wake the SW, `role === null` → check startup, `timeout` →
+extension not connected, …). The failure hint cites the **actual configured
+bridge port** from `bridgeHealth()`, not a hardcoded `37149` — fixing the bug
+the per-site compass + musescore copies shared.
+
+```ts
+registerBridgeHealthcheckTool({
+  server,
+  prefix: 'compass',
+  probePath: '/robots.txt',
+  hostLabel: 'compass.com',
+  transport,
+  probeFn: (path) => client.fetchHtml(path),
+});
+```
 
 ### `html` — scraping helpers *(subpath, optional peer)*
 
