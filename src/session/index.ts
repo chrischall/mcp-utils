@@ -1,5 +1,5 @@
 /**
- * Session scaffolding for the MCP fleet — three related-but-distinct surfaces
+ * Session scaffolding for the MCP fleet — four related-but-distinct surfaces
  * consolidated behind one subpath (`@chrischall/mcp-utils/session`):
  *
  *  1. {@link SessionRegistry} — an *ephemeral, in-memory* registry of signed-in
@@ -16,6 +16,11 @@
  *     inside a 5-minute skew window, reactive 401-replay, and a single-flight
  *     semaphore so concurrent callers coalesce into ONE refresh. Used by
  *     skylight/canvas/creditkarma/honeybook/zola.
+ *
+ *  4. {@link CookieSessionManager} — the cookie-session analog of TokenManager:
+ *     a single-flight login + reactive expiry-replay (with heuristic, not just
+ *     status-code, expiry detection) + clear-on-settle so a rejected login never
+ *     sticks. Used by artsonia/canvas/evite/signupgenius/skylight.
  *
  * Security-sensitive by design (file perms + token-refresh races), so this is
  * the one audited implementation the fleet shares.
@@ -616,4 +621,198 @@ export class TokenManager {
     }
     return res;
   }
+}
+
+// ===========================================================================
+// 4. CookieSessionManager — cookie-session lifecycle (single-flight, replay)
+// ===========================================================================
+
+/**
+ * The minimal cookie-session shape the manager understands. Callers usually
+ * supply a richer `S` (extra cookies, a parsed JWT, a frame id, …) — only
+ * `cookieHeader` is structurally required, `csrfToken` is the common optional
+ * second field (Django/Rails CSRF rotation).
+ */
+export interface CookieSession {
+  /** The `Cookie:` request header value for authenticated calls. */
+  cookieHeader: string;
+  /** A rotating CSRF token, when the site uses one (e.g. Evite's `X-CSRFToken`). */
+  csrfToken?: string;
+}
+
+/** Options for {@link CookieSessionManager}. `S` is the caller-defined session shape. */
+export interface CookieSessionManagerOptions<S> {
+  /**
+   * Site-specific login that mints a fresh cookie session. The manager owns
+   * *when* this runs — lazily on first {@link CookieSessionManager.ensure},
+   * and again after {@link CookieSessionManager.invalidate} (or an expiry
+   * detected by {@link CookieSessionManagerOptions.isExpired}). Called at most
+   * once per concurrent burst (the in-flight promise is shared, single-flight).
+   */
+  login: () => Promise<S>;
+  /**
+   * Decide whether a response indicates the session expired and a re-login is
+   * warranted. This is the injection point for body/URL heuristics: status
+   * codes alone are insufficient — SignUpGenius serves a `200` HTML login page
+   * on expiry, and Artsonia expires by redirecting away from the target URL.
+   * May read the body/headers (return a promise) or just the status (sync).
+   * The `Response` is NOT consumed for you — if you read its body, pass a clone
+   * (`res.clone()`) so the caller can still read the original.
+   */
+  isExpired: (res: Response) => boolean | Promise<boolean>;
+  /**
+   * Distinguish a *permanent* configuration error (missing/invalid credentials)
+   * from a *transient* login failure (network blip, 5xx, login rate-limit). A
+   * permanent error is cached and rethrown on every subsequent {@link ensure}
+   * (the server can never recover without new config); a transient error leaves
+   * state unset so the next {@link ensure} retries the login. Mirrors Skylight's
+   * `NO_ENV_CONFIG_MARKER` check. Defaults to treating ALL failures as transient
+   * (always retry) — the safe default for sites with no config/transient split.
+   */
+  isPermanentError?: (err: unknown) => boolean;
+}
+
+/**
+ * Cookie-session analog of {@link TokenManager}: owns a site's cookie-session
+ * lifecycle with the same single-flight / replay / clear-on-settle discipline,
+ * so the fleet's cookie-session MCPs stop re-implementing (and subtly
+ * mis-implementing) it. Structurally prevents the audit-flagged class of bugs:
+ *
+ * - **Single-flight:** concurrent {@link ensure} callers coalesce onto ONE
+ *   in-flight {@link CookieSessionManagerOptions.login} (no thundering-herd
+ *   re-login against a rate-limited endpoint).
+ * - **Clear-on-settle:** the in-flight promise is cleared whether it resolves
+ *   or rejects, so a *rejected* login never sticks — the next {@link ensure}
+ *   retries (fixes Evite's poisoned-promise H1 and Skylight's gap).
+ * - **Exactly-one replay:** {@link withSession} re-logs-in and replays a request
+ *   AT MOST once on expiry; a persistent expiry surfaces rather than looping.
+ * - **Heuristic expiry:** {@link CookieSessionManagerOptions.isExpired} is the
+ *   injection point for body/URL detection (SignUpGenius's 200-HTML-login-page,
+ *   Artsonia's redirect-away), not just status codes.
+ * - **Permanent vs. transient:** only a permanent config error is cached
+ *   ({@link CookieSessionManagerOptions.isPermanentError}); transient login
+ *   failures stay retryable (Skylight's marker discipline).
+ *
+ * Target consumers (the 5 cohort MCPs whose hand-rolled re-login this replaces):
+ * `artsonia-mcp` (`AuthManager`), `canvas-parent-mcp` (`ensureAuth` + 401-replay,
+ * the reference impl), `evite-mcp` (`getSession`/`reauthenticate` + CSRF),
+ * `signupgenius-mcp` (`ensureAuth` + 401/403/200-HTML replay), and `skylight-mcp`
+ * (`makeGetClient` single-flight + `NO_ENV_CONFIG_MARKER` caching).
+ */
+export class CookieSessionManager<S = CookieSession> {
+  private session: S | undefined;
+  private inFlight: Promise<S> | undefined;
+  /** A cached *permanent* config error: once set, every `ensure` rethrows it. */
+  private permanentError: unknown | undefined;
+  private readonly loginFn: () => Promise<S>;
+  private readonly isExpiredFn: (res: Response) => boolean | Promise<boolean>;
+  private readonly isPermanentErrorFn: (err: unknown) => boolean;
+
+  constructor(opts: CookieSessionManagerOptions<S>) {
+    this.loginFn = opts.login;
+    this.isExpiredFn = opts.isExpired;
+    this.isPermanentErrorFn = opts.isPermanentError ?? (() => false);
+  }
+
+  /** The current session, or `undefined` before the first successful login. */
+  get current(): S | undefined {
+    return this.session;
+  }
+
+  /**
+   * Return the current session, or single-flight a login if there is none.
+   *
+   * Concurrent callers share one in-flight login; the in-flight promise is
+   * cleared on settle (success OR failure) so a rejected login never sticks and
+   * the next call retries. A login error classified permanent by
+   * {@link CookieSessionManagerOptions.isPermanentError} is cached and rethrown
+   * on every later call; a transient error is not cached (next call retries).
+   */
+  async ensure(): Promise<S> {
+    if (this.session !== undefined) return this.session;
+    if (this.permanentError !== undefined) throw this.permanentError;
+    if (this.inFlight === undefined) {
+      this.inFlight = this.runLogin();
+    }
+    return this.inFlight;
+  }
+
+  /**
+   * One login attempt. Self-clears `inFlight` on settle so a rejected login
+   * never sticks, and stamps the resulting session only while it's still the
+   * live attempt (an `invalidate()` mid-flight cleared `inFlight` — a stale
+   * resolution must not re-stamp the dropped session over the new state).
+   */
+  private runLogin(): Promise<S> {
+    // `holder.p` is assigned the attempt promise synchronously before any of the
+    // closure's awaits resume, so the `this.inFlight === holder.p` identity
+    // checks (which run as microtasks) always see the real reference.
+    const holder: { p?: Promise<S> } = {};
+    holder.p = (async () => {
+      try {
+        const session = await this.loginFn();
+        if (this.inFlight === holder.p) this.session = session;
+        return session;
+      } catch (err) {
+        if (this.isPermanentErrorFn(err)) this.permanentError = err;
+        throw err;
+      } finally {
+        if (this.inFlight === holder.p) this.inFlight = undefined;
+      }
+    })();
+    return holder.p;
+  }
+
+  /**
+   * Drop the current session (and any in-flight login) so the next
+   * {@link ensure} re-runs {@link CookieSessionManagerOptions.login}. Does NOT
+   * clear a cached permanent config error — that only clears on a fresh process
+   * (new config). Used to recover from a detected session expiry.
+   */
+  invalidate(): void {
+    this.session = undefined;
+    this.inFlight = undefined;
+  }
+
+  /**
+   * Run an authenticated `call` with the current session and reactive
+   * expiry-replay. `call` receives the session and returns a `Response`. If
+   * {@link CookieSessionManagerOptions.isExpired} flags the response, the
+   * session is invalidated, a single-flight re-login runs, and `call` is
+   * replayed EXACTLY once. A persistent expiry surfaces the (second) response
+   * rather than looping. If the re-login itself fails, the original
+   * (expired-looking) response is returned so the caller can surface a clean
+   * sign-in error rather than the login failure.
+   */
+  async withSession(call: (session: S) => Promise<Response>): Promise<Response> {
+    const session = await this.ensure();
+    const res = await call(session);
+    if (!(await this.isExpiredFn(res))) return res;
+
+    // Expired: re-login (single-flight) + exactly ONE replay.
+    //
+    // Guard against a double-invalidate race (mirrors TokenManager.withAuth):
+    // only drop the session if it's STILL the one this request used. If a
+    // concurrent caller already detected the same expiry and swapped in a fresh
+    // session, invalidating again would wipe that fresh session out from under
+    // them — so instead we leave it and let ensure() return the already-fresh
+    // one. This keeps a burst of expired-session requests to ONE re-login.
+    if (this.current === session) this.invalidate();
+    let fresh: S;
+    try {
+      fresh = await this.ensure();
+    } catch {
+      // Re-login failed (no creds, login rejected, …): surface the original
+      // expired response so the caller maps it to a clean sign-in error.
+      return res;
+    }
+    return call(fresh);
+  }
+}
+
+/** Construct a {@link CookieSessionManager}. */
+export function createCookieSessionManager<S = CookieSession>(
+  opts: CookieSessionManagerOptions<S>,
+): CookieSessionManager<S> {
+  return new CookieSessionManager<S>(opts);
 }

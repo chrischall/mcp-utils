@@ -19,6 +19,8 @@ import {
   SessionStore,
   normalizeOrigin,
   TokenManager,
+  CookieSessionManager,
+  createCookieSessionManager,
   type SessionToken,
 } from './index.js';
 
@@ -536,5 +538,257 @@ describe('TokenManager', () => {
     });
     await expect(tm.getAccessToken()).rejects.toThrow();
     expect(refresh).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CookieSessionManager — single-flight login, heuristic expiry, replay-once
+// ---------------------------------------------------------------------------
+
+interface FakeSession {
+  cookieHeader: string;
+  csrfToken?: string;
+}
+
+describe('CookieSessionManager', () => {
+  it('ensure() runs login lazily and memoizes the session', async () => {
+    const login = vi.fn(async (): Promise<FakeSession> => ({ cookieHeader: 'sid=1' }));
+    const mgr = new CookieSessionManager<FakeSession>({ login, isExpired: () => false });
+
+    expect(mgr.current).toBeUndefined();
+    const a = await mgr.ensure();
+    const b = await mgr.ensure();
+    expect(a).toEqual({ cookieHeader: 'sid=1' });
+    expect(b).toBe(a);
+    expect(mgr.current).toBe(a);
+    expect(login).toHaveBeenCalledOnce();
+  });
+
+  it('coalesces concurrent ensure() callers into a SINGLE login', async () => {
+    const d = deferred<FakeSession>();
+    const login = vi.fn(() => d.promise);
+    const mgr = new CookieSessionManager<FakeSession>({ login, isExpired: () => false });
+
+    const p1 = mgr.ensure();
+    const p2 = mgr.ensure();
+    expect(login).toHaveBeenCalledOnce();
+    d.resolve({ cookieHeader: 'sid=1' });
+    expect(await p1).toEqual({ cookieHeader: 'sid=1' });
+    expect(await p2).toBe(await p1);
+    expect(login).toHaveBeenCalledOnce();
+  });
+
+  it('a rejected login clears the in-flight promise so the next ensure() retries (evite H1)', async () => {
+    const login = vi
+      .fn<() => Promise<FakeSession>>()
+      .mockRejectedValueOnce(new Error('network blip'))
+      .mockResolvedValueOnce({ cookieHeader: 'sid=2' });
+    const mgr = new CookieSessionManager<FakeSession>({ login, isExpired: () => false });
+
+    await expect(mgr.ensure()).rejects.toThrow('network blip');
+    // poisoned promise must NOT stick — a second ensure() retries fresh
+    expect(await mgr.ensure()).toEqual({ cookieHeader: 'sid=2' });
+    expect(login).toHaveBeenCalledTimes(2);
+  });
+
+  it('caches a PERMANENT config error and rethrows it without retrying login (skylight marker)', async () => {
+    const login = vi
+      .fn<() => Promise<FakeSession>>()
+      .mockRejectedValue(new Error('NO_ENV_CONFIG: set ARTSONIA_USERNAME/PASSWORD'));
+    const mgr = new CookieSessionManager<FakeSession>({
+      login,
+      isExpired: () => false,
+      isPermanentError: (err) => err instanceof Error && err.message.includes('NO_ENV_CONFIG'),
+    });
+
+    await expect(mgr.ensure()).rejects.toThrow('NO_ENV_CONFIG');
+    await expect(mgr.ensure()).rejects.toThrow('NO_ENV_CONFIG');
+    // permanent → login only attempted once, error replayed from cache
+    expect(login).toHaveBeenCalledOnce();
+  });
+
+  it('a TRANSIENT login failure is not cached — next ensure() retries (skylight marker)', async () => {
+    const login = vi
+      .fn<() => Promise<FakeSession>>()
+      .mockRejectedValueOnce(new Error('502 from login endpoint'))
+      .mockResolvedValueOnce({ cookieHeader: 'sid=3' });
+    const mgr = new CookieSessionManager<FakeSession>({
+      login,
+      isExpired: () => false,
+      isPermanentError: (err) => err instanceof Error && err.message.includes('NO_ENV_CONFIG'),
+    });
+
+    await expect(mgr.ensure()).rejects.toThrow('502');
+    expect(await mgr.ensure()).toEqual({ cookieHeader: 'sid=3' });
+    expect(login).toHaveBeenCalledTimes(2);
+  });
+
+  it('invalidate() drops the session so the next ensure() re-logs-in', async () => {
+    const login = vi
+      .fn<() => Promise<FakeSession>>()
+      .mockResolvedValueOnce({ cookieHeader: 'sid=1' })
+      .mockResolvedValueOnce({ cookieHeader: 'sid=2' });
+    const mgr = new CookieSessionManager<FakeSession>({ login, isExpired: () => false });
+
+    expect((await mgr.ensure()).cookieHeader).toBe('sid=1');
+    mgr.invalidate();
+    expect(mgr.current).toBeUndefined();
+    expect((await mgr.ensure()).cookieHeader).toBe('sid=2');
+    expect(login).toHaveBeenCalledTimes(2);
+  });
+
+  it('withSession() replays exactly once on expiry then succeeds, re-logging-in', async () => {
+    const login = vi
+      .fn<() => Promise<FakeSession>>()
+      .mockResolvedValueOnce({ cookieHeader: 'sid=stale' })
+      .mockResolvedValueOnce({ cookieHeader: 'sid=fresh' });
+    const mgr = new CookieSessionManager<FakeSession>({
+      login,
+      isExpired: (res) => res.status === 401,
+    });
+
+    const seen: string[] = [];
+    const call = vi.fn(async (s: FakeSession) => {
+      seen.push(s.cookieHeader);
+      return new Response(null, { status: seen.length === 1 ? 401 : 200 });
+    });
+
+    const res = await mgr.withSession(call);
+    expect(res.status).toBe(200);
+    expect(seen).toEqual(['sid=stale', 'sid=fresh']);
+    expect(login).toHaveBeenCalledTimes(2);
+  });
+
+  it('withSession() surfaces a persistent expiry after EXACTLY one replay (no infinite loop)', async () => {
+    const login = vi.fn(async (): Promise<FakeSession> => ({ cookieHeader: 'sid' }));
+    const mgr = new CookieSessionManager<FakeSession>({
+      login,
+      isExpired: (res) => res.status === 401,
+    });
+    const call = vi.fn(async () => new Response(null, { status: 401 }));
+
+    const res = await mgr.withSession(call);
+    expect(res.status).toBe(401);
+    // initial login + one re-login; call invoked exactly twice (no loop)
+    expect(call).toHaveBeenCalledTimes(2);
+    expect(login).toHaveBeenCalledTimes(2);
+  });
+
+  it('withSession() detects expiry by BODY heuristic — a 200 login-page is treated expired (signupgenius)', async () => {
+    const login = vi
+      .fn<() => Promise<FakeSession>>()
+      .mockResolvedValueOnce({ cookieHeader: 'sid=stale' })
+      .mockResolvedValueOnce({ cookieHeader: 'sid=fresh' });
+    const mgr = new CookieSessionManager<FakeSession>({
+      login,
+      // status alone is insufficient: a 200 whose body is the login form means expired.
+      isExpired: async (res) => {
+        if (res.status === 401 || res.status === 403) return true;
+        const body = await res.clone().text();
+        return /<form[^>]*id="login"/i.test(body);
+      },
+    });
+
+    const seen: string[] = [];
+    const call = vi.fn(async (s: FakeSession) => {
+      seen.push(s.cookieHeader);
+      return seen.length === 1
+        ? new Response('<html><form id="login"></form></html>', { status: 200 })
+        : new Response('{"ok":true}', { status: 200 });
+    });
+
+    const res = await mgr.withSession(call);
+    expect(await res.text()).toBe('{"ok":true}');
+    expect(seen).toEqual(['sid=stale', 'sid=fresh']);
+    expect(login).toHaveBeenCalledTimes(2);
+  });
+
+  it('withSession() detects expiry by URL/redirect heuristic — redirect to login is expired (artsonia)', async () => {
+    const login = vi
+      .fn<() => Promise<FakeSession>>()
+      .mockResolvedValueOnce({ cookieHeader: 'sid=stale' })
+      .mockResolvedValueOnce({ cookieHeader: 'sid=fresh' });
+    const mgr = new CookieSessionManager<FakeSession>({
+      login,
+      // expiry manifests as a 302 redirect back to the login page, not a 401.
+      isExpired: (res) =>
+        (res.status === 301 || res.status === 302) &&
+        /login\.asp/i.test(res.headers.get('location') ?? ''),
+    });
+
+    const seen: string[] = [];
+    const call = vi.fn(async (s: FakeSession) => {
+      seen.push(s.cookieHeader);
+      return seen.length === 1
+        ? new Response(null, { status: 302, headers: { location: '/members/login.asp' } })
+        : new Response(null, { status: 200 });
+    });
+
+    const res = await mgr.withSession(call);
+    expect(res.status).toBe(200);
+    expect(seen).toEqual(['sid=stale', 'sid=fresh']);
+  });
+
+  it('withSession() returns the original expired response if the re-login itself fails (evite/canvas surface clean error)', async () => {
+    const login = vi
+      .fn<() => Promise<FakeSession>>()
+      .mockResolvedValueOnce({ cookieHeader: 'sid=stale' })
+      .mockRejectedValueOnce(new Error('no creds — fetchproxy path'));
+    const mgr = new CookieSessionManager<FakeSession>({
+      login,
+      isExpired: (res) => res.status === 401,
+    });
+    const call = vi.fn(async () => new Response(null, { status: 401 }));
+
+    const res = await mgr.withSession(call);
+    // re-login failed → original 401 surfaces (caller maps it to a sign-in error),
+    // and call is NOT replayed a second time.
+    expect(res.status).toBe(401);
+    expect(call).toHaveBeenCalledOnce();
+    expect(login).toHaveBeenCalledTimes(2);
+  });
+
+  it('withSession() passes the session (cookieHeader + csrfToken) through to call', async () => {
+    const session: FakeSession = { cookieHeader: 'sid=1; csrftoken=abc', csrfToken: 'abc' };
+    const login = vi.fn(async () => session);
+    const mgr = new CookieSessionManager<FakeSession>({ login, isExpired: () => false });
+
+    let received: FakeSession | undefined;
+    await mgr.withSession(async (s) => {
+      received = s;
+      return new Response(null, { status: 200 });
+    });
+    expect(received).toEqual(session);
+  });
+
+  it('createCookieSessionManager() builds an equivalent manager', async () => {
+    const login = vi.fn(async (): Promise<FakeSession> => ({ cookieHeader: 'sid=1' }));
+    const mgr = createCookieSessionManager<FakeSession>({ login, isExpired: () => false });
+    expect(mgr).toBeInstanceOf(CookieSessionManager);
+    expect(await mgr.ensure()).toEqual({ cookieHeader: 'sid=1' });
+  });
+
+  it('concurrent withSession() callers under an expired session re-login ONCE (single-flight replay)', async () => {
+    const login = vi
+      .fn<() => Promise<FakeSession>>()
+      .mockResolvedValueOnce({ cookieHeader: 'sid=stale' })
+      .mockResolvedValueOnce({ cookieHeader: 'sid=fresh' });
+    const mgr = new CookieSessionManager<FakeSession>({
+      login,
+      isExpired: (res) => res.status === 401,
+    });
+
+    // Prime a (stale) session so both concurrent calls start from it.
+    await mgr.ensure();
+
+    const call = vi.fn(async (s: FakeSession) =>
+      new Response(null, { status: s.cookieHeader === 'sid=fresh' ? 200 : 401 }),
+    );
+
+    const [r1, r2] = await Promise.all([mgr.withSession(call), mgr.withSession(call)]);
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(200);
+    // both detected expiry, but the re-login coalesced into ONE login call
+    expect(login).toHaveBeenCalledTimes(2); // 1 initial ensure + 1 coalesced re-login
   });
 });
