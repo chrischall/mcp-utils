@@ -503,7 +503,7 @@ function parseNameValue(entry: string): { name: string; value: string } | null {
 }
 
 /**
- * Parse `Set-Cookie` headers into a deduplicated {@link CookieJar}.
+ * Parse `Set-Cookie` headers into a deduplicated {@link ParsedCookieJar}.
  *
  * Login responses commonly send deletion markers (`Max-Age=0` or an epoch
  * `Expires`) alongside real cookies; forwarding both the delete and set form of
