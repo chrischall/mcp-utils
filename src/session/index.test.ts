@@ -291,6 +291,25 @@ describe('SessionStore', () => {
     }
   });
 
+  it('refuses to clobber the last backup slot when all 101 are taken', () => {
+    const filePath = join(dir, 'nested', 'sessions.json');
+    mkdirSync(join(dir, 'nested'), { recursive: true });
+    writeFileSync(`${filePath}.corrupt`, 'slot 0');
+    for (let n = 1; n <= 100; n++) writeFileSync(`${filePath}.corrupt-${n}`, `slot ${n}`);
+    writeFileSync(filePath, '{ one corruption too many');
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      makeStore(dir);
+      // The exhausted-slots path must not overwrite any existing backup...
+      expect(readFileSync(`${filePath}.corrupt-100`, 'utf8')).toBe('slot 100');
+      // ...and leaves the corrupt file in place (the "could not preserve" path).
+      expect(readFileSync(filePath, 'utf8')).toBe('{ one corruption too many');
+      expect(errSpy.mock.calls.flat().join(' ')).toMatch(/could not preserve/i);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
   it('creates intermediate directories with mode 0700', () => {
     const filePath = join(dir, 'a', 'b', 'sessions.json');
     const store = new SessionStore<TestSession>({

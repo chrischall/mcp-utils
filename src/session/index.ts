@@ -385,6 +385,8 @@ export class SessionStore<T extends Record<string, unknown>> {
       for (let n = 1; existsSync(candidate) && n <= 100; n++) {
         candidate = `${this.filePath}.corrupt-${n}`;
       }
+      // All 101 slots taken — refuse rather than clobber the last backup.
+      if (existsSync(candidate)) return null;
       renameSync(this.filePath, candidate);
       return candidate;
     } catch {
