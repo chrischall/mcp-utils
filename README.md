@@ -145,8 +145,9 @@ constant memory instead of a 20 MB Buffer.
 ### `http` — bearer API-client kit
 
 `createApiClient` plus building blocks: `buildQueryString`, `buildOptionalBody`,
-`formatApiError`, `parseLinkHeader`, `parseCookieJar`, JWT helpers
-(`decodeJwtExp`, `decodeJwtSessionId`, `validateJwtExpiry`), and the
+`formatApiError`, `parseLinkHeader`, `parseCookieJar`, `parseCookieHeader`,
+`runBoundedBatch`, JWT helpers (`decodeJwtExp`, `decodeJwtSessionId`,
+`validateJwtExpiry`), and the `ApiError` / `UpstreamHttpError` /
 `UnauthorizedError` / `RateLimitedError` / `RequestTimeoutError` classes.
 
 ```ts
@@ -166,6 +167,37 @@ const data = await api.get('/v1/things', { query: { page: 2 } });
 `timeout` (ms) bounds each attempt with an `AbortController`; on expiry it throws
 `RequestTimeoutError` instead of hanging the tool call. A 429 retry gets a fresh
 timeout. Omit it to keep the previous unbounded behavior.
+
+`parseCookieHeader(header)` parses an inbound *request* `Cookie:` header
+(`name=value; name2=value2`) into a `Record<string, string>` (first `=` splits,
+so values may contain `=`; last value wins on a duplicate name). It's the
+counterpart to `parseCookieJar`, which parses *response* `Set-Cookie` headers
+with their attributes and deletion semantics.
+
+`UpstreamHttpError(status, message)` is a directly-`throw new`-able,
+status-carrying HTTP error — the manual-throw parallel to `ApiError` (which
+`createApiClient` throws internally). It `extends ApiError`, so both the
+`err instanceof ApiError && err.status === 404` branch and a narrower
+`instanceof UpstreamHttpError` check work. Use it from a transport/bridge code
+path that doesn't route through `createApiClient` but still needs to branch on a
+404.
+
+```ts
+import { runBoundedBatch } from '@chrischall/mcp-utils';
+
+const rows = await runBoundedBatch(ids, (id, signal) => fetchRow(id, signal), {
+  deadlineMs: 45_000,                        // overall hard deadline for the whole batch
+  concurrency: 4,                            // optional fan-out cap
+  onTimeout: (id, i) => ({ id, pending: true }), // backfill any row the deadline cut off
+});
+```
+
+`runBoundedBatch(items, worker, opts)` races the whole batch against one overall
+`deadlineMs`; any item still unsettled when it fires is filled by
+`onTimeout(item, index)` (and its worker abandoned + `AbortSignal`-signalled) so
+a single hung row can't wedge the call. It always returns a full-length,
+input-ordered array. `setTimer`/`clearTimer` are injectable for tests. This
+hoists zillow's bulk-tool deadline + `pending`-backfill primitive.
 
 ### `dates` — date-format converters
 

@@ -200,6 +200,27 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * A status-carrying HTTP error consumers can `throw new` directly — the
+ * directly-constructible parallel to {@link ApiError} (which is only thrown
+ * *inside* {@link createApiClient}). Extends {@link ApiError} so the same
+ * `err instanceof ApiError && err.status === 404` branch works for both, while
+ * its own name/`instanceof UpstreamHttpError` distinguishes the manual throws.
+ *
+ * Consolidates opentable's local `HttpError` and musescore's
+ * `MusescoreHttpError` — structural twins (status-carrying, thrown from a
+ * transport/bridge code path that doesn't go through `createApiClient`, used to
+ * branch on a 404 fallback). Repos that DO route through `createApiClient`
+ * already get {@link ApiError} for free and don't need this.
+ */
+export class UpstreamHttpError extends ApiError {
+  constructor(status: number, message: string) {
+    super(status, message);
+    this.name = 'UpstreamHttpError';
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 function hostOf(baseUrl: string): string {
   try {
     return new URL(baseUrl).host;
@@ -535,6 +556,43 @@ export function parseCookieJar(setCookieHeaders: string[] | string | null | unde
   return { cookies, cookieHeader };
 }
 
+// ---------------------------------------------------------------------------
+// parseCookieHeader
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a *request* `Cookie:` header (`name=value; name2=value2`) into a
+ * name→value map. This is the inbound counterpart to {@link parseCookieJar},
+ * which parses *response* `Set-Cookie` headers (with their attributes and
+ * deletion semantics) — a `Cookie` header has no attributes, just pairs.
+ *
+ * Semantics (matching creditkarma's hand-rolled `extractCookieValue` ×3):
+ *  - splits on `;`, then on the FIRST `=` only, so a value containing `=`
+ *    (e.g. base64 padding `ab==`, or `x=y=z`) is preserved verbatim,
+ *  - trims surrounding whitespace from both name and value,
+ *  - skips fragments with no `=` (bare attributes) or an empty name (`=v`),
+ *  - keeps an empty value when the name is present (`a=` → `{ a: '' }`),
+ *  - on a duplicate name, the last value wins.
+ *
+ * A missing / empty / whitespace-only header yields `{}`.
+ *
+ * Consolidates creditkarma's `extractCookieValue` (single-name lookup ×3) and
+ * the cookie-header pattern-matching in two other repos: `extractCookieValue(h,
+ * name)` is `parseCookieHeader(h)[name] ?? null`.
+ */
+export function parseCookieHeader(header: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!header) return out;
+  for (const part of header.split(';')) {
+    const eqIdx = part.indexOf('=');
+    if (eqIdx < 0) continue; // bare attribute fragment, no `=`
+    const name = part.slice(0, eqIdx).trim();
+    if (name === '') continue; // missing name (leading `=`)
+    out[name] = part.slice(eqIdx + 1).trim();
+  }
+  return out;
+}
+
 /**
  * Anything {@link CookieJar.absorb} can read `Set-Cookie`s from: the array from
  * `Headers.getSetCookie()`, a single (possibly comma-joined) header string, or
@@ -703,4 +761,117 @@ export function validateJwtExpiry(token: string, nowMs: number = Date.now()): Jw
     };
   }
   return { expired: false, expiresIn };
+}
+
+// ---------------------------------------------------------------------------
+// runBoundedBatch
+// ---------------------------------------------------------------------------
+
+/** Options for {@link runBoundedBatch}. */
+export interface RunBoundedBatchOptions<T, R> {
+  /**
+   * Overall hard deadline for the WHOLE batch, in milliseconds. When it fires,
+   * any item that hasn't settled is filled by {@link onTimeout} and the batch
+   * returns immediately — unsettled workers are abandoned (left to settle in
+   * the background, never awaited), so a permanently-hung item can't wedge the
+   * call past this bound.
+   */
+  deadlineMs: number;
+  /**
+   * Backfill for an item the deadline cut off before it settled. Receives the
+   * original `item` and its `index` so the placeholder stays identifiable and
+   * re-runnable (the zillow `pending`-row pattern). Called only for unsettled
+   * slots.
+   */
+  onTimeout: (item: T, index: number) => R;
+  /**
+   * Max workers in flight at once. Defaults to unbounded (all items started
+   * immediately). Use it to bound fan-out against a rate-limited upstream.
+   */
+  concurrency?: number;
+  /**
+   * Injectable timer (for tests). Defaults to `setTimeout`. Must invoke `cb`
+   * after roughly `ms`, returning a handle passed to {@link clearTimer}.
+   */
+  setTimer?: (ms: number, cb: () => void) => unknown;
+  /** Injectable clear paired with {@link setTimer}. Defaults to `clearTimeout`. */
+  clearTimer?: (handle: unknown) => void;
+}
+
+/**
+ * Run `worker` over `items` with an overall hard deadline and a per-item
+ * timeout-backfill, returning a full-length, input-ordered array with exactly
+ * one result per item.
+ *
+ * Each item gets an index-addressable slot. Work is raced against `deadlineMs`;
+ * when the deadline fires first, every still-unsettled slot is filled by
+ * `onTimeout(item, index)` and the batch resolves immediately — the in-flight
+ * workers are abandoned (and signalled via their `AbortSignal`) rather than
+ * awaited, so a single hung row can't keep the whole call (and the MCP request
+ * deadline behind it) pinned open. When everything settles before the deadline,
+ * the timer is cleared and every slot holds its real result.
+ *
+ * Generalises zillow's bulk-tool `runWithDeadline` (`zillow_bulk_get` /
+ * `zillow_resolve_addresses`, issues #98/#78): the slot-array + overall-deadline
+ * + `pending`-backfill shape, now with the worker + concurrency folded in and an
+ * injectable timer for deterministic tests.
+ */
+export function runBoundedBatch<T, R>(
+  items: T[],
+  worker: (item: T, signal?: AbortSignal) => Promise<R>,
+  opts: RunBoundedBatchOptions<T, R>,
+): Promise<R[]> {
+  const slots: Array<R | undefined> = Array.from({ length: items.length });
+  const settled: boolean[] = new Array(items.length).fill(false);
+
+  // Nothing to do — never arm a timer for an empty batch.
+  if (items.length === 0) return Promise.resolve([]);
+
+  const setTimer = opts.setTimer ?? ((ms, cb) => setTimeout(cb, ms));
+  const clearTimer = opts.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
+  const controller = new AbortController();
+
+  // Bounded fan-out: a pool of `limit` runners pulling the next index off a
+  // shared cursor. limit >= items.length (or unset) means "all at once".
+  const limit =
+    opts.concurrency && opts.concurrency > 0
+      ? Math.min(opts.concurrency, items.length)
+      : items.length;
+
+  const runAll = async (): Promise<void> => {
+    let cursor = 0;
+    const runner = async (): Promise<void> => {
+      for (;;) {
+        const index = cursor;
+        cursor += 1;
+        if (index >= items.length) return;
+        const result = await worker(items[index]!, controller.signal);
+        slots[index] = result;
+        settled[index] = true;
+      }
+    };
+    await Promise.all(Array.from({ length: limit }, () => runner()));
+  };
+
+  return new Promise<R[]>((resolve) => {
+    let done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      clearTimer(handle);
+      // Signal abandoned workers so a cooperative worker can stop early.
+      if (!controller.signal.aborted) controller.abort();
+      resolve(
+        items.map((item, index) =>
+          settled[index] ? (slots[index] as R) : opts.onTimeout(item, index),
+        ),
+      );
+    };
+
+    const handle = setTimer(opts.deadlineMs, finish);
+
+    // Abandon (never await) the fan-out on the deadline path; on full settle,
+    // finish() clears the timer and returns the real results.
+    void runAll().then(finish, finish);
+  });
 }
