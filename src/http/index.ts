@@ -785,6 +785,14 @@ export interface RunBoundedBatchOptions<T, R> {
    */
   onTimeout: (item: T, index: number) => R;
   /**
+   * Backfill for an item whose `worker` REJECTED (threw). A worker error is
+   * isolated to its own slot — it never rejects the batch or cascades onto
+   * other items. Defaults to `onTimeout(item, index)` (a rejected worker is
+   * treated like a timeout) so a caller that doesn't care needn't distinguish;
+   * supply `onError` to tell a genuine failure apart from a deadline cutoff.
+   */
+  onError?: (item: T, index: number, err: unknown) => R;
+  /**
    * Max workers in flight at once. Defaults to unbounded (all items started
    * immediately). Use it to bound fan-out against a rate-limited upstream.
    */
@@ -823,6 +831,10 @@ export function runBoundedBatch<T, R>(
 ): Promise<R[]> {
   const slots: Array<R | undefined> = Array.from({ length: items.length });
   const settled: boolean[] = new Array(items.length).fill(false);
+  // An item whose worker threw: backfilled via onError (default onTimeout) at
+  // finish, distinct from a slot the deadline simply never reached.
+  const errored: boolean[] = new Array(items.length).fill(false);
+  const errorVals: unknown[] = new Array(items.length);
 
   // Nothing to do — never arm a timer for an empty batch.
   if (items.length === 0) return Promise.resolve([]);
@@ -845,9 +857,16 @@ export function runBoundedBatch<T, R>(
         const index = cursor;
         cursor += 1;
         if (index >= items.length) return;
-        const result = await worker(items[index]!, controller.signal);
-        slots[index] = result;
-        settled[index] = true;
+        // Isolate a worker rejection to its own slot: record it and continue
+        // pulling the next item, so one bad row neither rejects the batch nor
+        // strands the items this runner hasn't reached yet.
+        try {
+          slots[index] = await worker(items[index]!, controller.signal);
+          settled[index] = true;
+        } catch (err) {
+          errored[index] = true;
+          errorVals[index] = err;
+        }
       }
     };
     await Promise.all(Array.from({ length: limit }, () => runner()));
@@ -861,10 +880,13 @@ export function runBoundedBatch<T, R>(
       clearTimer(handle);
       // Signal abandoned workers so a cooperative worker can stop early.
       if (!controller.signal.aborted) controller.abort();
+      const onError = opts.onError ?? ((item: T, index: number) => opts.onTimeout(item, index));
       resolve(
-        items.map((item, index) =>
-          settled[index] ? (slots[index] as R) : opts.onTimeout(item, index),
-        ),
+        items.map((item, index) => {
+          if (settled[index]) return slots[index] as R;
+          if (errored[index]) return onError(item, index, errorVals[index]);
+          return opts.onTimeout(item, index);
+        }),
       );
     };
 

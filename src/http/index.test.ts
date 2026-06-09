@@ -1006,4 +1006,50 @@ describe('runBoundedBatch', () => {
       expect(armed).toBe(false);
     });
   });
+
+  it('isolates a worker rejection to its slot — others complete, batch does not reject', async () => {
+    const result = await runBoundedBatch(
+      [1, 2, 3],
+      async (n) => {
+        if (n === 2) throw new Error('boom');
+        return n * 10;
+      },
+      { deadlineMs: 1000, onTimeout: (item) => `timeout:${item}` as unknown as number },
+    );
+    // The throwing item falls back to onTimeout (default); the rest succeed.
+    expect(result).toEqual([10, 'timeout:2', 30]);
+  });
+
+  it('routes a worker rejection through onError when provided (distinct from a timeout)', async () => {
+    const result = await runBoundedBatch(
+      [1, 2, 3],
+      async (n) => {
+        if (n === 2) throw new Error('boom');
+        return n * 10;
+      },
+      {
+        deadlineMs: 1000,
+        onTimeout: (item) => `timeout:${item}` as unknown as number,
+        onError: (item, _i, err) => `error:${item}:${(err as Error).message}` as unknown as number,
+      },
+    );
+    expect(result).toEqual([10, 'error:2:boom', 30]);
+  });
+
+  it('a worker rejection under a concurrency cap does not strand queued items', async () => {
+    // limit=1 so all items share one runner; the throw on item 2 must not stop
+    // it from reaching item 3.
+    const seen: number[] = [];
+    const result = await runBoundedBatch(
+      [1, 2, 3],
+      async (n) => {
+        seen.push(n);
+        if (n === 2) throw new Error('boom');
+        return n;
+      },
+      { deadlineMs: 1000, concurrency: 1, onTimeout: () => -1 },
+    );
+    expect(seen).toEqual([1, 2, 3]); // item 3 still ran
+    expect(result).toEqual([1, -1, 3]);
+  });
 });
