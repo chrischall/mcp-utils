@@ -1,5 +1,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
+import { redactSecrets } from '../errors/index.js';
+
 /**
  * Wrap any JSON-serialisable value as an MCP tool result. This is the single
  * most duplicated snippet across the fleet:
@@ -26,10 +28,14 @@ export function imageResult(base64: string, mimeType: string): CallToolResult {
   };
 }
 
-/** Return an error tool result (`isError: true`) carrying a message. */
+/**
+ * Return an error tool result (`isError: true`) carrying a message. The message
+ * is run through {@link redactSecrets} so `errorResult(String(err))` can't leak
+ * tokens/cookies an upstream error carries — redaction only, never truncated.
+ */
 export function errorResult(message: string): CallToolResult {
   return {
-    content: [{ type: 'text', text: message }],
+    content: [{ type: 'text', text: redactSecrets(message) }],
     isError: true,
   };
 }

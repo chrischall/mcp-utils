@@ -82,8 +82,12 @@ deepMapStringField(payload, 'eventDate', dmyToIso);
 
 `McpToolError` and its subclasses (`SessionNotAuthenticatedError`,
 `BotWallError`, `RateLimitError`, `UnreachableError`, `ModeMismatchError`),
-plus `createHelpfulError`, `wrapToolError`, `truncateErrorMessage`, and
-`messageOf`. This core module has **no runtime dependencies** — the fetchproxy
+plus `createHelpfulError`, `wrapToolError`, `truncateErrorMessage`,
+`redactSecrets`, and `messageOf`. `redactSecrets` scrubs `Bearer`/`Basic` auth
+headers, `Cookie`/`Set-Cookie` values (cookie names stay visible), JWTs,
+well-known API-key shapes (`sk-…`, `ghp_…`, `xox?-…`, `AIza…`, `AKIA…`,
+`whsec_…`), and secret-bearing URL query params; `truncateErrorMessage` applies
+it before truncating, and `errorResult` applies it (without truncating). This core module has **no runtime dependencies** — the fetchproxy
 typed-error hierarchy (`Fetchproxy*Error`), the raw `classifyBridgeError` /
 `classifyRowError` re-exports, and the `bridgeErrorInfo` envelope helper live in
 the [`/fetchproxy`](#fetchproxy) subpath instead, so

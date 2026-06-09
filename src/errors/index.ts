@@ -133,13 +133,63 @@ export function createHelpfulError(message: string, opts?: { hint?: string }): M
 const BEARER_RE = /(bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi;
 // A JWT-shaped triple (header.payload.signature), each segment base64url-ish.
 const JWT_RE = /\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}\b/g;
+// `Authorization: Basic <base64 credentials>` — anchored on the full header name
+// so prose like "basic principles" never matches.
+const BASIC_AUTH_RE = /(authorization\s*:\s*basic\s+)[A-Za-z0-9+/=_-]{6,}/gi;
+// `Set-Cookie: name=value; Path=/; …` — redact the cookie VALUE only; the name
+// and the (non-secret) attributes stay visible for debuggability.
+const SET_COOKIE_RE = /(\bset-cookie\s*:\s*)([^=;,\s]+)=[^;,\s]*/gi;
+// `Cookie: a=1; b=2` — redact every pair's value, keep the names. The lookbehind
+// keeps this from re-matching the `Cookie` inside `Set-Cookie:`.
+const COOKIE_HEADER_RE =
+  /((?<!set-)\bcookie\s*:\s*)((?:[^=;,\s]+=[^;,\s]*)(?:;\s*[^=;,\s]+=[^;,\s]*)*)/gi;
+// Well-known API-key shapes as standalone tokens, each anchored to its documented
+// prefix + length/charset so ordinary prose (short hex ids, version strings,
+// UUIDs) never matches. Charsets containing `-` (a non-word character) can end
+// on it, where a trailing `\b` has nothing to anchor on — those patterns carry
+// a negative lookahead over their own charset instead.
+const API_KEY_RE = new RegExp(
+  [
+    'sk-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])', // OpenAI / Anthropic (incl. sk-ant-…)
+    'gh[pousr]_[A-Za-z0-9]{36,}\\b', // GitHub ghp_/gho_/ghu_/ghs_/ghr_
+    'xox[baprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9-])', // Slack
+    'AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])', // Google API key (39 chars total)
+    'AKIA[0-9A-Z]{16}\\b', // AWS access key id (20 chars total)
+    'whsec_[A-Za-z0-9]{16,}\\b', // webhook signing secret (Stripe-style)
+  ]
+    .map((p) => `\\b${p}`)
+    .join('|'),
+  'g',
+);
+// Secret-bearing query params — the value after `=` up to `&`/`#`/quote/space/end.
+// Anchored on `?`/`&` so plain prose like `key=primary` (no URL context) never
+// matches; that constraint is what makes short names like `key`/`sig` safe.
+const QUERY_SECRET_RE =
+  /([?&](?:access_token|refresh_token|client_secret|api_?key|signature|token|key|sig)=)[^&#\s"'<>`]+/gi;
 
 /**
  * Redact secrets that commonly leak into upstream error bodies before the text
- * is surfaced to a client: `Bearer <token>` headers and standalone JWTs.
+ * is surfaced to a client: `Bearer <token>` / `Authorization: Basic <…>` headers,
+ * `Cookie:` / `Set-Cookie:` header values (cookie names stay visible), standalone
+ * JWTs, well-known API-key shapes (OpenAI/Anthropic `sk-…`, GitHub `ghp_…`,
+ * Slack `xox?-…`, Google `AIza…`, AWS `AKIA…`, `whsec_…`), and secret-bearing
+ * URL query params (`access_token`, `api_key`, `token`, `key`, `sig`, …).
+ *
+ * Exported so fleet repos can redact custom strings (log lines, debug payloads)
+ * without taking on {@link truncateErrorMessage}'s length cap.
  */
-function redactSecrets(text: string): string {
-  return text.replace(BEARER_RE, '$1[REDACTED]').replace(JWT_RE, '[REDACTED]');
+export function redactSecrets(text: string): string {
+  return text
+    .replace(BEARER_RE, '$1[REDACTED]')
+    .replace(BASIC_AUTH_RE, '$1[REDACTED]')
+    .replace(SET_COOKIE_RE, '$1$2=[REDACTED]')
+    .replace(
+      COOKIE_HEADER_RE,
+      (_m, prefix: string, pairs: string) => `${prefix}${pairs.replace(/=[^;,\s]*/g, '=[REDACTED]')}`,
+    )
+    .replace(API_KEY_RE, '[REDACTED]')
+    .replace(QUERY_SECRET_RE, '$1[REDACTED]')
+    .replace(JWT_RE, '[REDACTED]');
 }
 
 /**

@@ -42,6 +42,24 @@ describe('errorResult', () => {
       isError: true,
     });
   });
+
+  it('redacts secrets in the message (security)', () => {
+    const res = errorResult('auth failed: Bearer eyJsecrettoken12345.payload.sig sent with Cookie: session=abc123def');
+    const text = (res.content[0] as { type: 'text'; text: string }).text;
+    expect(text).not.toContain('eyJsecrettoken12345');
+    expect(text).not.toContain('abc123def');
+    expect(text.toLowerCase()).toContain('bearer [redacted]');
+    expect(text).toContain('Cookie: session=[REDACTED]');
+    expect(res.isError).toBe(true);
+  });
+
+  it('does NOT truncate long messages (redaction only)', () => {
+    const long = 'x'.repeat(2000);
+    const res = errorResult(long);
+    const text = (res.content[0] as { type: 'text'; text: string }).text;
+    expect(text).toBe(long);
+    expect(text).not.toMatch(/truncated/i);
+  });
 });
 
 describe('flattenJsonApi', () => {
