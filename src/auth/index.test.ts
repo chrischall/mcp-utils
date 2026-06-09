@@ -112,6 +112,88 @@ describe('createAuthResolver', () => {
     await expect(resolve()).rejects.toThrow(/bridge offline/);
   });
 
+  // -- bridge-down hint preservation (the copy-pasted fleet block, absorbed) --
+
+  /** Duck-typed stand-in for `FetchproxyBridgeDownError` (no @fetchproxy import). */
+  function makeBridgeDownError(hint: string): Error {
+    const err = new Error(`fetchproxy bridge down during fetch. ${hint}`);
+    err.name = 'FetchproxyBridgeDownError';
+    (err as Error & { hint: string }).hint = hint;
+    return err;
+  }
+
+  it('surfaces the FetchproxyBridgeDownError hint verbatim when the bridge is down', async () => {
+    const hint =
+      'the fetchproxy extension\'s service worker is not responding ("content_script_unreachable"). ' +
+      'Make sure a tab for this domain is open, fully loaded, and signed in - then retry. ' +
+      'If it keeps happening, reload the extension from chrome://extensions and reload the tab.';
+    const bootstrap = vi.fn().mockRejectedValue(makeBridgeDownError(hint));
+    const resolve = createAuthResolver({
+      envVar: 'X_TOKEN',
+      bootstrap,
+      bootstrapOptions: { domains: ['x.com'], declare: { cookies: ['s'] } },
+      parseTokens: () => 'unused',
+      env: {},
+    });
+    const err = await resolve().then(
+      () => {
+        throw new Error('expected rejection');
+      },
+      (e: unknown) => e as Error & { hint?: string },
+    );
+    // The actionable copy must survive untruncated in the thrown message...
+    expect(err.message).toContain(hint);
+    expect(err.message).toMatch(/bridge is down/i);
+    // ...and still name the env-var escape hatch.
+    expect(err.message).toContain('X_TOKEN');
+    // The structured hint rides along for tool surfaces that render it.
+    expect(err.hint).toBe(hint);
+  });
+
+  it('does not treat a hint-less rejection as bridge-down (generic wrap unchanged)', async () => {
+    // Right name, but no string `hint` - fails the duck-type, falls to generic.
+    const impostor = new Error('worker gone');
+    impostor.name = 'FetchproxyBridgeDownError';
+    const bootstrap = vi.fn().mockRejectedValue(impostor);
+    const resolve = createAuthResolver({
+      envVar: 'X_TOKEN',
+      bootstrap,
+      bootstrapOptions: { domains: ['x.com'], declare: { cookies: ['s'] } },
+      parseTokens: () => 'unused',
+      env: {},
+    });
+    await expect(resolve()).rejects.toThrow(/fetchproxy fallback failed/);
+    await expect(resolve()).rejects.toThrow(/worker gone/);
+  });
+
+  it('does not treat an unrelated error carrying a `hint` property as bridge-down', async () => {
+    // Right `hint` shape, wrong name - fails the duck-type, falls to generic.
+    const other = Object.assign(new Error('HTTP 502'), { hint: 'retry later' });
+    const bootstrap = vi.fn().mockRejectedValue(other);
+    const resolve = createAuthResolver({
+      envVar: 'X_TOKEN',
+      bootstrap,
+      bootstrapOptions: { domains: ['x.com'], declare: { cookies: ['s'] } },
+      parseTokens: () => 'unused',
+      env: {},
+    });
+    await expect(resolve()).rejects.toThrow(/fetchproxy fallback failed/);
+    await expect(resolve()).rejects.toThrow(/HTTP 502/);
+  });
+
+  it('env path is unaffected by a bridge-down-throwing bootstrap', async () => {
+    const bootstrap = vi.fn().mockRejectedValue(makeBridgeDownError('wake the worker'));
+    const resolve = createAuthResolver({
+      envVar: 'X_TOKEN',
+      bootstrap,
+      bootstrapOptions: { domains: ['x.com'], declare: { cookies: ['s'] } },
+      parseTokens: () => 'unused',
+      env: { X_TOKEN: 'env-secret' },
+    });
+    await expect(resolve()).resolves.toEqual({ credential: 'env-secret', source: 'env' });
+    expect(bootstrap).not.toHaveBeenCalled();
+  });
+
   it('does not leak the secret value into the not-configured error message', async () => {
     const resolve = createAuthResolver({
       envVar: 'X_TOKEN',

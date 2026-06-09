@@ -24,6 +24,18 @@
  * (placeholder / `'null'` / `'undefined'` suppression); thrown errors never
  * echo the offending secret value and run upstream bodies through
  * {@link truncateErrorMessage} (redaction + truncation) before surfacing.
+ *
+ * fetchproxy bridge-down hints are preserved: when the injected bootstrap
+ * rejects with a `FetchproxyBridgeDownError` (duck-typed — this core module
+ * stays zero-runtime-dep and never imports `@fetchproxy/server` or the
+ * `/fetchproxy` subpath), {@link createAuthResolver} surfaces the error's
+ * actionable `.hint` verbatim ("make sure a signed-in tab is open… reload
+ * the extension…") instead of the generic truncated wrap. This absorbs the
+ * `classifyBridgeError(e) === 'bridge_down'` branch the fleet copies of this
+ * skeleton hand-rolled, and unblocks the zola / infinitecampus / ofw /
+ * creditkarma migrations onto this resolver in a later wave.
+ * ({@link resolveAuthPattern} never had the gap — it propagates a configured
+ * path's errors unwrapped, so an injected fetchproxy path's hint survives.)
  */
 
 import { readEnvVar, parseBoolEnv, type EnvSource } from '../config/index.js';
@@ -88,6 +100,27 @@ export interface AuthResolverOptions {
 }
 
 /**
+ * Duck-typed `bridge_down` detection — mirrors `classifyBridgeError(e) ===
+ * 'bridge_down'` from the `/fetchproxy` subpath WITHOUT importing
+ * `@fetchproxy/server` (this core module must stay zero-runtime-dep).
+ * `classifyBridgeError`'s `'bridge_down'` arm is exactly
+ * `err instanceof FetchproxyBridgeDownError`, and that class's constructor
+ * unconditionally sets `name = 'FetchproxyBridgeDownError'` and a non-empty
+ * string `hint` — so the (name, string-hint) pair is a faithful stand-in for
+ * the `instanceof`, and unlike `instanceof` it stays correct when the dep
+ * tree carries a duplicated copy of `@fetchproxy/server`.
+ *
+ * Returns the actionable `.hint` when `err` is bridge-down, else `undefined`.
+ */
+function bridgeDownHintOf(err: unknown): string | undefined {
+  if (err instanceof Error && err.name === 'FetchproxyBridgeDownError') {
+    const hint = (err as Error & { hint?: unknown }).hint;
+    if (typeof hint === 'string' && hint.length > 0) return hint;
+  }
+  return undefined;
+}
+
+/**
  * Build the canonical **three-path** auth resolver:
  *
  *  1. **Env credential** — `envVar` set (after hardened {@link readEnvVar}
@@ -132,6 +165,21 @@ export function createAuthResolver(
       try {
         session = await bootstrap(bootstrapOptions);
       } catch (e) {
+        // Bridge-down gets first-class treatment. A `FetchproxyBridgeDownError`
+        // only escapes bootstrap() after the server's one-shot lazy-revive
+        // retry also failed — the extension's service worker is genuinely down
+        // and the user needs to wake it. Its `.hint` is the actionable copy
+        // the fleet (zola / IC / ofw / honeybook) hand-rolled this branch to
+        // preserve; surface it verbatim (library-authored, not an untrusted
+        // upstream body — so no truncation that could clip the guidance).
+        const bridgeHint = bridgeDownHintOf(e);
+        if (bridgeHint !== undefined) {
+          throw createHelpfulError(
+            `Auth: no ${envVar} set, and the fetchproxy bridge is down ` +
+              `(extension service worker unreachable). ${bridgeHint}`,
+            { hint: bridgeHint },
+          );
+        }
         // Surface the fallback failure but point back at the env-var escape
         // hatch. Redact + truncate the underlying message.
         throw createHelpfulError(
@@ -194,7 +242,9 @@ export interface AuthPattern {
  * fetchproxy**. Runs the first *provided* resolver in that order (a missing
  * resolver = an unconfigured path). A resolver that throws propagates — a
  * partial-config error (the user's mistake) must surface, not silently fall
- * through. Throws an actionable error when no path is configured at all.
+ * through. Errors propagate *unwrapped*, so an injected fetchproxy path's
+ * bridge-down `.hint` survives intact. Throws an actionable error when no
+ * path is configured at all.
  */
 export async function resolveAuthPattern(pattern: AuthPattern): Promise<PatternResult> {
   const ordered: ReadonlyArray<PathResolver | undefined> = [
