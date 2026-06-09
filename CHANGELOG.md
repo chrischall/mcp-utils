@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/chrischall/mcp-utils/compare/v0.6.0...v0.7.0) (2026-06-09)
+
+
+### Features
+
+* **auth:** preserve fetchproxy bridge-down hints in createAuthResolver ([#33](https://github.com/chrischall/mcp-utils/issues/33)) ([2dc77cc](https://github.com/chrischall/mcp-utils/commit/2dc77cc62cf9439157ca1314e3da5a6add63e052))
+
+
+### Documentation
+
+* **skill:** add rate-limited-public-API + OAuth-writes archetype ([#30](https://github.com/chrischall/mcp-utils/issues/30)) ([85dc246](https://github.com/chrischall/mcp-utils/commit/85dc246e967b7c805cb6ff30ae1305b0d1a4df25))
+* **skill:** fleet-builder learnings from gemini-mcp build ([#27](https://github.com/chrischall/mcp-utils/issues/27)) ([1279fa9](https://github.com/chrischall/mcp-utils/commit/1279fa9e2b14bc64ed6b778b53f720636db69b8b))
+* **skill:** verify new knobs/Beta endpoints live; squash-merge stale-branch recovery ([#29](https://github.com/chrischall/mcp-utils/issues/29)) ([246f7d3](https://github.com/chrischall/mcp-utils/commit/246f7d3552948d0b8ba69a77de3bec2b2627ba40))
+
 ## [0.6.0](https://github.com/chrischall/mcp-utils/compare/v0.5.3...v0.6.0) (2026-06-07)
 
 
