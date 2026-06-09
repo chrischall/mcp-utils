@@ -40,6 +40,37 @@ export const IsoTime = z
   .regex(/^([01]?\d|2[0-3]):[0-5]\d$/, 'must be HH:MM (24h), e.g. 19:30');
 
 /**
+ * A bare numeric id as a string, e.g. App Store Connect's `1234567890`.
+ * Exactly one-or-more ASCII digits — no signs, decimals, or whitespace.
+ *
+ * Use for ids that are interpolated into request paths so a non-numeric value
+ * (or a traversal payload) can't slip through. (app-store-connect numeric ids.)
+ */
+export const NumericIdString = z
+  .string()
+  .regex(/^\d+$/, 'must be a numeric id (digits only)')
+  .describe('A numeric id string (digits only), safe to interpolate into a URL path.');
+
+/**
+ * A single, safe URL path segment: rejects the traversal / injection
+ * characters `/`, `..`, `?`, `#`, and any whitespace. The fleet-standard
+ * hardening for caller-supplied ids that get interpolated into request paths
+ * (tempo account ids, ASC ids, gemini path ids) — defense-in-depth against
+ * path traversal and query/fragment injection.
+ *
+ * Mirrors the `/^[A-Za-z0-9:_.-]+$/` + no-`..` pattern tempo uses for
+ * AccountId, generalized into one reusable atom.
+ */
+export const SafePathSegment = z
+  .string()
+  .min(1)
+  .regex(/^[^/?#\s]+$/, 'must not contain "/", "?", "#", or whitespace')
+  .refine((v) => !v.includes('..'), 'must not contain ".."')
+  .describe(
+    'A single URL path segment, safe to interpolate: no "/", "..", "?", "#", or whitespace.'
+  );
+
+/**
  * Optional portal-origin selector (e.g. `https://<vendor>.hbportal.co`).
  * Disambiguates which signed-in session a tool routes through when more than
  * one is active. Optional — when a single session is active it can be omitted.

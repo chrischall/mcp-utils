@@ -13,6 +13,7 @@ import {
   runBoundedBatch,
   decodeJwtExp,
   decodeJwtSessionId,
+  decodeJwtClaim,
   validateJwtExpiry,
   UnauthorizedError,
   RateLimitedError,
@@ -465,6 +466,26 @@ describe('decodeJwtSessionId', () => {
   it('returns null for an undecodable token or absent claim (never throws)', () => {
     expect(decodeJwtSessionId('garbage')).toBeNull();
     expect(decodeJwtSessionId(jwt({ exp: 1 }))).toBeNull();
+  });
+});
+
+describe('decodeJwtClaim', () => {
+  it('extracts an arbitrary claim', () => {
+    expect(decodeJwtClaim(jwt({ glid: 'g-123' }), 'glid')).toBe('g-123');
+  });
+
+  it('returns the raw value for non-string claims', () => {
+    expect(decodeJwtClaim(jwt({ exp: 1700000000 }), 'exp')).toBe(1700000000);
+    expect(decodeJwtClaim(jwt({ roles: ['a', 'b'] }), 'roles')).toEqual(['a', 'b']);
+  });
+
+  it('returns undefined for an absent claim', () => {
+    expect(decodeJwtClaim(jwt({ sub: 'u1' }), 'glid')).toBeUndefined();
+  });
+
+  it('returns undefined for a malformed token (never throws)', () => {
+    expect(decodeJwtClaim('garbage', 'glid')).toBeUndefined();
+    expect(decodeJwtClaim('a.b', 'glid')).toBeUndefined();
   });
 });
 

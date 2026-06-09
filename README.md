@@ -109,18 +109,45 @@ tool surface can show the user.
 
 ### `config` — hardened env/config
 
-`readEnvVar`, `requireEnvVar`, `parseBoolEnv`, `expandPath`, `loadDotenvSafely`.
+`readEnvVar`, `requireEnvVar`, `parseBoolEnv`, `readPortEnv`, `expandPath`,
+`loadDotenvSafely`, `createCachedJsonArrayLoader`.
 
 ```ts
-import { requireEnvVar, parseBoolEnv, expandPath } from '@chrischall/mcp-utils';
+import { requireEnvVar, parseBoolEnv, readPortEnv, expandPath } from '@chrischall/mcp-utils';
 
 const apiKey = requireEnvVar('MY_API_KEY');
 const debug = parseBoolEnv('MY_DEBUG', { default: false });
+const port = readPortEnv('MY_WS_PORT', 37149);  // placeholder/NaN/out-of-range → fallback
 const home = expandPath('~/.config/my-mcp');
 ```
 
+`readPortEnv` parses a TCP port with the same placeholder hardening as
+`readEnvVar`, plus integer + `1..65535` range validation — so an unexpanded
+`${MY_WS_PORT}` or junk falls back to the default instead of handing `NaN` to
+the server.
+
 `loadDotenvSafely` is a no-throw `.env` loader (returns `false` instead of
 failing when the file is absent).
+
+`createCachedJsonArrayLoader` builds a cached, negative-cached loader for an
+env-named JSON string-array file — the `loadCommunities`/`DEFAULT_COMMUNITIES`
+pattern shared across the realty servers:
+
+```ts
+import { createCachedJsonArrayLoader } from '@chrischall/mcp-utils';
+
+const loadCommunities = createCachedJsonArrayLoader({
+  envVar: 'REDFIN_COMMUNITIES_FILE',  // path to a JSON string-array file
+  defaults: DEFAULT_COMMUNITIES,      // returned when unset/missing/invalid
+  label: 'redfin-mcp',
+});
+
+const communities = loadCommunities();  // parses + caches; re-reads only on path change
+```
+
+A successful parse is cached; a missing/unreadable file, invalid JSON, or a
+non-string-array logs one stderr warning and negative-caches (returns defaults
+without re-reading). Pass `readFile` to inject a reader in tests.
 
 ### `fs` — streaming file helpers (uploads)
 
@@ -147,8 +174,12 @@ constant memory instead of a 20 MB Buffer.
 `createApiClient` plus building blocks: `buildQueryString`, `buildOptionalBody`,
 `formatApiError`, `parseLinkHeader`, `parseCookieJar`, `parseCookieHeader`,
 `runBoundedBatch`, JWT helpers (`decodeJwtExp`, `decodeJwtSessionId`,
-`validateJwtExpiry`), and the `ApiError` / `UpstreamHttpError` /
+`decodeJwtClaim`, `validateJwtExpiry`), and the `ApiError` / `UpstreamHttpError` /
 `UnauthorizedError` / `RateLimitedError` / `RequestTimeoutError` classes.
+
+`decodeJwtClaim(token, claim)` is the generic single-claim reader — returns the
+raw claim value (`unknown`) or `undefined` for an undecodable token / absent
+claim, so a repo doesn't hand-roll its own `extractXFromJwt`.
 
 ```ts
 import { createApiClient } from '@chrischall/mcp-utils';
@@ -216,7 +247,8 @@ deepMapStringField(payload, 'eventDate', dmyToIso);     // '28-08-2025' → '202
 ### `zod` — schema atoms
 
 Reusable schemas (`PositiveInt`, `NonNegInt`, `NonEmptyString`, `IsoDate`,
-`IsoTime`, `schemaOrigin`, `schemaConfirm`), pagination helpers
+`IsoTime`, `NumericIdString`, `SafePathSegment`, `schemaOrigin`,
+`schemaConfirm`), pagination helpers
 (`paginationSchema`, `pageSchema`, `calculateOffset`), tool-annotation builders
 (`toolAnnotations`), and time normalizers (`extractTime`, `normalizeTime`).
 
@@ -227,6 +259,11 @@ const inputSchema = { ...paginationSchema, q: NonEmptyString };
 const offset = calculateOffset(page, size);
 const annotations = toolAnnotations({ readOnly: true });
 ```
+
+`NumericIdString` (`/^\d+$/`) and `SafePathSegment` (rejects `/`, `..`, `?`,
+`#`, and whitespace) harden caller-supplied ids that get interpolated into
+request paths — defense-in-depth against path traversal and query/fragment
+injection.
 
 ### `auth` — auth resolver skeletons
 

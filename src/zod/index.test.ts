@@ -6,6 +6,8 @@ import {
   NonEmptyString,
   IsoDate,
   IsoTime,
+  NumericIdString,
+  SafePathSegment,
   schemaOrigin,
   schemaConfirm,
   paginationSchema,
@@ -78,6 +80,38 @@ describe('atoms', () => {
       const r = IsoTime.safeParse('99:99');
       expect(r.success).toBe(false);
       if (!r.success) expect(r.error.issues[0]?.message).toMatch(/HH:MM/);
+    });
+  });
+
+  describe('NumericIdString', () => {
+    it('accepts a bare numeric id', () => {
+      expect(NumericIdString.parse('1234567890')).toBe('1234567890');
+      expect(NumericIdString.parse('0')).toBe('0');
+    });
+    it('rejects non-numeric, signed, decimal, and traversal payloads', () => {
+      expect(NumericIdString.safeParse('').success).toBe(false);
+      expect(NumericIdString.safeParse('12a').success).toBe(false);
+      expect(NumericIdString.safeParse('-1').success).toBe(false);
+      expect(NumericIdString.safeParse('1.5').success).toBe(false);
+      expect(NumericIdString.safeParse('../x').success).toBe(false);
+      expect(NumericIdString.safeParse('1/2').success).toBe(false);
+    });
+  });
+
+  describe('SafePathSegment', () => {
+    it('accepts safe id-like segments', () => {
+      expect(SafePathSegment.parse('abc-123')).toBe('abc-123');
+      expect(SafePathSegment.parse('5b10a:abcd-1234')).toBe('5b10a:abcd-1234');
+      expect(SafePathSegment.parse('user.name_1')).toBe('user.name_1');
+    });
+    it('rejects traversal / injection chars and empty', () => {
+      expect(SafePathSegment.safeParse('../x').success).toBe(false);
+      expect(SafePathSegment.safeParse('a/b').success).toBe(false);
+      expect(SafePathSegment.safeParse('a?x').success).toBe(false);
+      expect(SafePathSegment.safeParse('a#f').success).toBe(false);
+      expect(SafePathSegment.safeParse('a b').success).toBe(false);
+      expect(SafePathSegment.safeParse('..').success).toBe(false);
+      expect(SafePathSegment.safeParse('').success).toBe(false);
     });
   });
 
