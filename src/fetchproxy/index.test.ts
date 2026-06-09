@@ -25,7 +25,11 @@ import {
   extractImgTags,
   lastPathSegment,
   bridgeErrorInfo,
+  registerBridgeHealthcheckTool,
+  type FetchproxyTransport,
 } from './index.js';
+import type { BridgeProbeResult } from '@fetchproxy/server';
+import { createTestHarness, parseToolResult } from '../test/index.js';
 
 let identityDir: string;
 
@@ -350,5 +354,316 @@ describe('bridgeErrorInfo (envelope)', () => {
   it('redacts/truncates the surfaced message (security)', () => {
     const out = bridgeErrorInfo(new Error('Bearer eyJleaktoken99999.p.s here'));
     expect(out.message).not.toMatch(/eyJleaktoken99999/);
+  });
+});
+
+describe('createFetchproxyTransport — verb adapters', () => {
+  it('fetch() threads the default subdomain and returns the {status,body,url} triple', async () => {
+    const t = createFetchproxyTransport({
+      serverName: 'redfin-mcp',
+      version: '1.0.0',
+      domains: ['redfin.com'],
+      defaultSubdomain: 'www',
+      identityDir,
+    });
+    const reqSpy = vi
+      .spyOn(t.server, 'request')
+      .mockResolvedValue({ status: 200, body: 'ok', url: 'https://www.redfin.com/robots.txt' });
+
+    const res = await t.fetch({ method: 'GET', path: '/robots.txt' });
+
+    expect(res).toEqual({ status: 200, body: 'ok', url: 'https://www.redfin.com/robots.txt' });
+    expect(reqSpy).toHaveBeenCalledWith('GET', '/robots.txt', { subdomain: 'www' });
+  });
+
+  it('fetch() omits subdomain entirely for an apex-served MCP (no defaultSubdomain)', async () => {
+    const t = createFetchproxyTransport({
+      serverName: 'musescore-mcp',
+      version: '1.0.0',
+      domains: ['musescore.com'],
+      identityDir,
+    });
+    const reqSpy = vi
+      .spyOn(t.server, 'request')
+      .mockResolvedValue({ status: 200, body: 'x', url: 'https://musescore.com/robots.txt' });
+
+    await t.fetch({ method: 'GET', path: '/robots.txt', headers: { 'X-A': '1' } });
+
+    // No `subdomain` key at all — the apex host is targeted.
+    expect(reqSpy).toHaveBeenCalledWith('GET', '/robots.txt', { headers: { 'X-A': '1' } });
+  });
+
+  it('fetch() lets a per-call subdomain override the default', async () => {
+    const t = createFetchproxyTransport({
+      serverName: 'homes-mcp',
+      version: '1.0.0',
+      domains: ['homes.com'],
+      defaultSubdomain: 'www',
+      identityDir,
+    });
+    const reqSpy = vi
+      .spyOn(t.server, 'request')
+      .mockResolvedValue({ status: 200, body: '', url: 'https://photos.homes.com/x' });
+
+    await t.fetch({ method: 'POST', path: '/x', body: 'b', subdomain: 'photos' });
+
+    expect(reqSpy).toHaveBeenCalledWith('POST', '/x', {
+      body: 'b',
+      subdomain: 'photos',
+    });
+  });
+
+  it('requestJson() returns both data and the raw result, threading the default subdomain', async () => {
+    const t = createFetchproxyTransport({
+      serverName: 'compass-mcp',
+      version: '1.0.0',
+      domains: ['compass.com'],
+      defaultSubdomain: 'www',
+      identityDir,
+    });
+    const jsonSpy = vi.spyOn(t.server, 'requestJson').mockResolvedValue({
+      data: { hello: 'world' },
+      result: { status: 200, body: '{"hello":"world"}', url: 'https://www.compass.com/api' },
+    });
+
+    const out = await t.requestJson<{ hello: string }>('POST', '/api', { body: { q: 1 } });
+
+    expect(out.data).toEqual({ hello: 'world' });
+    expect(out.result).toEqual({
+      status: 200,
+      body: '{"hello":"world"}',
+      url: 'https://www.compass.com/api',
+    });
+    expect(jsonSpy).toHaveBeenCalledWith('POST', '/api', { body: { q: 1 }, subdomain: 'www' });
+  });
+
+  it('runProbe() delegates straight to the server', async () => {
+    const t = createFetchproxyTransport({
+      serverName: 'redfin-mcp',
+      version: '1.0.0',
+      domains: ['redfin.com'],
+      identityDir,
+    });
+    const probeResult: BridgeProbeResult = {
+      ok: true,
+      elapsed_ms: 5,
+      bridge: {
+        role: 'host',
+        port: 40000,
+        server_version: '1.0.0',
+        fetch_timeout_ms: 30000,
+        last_success_at: 1,
+        last_failure_at: null,
+        last_failure_reason: null,
+        consecutive_failures: 0,
+      },
+    };
+    const probeSpy = vi.spyOn(t.server, 'runProbe').mockResolvedValue(probeResult);
+    const fn = async (p: string) => p;
+
+    const out = await t.runProbe(fn, '/robots.txt');
+
+    expect(out).toBe(probeResult);
+    expect(probeSpy).toHaveBeenCalledWith(fn, '/robots.txt');
+  });
+});
+
+describe('registerBridgeHealthcheckTool', () => {
+  // A minimal fake transport: `runProbe` returns a caller-supplied probe
+  // result (optionally invoking `fetchFn` so the body-length path is exercised),
+  // and `status()` supplies the liveness counter the projection omits.
+  function fakeTransport(
+    probeResult: BridgeProbeResult,
+    opts: { lastExtensionMessageAt?: number | null; invokeFetchFn?: boolean } = {},
+  ): Pick<FetchproxyTransport, 'runProbe' | 'status'> {
+    return {
+      async runProbe(fetchFn, probePath) {
+        if (opts.invokeFetchFn !== false && probeResult.ok) {
+          await fetchFn(probePath);
+        } else if (!probeResult.ok) {
+          // Mirror runProbe: call fetchFn so the consumer's catch captures the throw.
+          try {
+            await fetchFn(probePath);
+          } catch {
+            /* swallow — runProbe already classified it into probeResult.error */
+          }
+        }
+        return probeResult;
+      },
+      status() {
+        return {
+          role: probeResult.bridge.role,
+          port: probeResult.bridge.port,
+          serverVersion: probeResult.bridge.server_version,
+          fetchTimeoutMs: probeResult.bridge.fetch_timeout_ms,
+          bridgeReviveDelayMs: 2000,
+          lastSuccessAt: probeResult.bridge.last_success_at,
+          lastFailureAt: probeResult.bridge.last_failure_at,
+          lastFailureReason: probeResult.bridge.last_failure_reason,
+          consecutiveFailures: probeResult.bridge.consecutive_failures,
+          lastExtensionMessageAt: opts.lastExtensionMessageAt ?? null,
+          keepAlive: {
+            enabled: true,
+            intervalMs: 20000,
+            maxIdleMs: 300000,
+            lastPingAt: null,
+            totalPings: 0,
+            idleSinceMs: null,
+          },
+          swEviction: {
+            lazyReviveAttempts: 0,
+            lazyReviveSuccesses: 0,
+            lastEvictionDetectedAt: null,
+          },
+        };
+      },
+    };
+  }
+
+  const healthyProbe = (port: number): BridgeProbeResult => ({
+    ok: true,
+    elapsed_ms: 12,
+    bridge: {
+      role: 'host',
+      port,
+      server_version: '1.0.0',
+      fetch_timeout_ms: 30000,
+      last_success_at: Date.now(),
+      last_failure_at: null,
+      last_failure_reason: null,
+      consecutive_failures: 0,
+    },
+  });
+
+  it('registers a <prefix>_healthcheck tool', async () => {
+    const transport = fakeTransport(healthyProbe(37149));
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'compass',
+        probePath: '/robots.txt',
+        hostLabel: 'compass.com',
+        transport,
+        probeFn: async () => 'body',
+      }),
+    );
+    const tools = await harness.listTools();
+    expect(tools.map((t) => t.name)).toContain('compass_healthcheck');
+    await harness.close();
+  });
+
+  it('healthy probe → ok result with role + timing + body length', async () => {
+    const transport = fakeTransport(healthyProbe(37149), { lastExtensionMessageAt: 999 });
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'compass',
+        probePath: '/robots.txt',
+        hostLabel: 'compass.com',
+        transport,
+        probeFn: async () => 'robots body',
+      }),
+    );
+    const res = parseToolResult<{
+      ok: boolean;
+      bridge: { role: string; port: number; last_extension_message_at: number | null };
+      probe: { url: string; elapsed_ms: number; status?: number; body_length?: number };
+      hint: string;
+    }>(await harness.callTool('compass_healthcheck'));
+
+    expect(res.ok).toBe(true);
+    expect(res.bridge.role).toBe('host');
+    expect(res.bridge.last_extension_message_at).toBe(999);
+    expect(res.probe.url).toBe('https://compass.com/robots.txt');
+    expect(res.probe.status).toBe(200);
+    expect(res.probe.body_length).toBe('robots body'.length);
+    expect(res.probe.elapsed_ms).toBe(12);
+    expect(res.hint).toMatch(/round-tripped/i);
+    await harness.close();
+  });
+
+  it('bridge-down → failure with the actionable hint AND the real configured port (not 37149)', async () => {
+    const REAL_PORT = 40555; // deliberately NOT the default 37149
+    const downProbe: BridgeProbeResult = {
+      ok: false,
+      elapsed_ms: 3,
+      bridge: {
+        role: null, // bridge_down can fire before a role is bound
+        port: REAL_PORT,
+        server_version: '1.0.0',
+        fetch_timeout_ms: 30000,
+        last_success_at: null,
+        last_failure_at: Date.now(),
+        last_failure_reason: 'bridge_down: sw gone',
+        consecutive_failures: 1,
+      },
+      error: { kind: 'bridge_down', message: 'sw gone' },
+    };
+    const transport = fakeTransport(downProbe);
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'musescore',
+        probePath: '/robots.txt',
+        hostLabel: 'musescore.com',
+        transport,
+        probeFn: async () => {
+          throw new FetchproxyBridgeDownError({ originalError: 'sw gone' });
+        },
+      }),
+    );
+    const res = parseToolResult<{
+      ok: boolean;
+      error?: { kind: string; message: string; bridge_hint?: string };
+      hint: string;
+    }>(await harness.callTool('musescore_healthcheck'));
+
+    expect(res.ok).toBe(false);
+    expect(res.error?.kind).toBe('bridge_down');
+    // The bridge_down hint must win over the role===null fallback.
+    expect(res.hint).toMatch(/service worker is not responding/i);
+    // The server-authored hint is surfaced.
+    expect(res.error?.bridge_hint).toBeTruthy();
+    await harness.close();
+  });
+
+  it('role===null timeout → hint cites the REAL port, never the hardcoded 37149 (audit bug fix)', async () => {
+    const REAL_PORT = 40555;
+    const timeoutProbe: BridgeProbeResult = {
+      ok: false,
+      elapsed_ms: 30001,
+      bridge: {
+        role: null,
+        port: REAL_PORT,
+        server_version: '1.0.0',
+        fetch_timeout_ms: 30000,
+        last_success_at: null,
+        last_failure_at: Date.now(),
+        last_failure_reason: 'timeout',
+        consecutive_failures: 1,
+      },
+      error: { kind: 'other', message: 'boom' },
+    };
+    const transport = fakeTransport(timeoutProbe);
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'redfin',
+        probePath: '/robots.txt',
+        hostLabel: 'www.redfin.com',
+        transport,
+        probeFn: async () => {
+          throw new Error('boom');
+        },
+      }),
+    );
+    const res = parseToolResult<{ hint: string }>(
+      await harness.callTool('redfin_healthcheck'),
+    );
+
+    // The "never bound a role" hint must reference the configured port.
+    expect(res.hint).toContain(String(REAL_PORT));
+    expect(res.hint).not.toContain('37149');
+    await harness.close();
   });
 });

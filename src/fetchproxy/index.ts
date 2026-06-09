@@ -9,7 +9,13 @@
  *
  *  - {@link createFetchproxyTransport} wraps a `FetchproxyServer` in the
  *    `start` / `close` / `status` lifecycle every MCP's transport interface
- *    expects, with optional debug-gated role logging.
+ *    expects, with optional debug-gated role logging, PLUS the opt-in verb
+ *    passthroughs (`fetch` / `requestJson` / `runProbe`) that redfin / homes /
+ *    compass / musescore had each hand-rolled over the server.
+ *  - {@link registerBridgeHealthcheckTool} registers a `<prefix>_healthcheck`
+ *    tool that round-trips a probe path through the bridge and surfaces the
+ *    actionable hint ladder compass + musescore had each copied (with drifted
+ *    internals + a hardcoded-port bug) into `src/tools/healthcheck.ts`.
  *  - {@link createBootstrapOpts} assembles a multi-domain / capture-header /
  *    storage-pointer declaration fragment of `FetchproxyServerOpts`, deriving
  *    the required `capabilities` from the declared bootstrap so callers can't
@@ -18,6 +24,15 @@
  * The adapter shape is identical across 12+ fetchproxy MCPs; collapsing it here
  * keeps the per-row / concurrency / deadline helpers as re-exports rather than
  * re-rolled code.
+ *
+ * Lazy-import note: this whole subpath is gated behind the OPTIONAL
+ * `@fetchproxy/server` peer dep — a consumer only resolves it by importing
+ * `@chrischall/mcp-utils/fetchproxy`, never via the core barrel. The eager
+ * top-level import below therefore never reaches a `.mcpb` bundle that
+ * externalizes `@fetchproxy/server` unless that consumer actually opted into
+ * the bridge. Everything added here routes through that same already-imported
+ * `FetchproxyServer` instance (no NEW top-level `@fetchproxy/server` import),
+ * so the bundle-load smoke posture is unchanged.
  */
 
 import {
@@ -25,8 +40,13 @@ import {
   FetchproxyBridgeDownError,
   classifyBridgeError as classifyBridgeErrorKind,
   type FetchproxyServerOpts,
+  // Type-only — erased at compile, no runtime `@fetchproxy/server` reference
+  // beyond the values already imported above.
+  type HttpResponse,
+  type BridgeProbeResult,
 } from '@fetchproxy/server';
 import type { Capability } from '@fetchproxy/protocol';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { truncateErrorMessage, messageOf } from '../errors/index.js';
 
 // ---------------------------------------------------------------------------
@@ -110,6 +130,41 @@ function envFlagEnabled(key: string, env: NodeJS.ProcessEnv = process.env): bool
 }
 
 /**
+ * One request to round-trip through the bridge. The path is resolved relative
+ * to the transport's declared domain (a `defaultSubdomain` — e.g. `'www'` — is
+ * applied unless the caller overrides it per-call). This is the common
+ * `FetchInit` redfin / homes / compass / musescore each declared verbatim in
+ * their `src/transport.ts`.
+ */
+export interface FetchproxyFetchInit {
+  /** Path-and-query relative to the declared domain, e.g. `/robots.txt`. */
+  path: string;
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  headers?: Record<string, string>;
+  /** Serialized request body. JSON callers stringify before calling. */
+  body?: string;
+  /**
+   * Per-call subdomain override. Defaults to the transport's `defaultSubdomain`
+   * (and, absent that, the apex). Absolute `http(s)://` paths self-describe
+   * their host, so this is ignored for them.
+   */
+  subdomain?: string;
+  /** Per-call base-domain selector (required only for multi-domain MCPs). */
+  domain?: string;
+}
+
+/** The success-arm `{status, body, url}` triple every consumer returns. */
+export type FetchproxyFetchResult = HttpResponse;
+
+/** Options for {@link FetchproxyTransport.requestJson}. */
+export interface FetchproxyRequestJsonInit {
+  headers?: Record<string, string>;
+  body?: unknown;
+  subdomain?: string;
+  domain?: string;
+}
+
+/**
  * The lifecycle surface every per-MCP fetchproxy transport interface exposes.
  * `createFetchproxyTransport` returns this, typed as the caller's `T` so it can
  * stand in for `RedfinTransport`, `ZillowTransport`, etc. without those
@@ -135,6 +190,35 @@ export interface FetchproxyTransport {
    * verb.
    */
   readonly server: FetchproxyServer;
+  /**
+   * Verb passthrough: round-trip one request through `server.request(...)`,
+   * applying the transport's `defaultSubdomain`, and return the success-arm
+   * `{status, body, url}` triple. Bridge failures throw the typed errors
+   * (`FetchproxyBridgeDownError` / `FetchproxyTimeoutError` / …), exactly like
+   * `server.request`. This is the `fetch(init)` redfin / homes / compass /
+   * musescore each wrote by hand.
+   */
+  fetch(init: FetchproxyFetchInit): Promise<FetchproxyFetchResult>;
+  /**
+   * Verb passthrough over `server.requestJson(...)` (serialization + header
+   * defaults + 204→null + JSON.parse). Returns BOTH the parsed `data` and the
+   * raw success-arm `result`, so the caller keeps its per-site `throwIfNotOk` /
+   * sign-in guards over `result`. `defaultSubdomain` is applied.
+   */
+  requestJson<T = unknown>(
+    method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+    path: string,
+    init?: FetchproxyRequestJsonInit,
+  ): Promise<{ data: T | null; result: FetchproxyFetchResult }>;
+  /**
+   * Verb passthrough over `server.runProbe(...)` — run one healthcheck probe,
+   * measure elapsed ms, classify any thrown error, and project the post-probe
+   * `bridgeHealth()`. Powers {@link registerBridgeHealthcheckTool}.
+   */
+  runProbe(
+    fetchFn: (path: string) => Promise<unknown>,
+    probePath: string,
+  ): Promise<BridgeProbeResult>;
 }
 
 /** Options for {@link createFetchproxyTransport}. */
@@ -147,6 +231,14 @@ export type CreateFetchproxyTransportOptions = FetchproxyServerOpts & {
   debugEnvVar?: string;
   /** Env source for {@link debugEnvVar}. Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Subdomain the verb adapters (`fetch` / `requestJson`) apply per call unless
+   * the caller overrides it. This is the ONE per-site bit of the verb surface:
+   * redfin / homes / compass pin `'www'`; apex-served sites (musescore) omit it
+   * to hit the bare domain. Absolute `http(s)://` paths self-describe their host
+   * and ignore this entirely.
+   */
+  defaultSubdomain?: string;
 };
 
 /**
@@ -168,7 +260,7 @@ export type CreateFetchproxyTransportOptions = FetchproxyServerOpts & {
 export function createFetchproxyTransport<T = FetchproxyTransport>(
   opts: CreateFetchproxyTransportOptions,
 ): T {
-  const { debugEnvVar, env, ...serverOpts } = opts;
+  const { debugEnvVar, env, defaultSubdomain, ...serverOpts } = opts;
 
   if (!serverOpts.serverName || serverOpts.serverName.trim().length === 0) {
     throw new Error('createFetchproxyTransport: `serverName` is required.');
@@ -179,6 +271,16 @@ export function createFetchproxyTransport<T = FetchproxyTransport>(
 
   const server = new FetchproxyServer(serverOpts);
   const debug = debugEnvVar !== undefined && envFlagEnabled(debugEnvVar, env ?? process.env);
+
+  // Apply `defaultSubdomain` only when the call didn't override it AND a
+  // default exists — so an apex-served MCP (no default) sends no `subdomain`
+  // and a per-call override always wins.
+  const withSubdomain = <O extends { subdomain?: string }>(callOpts: O): O => {
+    if (callOpts.subdomain !== undefined || defaultSubdomain === undefined) {
+      return callOpts;
+    }
+    return { ...callOpts, subdomain: defaultSubdomain };
+  };
 
   const transport: FetchproxyTransport = {
     server,
@@ -200,6 +302,30 @@ export function createFetchproxyTransport<T = FetchproxyTransport>(
     },
     status() {
       return server.bridgeHealth();
+    },
+    async fetch(init) {
+      const response: HttpResponse = await server.request(init.method, init.path, withSubdomain({
+        ...(init.headers !== undefined ? { headers: init.headers } : {}),
+        ...(init.body !== undefined ? { body: init.body } : {}),
+        ...(init.subdomain !== undefined ? { subdomain: init.subdomain } : {}),
+        ...(init.domain !== undefined ? { domain: init.domain } : {}),
+      }));
+      return { status: response.status, body: response.body, url: response.url };
+    },
+    async requestJson<T = unknown>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, init: FetchproxyRequestJsonInit = {}) {
+      const { data, result } = await server.requestJson<T>(method, path, withSubdomain({
+        ...(init.headers !== undefined ? { headers: init.headers } : {}),
+        ...(init.body !== undefined ? { body: init.body } : {}),
+        ...(init.subdomain !== undefined ? { subdomain: init.subdomain } : {}),
+        ...(init.domain !== undefined ? { domain: init.domain } : {}),
+      }));
+      return {
+        data,
+        result: { status: result.status, body: result.body, url: result.url },
+      };
+    },
+    runProbe(fetchFn, probePath) {
+      return server.runProbe(fetchFn, probePath);
     },
   };
 
@@ -395,4 +521,217 @@ export function bridgeErrorInfo(err: unknown): BridgeErrorInfo {
     default:
       return { type: 'unknown', message };
   }
+}
+
+// ---------------------------------------------------------------------------
+// registerBridgeHealthcheckTool — the `<prefix>_healthcheck` tool factory
+//
+// compass `tools/healthcheck.ts` (225 lines) and musescore's (180 lines)
+// produced the SAME result shape via the SAME hint ladder, with drifted
+// internals — and BOTH hardcoded the default port `37149` into a hint, so a
+// consumer that overrode the port (e.g. `REDFIN_WS_PORT`) got a wrong number in
+// its "confirm port N isn't blocked" message. This factory folds the common
+// ladder + result shape into one registrar; the per-site bits (prefix, probe
+// path, host label) are options, and the port in the hint comes from the ACTUAL
+// bridge status (`probeResult.bridge.port`) — never a literal.
+// ---------------------------------------------------------------------------
+
+/** The diagnostic result a `<prefix>_healthcheck` tool returns. */
+export interface BridgeHealthcheckResult {
+  ok: boolean;
+  bridge: BridgeProbeResult['bridge'] & {
+    last_extension_message_at: number | null;
+  };
+  probe: {
+    url: string;
+    elapsed_ms: number;
+    status?: number;
+    body_length?: number;
+  };
+  error?: {
+    kind: BridgeErrorInfo['type'];
+    message: string;
+    /** Server-authored next-step hint (`FetchproxyBridgeDownError.hint`), when present. */
+    bridge_hint?: string;
+  };
+  /** Plain-English next-step suggestion derived from the result. */
+  hint: string;
+}
+
+/** Options for {@link registerBridgeHealthcheckTool}. */
+export interface RegisterBridgeHealthcheckToolArgs {
+  /** The `McpServer` to register the tool on. */
+  server: McpServer;
+  /** Tool-name + host-banner prefix, e.g. `'compass'` → `compass_healthcheck`. */
+  prefix: string;
+  /** Public probe path to round-trip, e.g. `'/robots.txt'`. */
+  probePath: string;
+  /**
+   * Display host for the probe URL + hint copy, e.g. `'compass.com'` or
+   * `'www.redfin.com'`. The probe URL is `https://<hostLabel><probePath>`.
+   */
+  hostLabel: string;
+  /**
+   * The bridge transport — supplies `runProbe` (the probe loop + classification
+   * + post-probe bridge projection) and `status()` (for the liveness counter the
+   * projection omits). Any {@link FetchproxyTransport}-shaped object works.
+   */
+  transport: Pick<FetchproxyTransport, 'runProbe' | 'status'>;
+  /**
+   * Performs the actual probe fetch for `probePath`. Required — most consumers
+   * pass `(path) => client.fetchHtml(path)` so the probe exercises the same
+   * client path real tools use (sign-in guards and all).
+   */
+  probeFn: (path: string) => Promise<string>;
+}
+
+/**
+ * Build the actionable next-step hint from a probe outcome. Order matters:
+ * the specific error kinds win over the generic role-based message, because a
+ * `bridge_down` can fire with `role === null` (the bridge can hand back the
+ * SW-eviction error before `listen()` resolves a role) and the specific hint
+ * must beat the "never bound a role" fallback.
+ *
+ * `port` is the ACTUAL configured bridge port (from `bridgeHealth()`), NOT a
+ * hardcoded literal — this is the audit-bug fix both copies shared.
+ */
+function healthcheckHint(args: {
+  ok: boolean;
+  role: 'host' | 'peer' | null;
+  port: number;
+  hostLabel: string;
+  prefix: string;
+  probePath: string;
+  errorKind?: BridgeErrorInfo['type'];
+  bridgeHint?: string;
+}): string {
+  const { hostLabel, prefix, probePath, port } = args;
+  if (args.ok) {
+    return `Bridge round-tripped ${probePath} successfully. If real tools still fail, the problem is downstream of fetchproxy (${hostLabel} redirecting on login, a bot-wall / behavioral challenge, etc.) — not the bridge.`;
+  }
+  if (args.errorKind === 'bridge_down') {
+    const base = `The fetchproxy browser extension's service worker is not responding. Chrome evicts extension service workers after ~30s idle by default — this looks like that case. Wake it by clicking the fetchproxy extension icon (or opening any ${hostLabel} tab and reloading), then retry. If it keeps happening, reload the extension from chrome://extensions.`;
+    return args.bridgeHint ? `${args.bridgeHint} ${base}` : base;
+  }
+  if (args.role === null) {
+    return `The bridge never bound a role. listen() may have failed silently on startup. Check stderr from ${prefix}-mcp for an error during start, and confirm port ${port} isn't blocked.`;
+  }
+  if (args.errorKind === 'timeout') {
+    return `Bridge is alive (role=${args.role}), but the request didn't get a response in time. Either (a) the fetchproxy browser extension isn't connected to this MCP yet — open the extension popup and check for a green dot next to "${prefix}-mcp", or (b) the signed-in ${hostLabel} tab is sleeping / closed. Open ${hostLabel} in your browser, then retry.`;
+  }
+  if (args.errorKind === 'protocol' || args.errorKind === 'http') {
+    return `The bridge returned a protocol error before any HTTP response. Most commonly: no ${hostLabel} tab is open, or the extension declined the request. Open ${hostLabel}, sign in, and retry.`;
+  }
+  return `Unexpected error — see the error.message field for details.`;
+}
+
+/**
+ * Register a `<prefix>_healthcheck` MCP tool that round-trips `probePath`
+ * through the bridge and reports bridge status + role + timing, plus an
+ * actionable hint ladder on failure.
+ *
+ * The probe loop / error classification / post-probe bridge projection all live
+ * in `transport.runProbe` (the `@fetchproxy/server` primitive); this factory
+ * owns only the tool registration, the result shape, and the hint ladder. The
+ * per-site bits (`prefix`, `probePath`, `hostLabel`, the probe `fetchFn`) are
+ * options.
+ *
+ * @example
+ * registerBridgeHealthcheckTool({
+ *   server, prefix: 'compass', probePath: '/robots.txt',
+ *   hostLabel: 'compass.com', transport,
+ *   probeFn: (p) => client.fetchHtml(p),
+ * });
+ */
+export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToolArgs): void {
+  const { server, prefix, probePath, hostLabel, transport, probeFn } = args;
+  const probeUrl = `https://${hostLabel}${probePath}`;
+
+  server.registerTool(
+    `${prefix}_healthcheck`,
+    {
+      title: 'Verify the fetchproxy bridge end-to-end',
+      description:
+        `Round-trips a small public ${hostLabel} URL (${probePath}) through the fetchproxy bridge and returns diagnostics: the bridge's role (host/peer/null), port, version, the elapsed round-trip time, and a plain-English hint distinguishing 'bridge never came up' from 'extension not connected' from 'real ${hostLabel}-side problem'. Call this when a real tool fails and you want to know which hop broke. Read-only, no auth required.`,
+      annotations: {
+        title: 'Verify the fetchproxy bridge end-to-end',
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+      inputSchema: {},
+    },
+    async () => {
+      let probeBody = '';
+      let thrown: unknown;
+      const probeResult = await transport.runProbe(async (path) => {
+        try {
+          probeBody = await probeFn(path);
+          return probeBody;
+        } catch (e) {
+          thrown = e;
+          throw e;
+        }
+      }, probePath);
+
+      const ok = probeResult.ok;
+      const probe: BridgeHealthcheckResult['probe'] = ok
+        ? {
+            url: probeUrl,
+            elapsed_ms: probeResult.elapsed_ms,
+            status: 200,
+            body_length: probeBody.length,
+          }
+        : { url: probeUrl, elapsed_ms: probeResult.elapsed_ms };
+
+      let error: BridgeHealthcheckResult['error'];
+      let bridgeHint: string | undefined;
+      if (probeResult.error) {
+        // `runProbe` already classified the throw into `probeResult.error.kind`
+        // (fetchproxy's raw vocabulary). Trust that as the discriminator —
+        // mapping `'other'` → `'unknown'` to match the envelope — rather than
+        // re-classifying a plain `{kind,message}` object. Use the typed `thrown`
+        // (set by our probe wrapper) only to lift the server-authored
+        // `FetchproxyBridgeDownError.hint`.
+        const kind: BridgeErrorInfo['type'] =
+          probeResult.error.kind === 'other' ? 'unknown' : probeResult.error.kind;
+        bridgeHint =
+          thrown instanceof FetchproxyBridgeDownError ? thrown.hint : undefined;
+        error = {
+          kind,
+          message: probeResult.error.message,
+          ...(bridgeHint !== undefined ? { bridge_hint: bridgeHint } : {}),
+        };
+      }
+
+      // The post-probe bridge projection omits `lastExtensionMessageAt`; read it
+      // off the live status snapshot (same call, so it's current).
+      const lastExtensionMessageAt = transport.status().lastExtensionMessageAt;
+
+      const result: BridgeHealthcheckResult = {
+        ok,
+        bridge: {
+          ...probeResult.bridge,
+          last_extension_message_at: lastExtensionMessageAt,
+        },
+        probe,
+        ...(error ? { error } : {}),
+        hint: healthcheckHint({
+          ok,
+          role: probeResult.bridge.role,
+          // FIX: the real configured port from bridgeHealth(), not a literal 37149.
+          port: probeResult.bridge.port,
+          hostLabel,
+          prefix,
+          probePath,
+          errorKind: error?.kind,
+          bridgeHint: error?.kind === 'bridge_down' ? bridgeHint : undefined,
+        }),
+      };
+
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
 }
