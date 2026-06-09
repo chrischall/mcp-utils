@@ -145,17 +145,19 @@ const COOKIE_HEADER_RE =
   /((?<!set-)\bcookie\s*:\s*)((?:[^=;,\s]+=[^;,\s]*)(?:;\s*[^=;,\s]+=[^;,\s]*)*)/gi;
 // Well-known API-key shapes as standalone tokens, each anchored to its documented
 // prefix + length/charset so ordinary prose (short hex ids, version strings,
-// UUIDs) never matches.
+// UUIDs) never matches. Charsets containing `-` (a non-word character) can end
+// on it, where a trailing `\b` has nothing to anchor on — those patterns carry
+// a negative lookahead over their own charset instead.
 const API_KEY_RE = new RegExp(
   [
-    'sk-[A-Za-z0-9_-]{20,}', // OpenAI / Anthropic (incl. sk-ant-…)
-    'gh[pousr]_[A-Za-z0-9]{36,}', // GitHub ghp_/gho_/ghu_/ghs_/ghr_
-    'xox[baprs]-[A-Za-z0-9-]{10,}', // Slack
-    'AIza[0-9A-Za-z_-]{35}', // Google API key (39 chars total)
-    'AKIA[0-9A-Z]{16}', // AWS access key id (20 chars total)
-    'whsec_[A-Za-z0-9]{16,}', // webhook signing secret (Stripe-style)
+    'sk-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])', // OpenAI / Anthropic (incl. sk-ant-…)
+    'gh[pousr]_[A-Za-z0-9]{36,}\\b', // GitHub ghp_/gho_/ghu_/ghs_/ghr_
+    'xox[baprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9-])', // Slack
+    'AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])', // Google API key (39 chars total)
+    'AKIA[0-9A-Z]{16}\\b', // AWS access key id (20 chars total)
+    'whsec_[A-Za-z0-9]{16,}\\b', // webhook signing secret (Stripe-style)
   ]
-    .map((p) => `\\b${p}\\b`)
+    .map((p) => `\\b${p}`)
     .join('|'),
   'g',
 );

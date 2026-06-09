@@ -220,6 +220,13 @@ describe('redactSecrets', () => {
     expect(out).toBe('401 for [REDACTED]');
   });
 
+  it('redacts dash-charset keys even when they end in a dash (\\b cannot anchor there)', () => {
+    const sk = 'sk-AbCdEfGhIjKlMnOpQrStUvWxYz012345678-';
+    const xox = 'xoxb-1234567890-AbCdEf-';
+    expect(redactSecrets(`key ${sk} rejected`)).toBe('key [REDACTED] rejected');
+    expect(redactSecrets(`token ${xox} rejected`)).toBe('token [REDACTED] rejected');
+  });
+
   it('redacts GitHub tokens (ghp_/gho_/ghu_/ghs_/ghr_)', () => {
     for (const prefix of ['ghp', 'gho', 'ghu', 'ghs', 'ghr']) {
       const token = `${prefix}_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789`;
