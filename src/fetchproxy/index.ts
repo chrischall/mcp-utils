@@ -203,8 +203,7 @@ export interface FetchproxyTransport {
    * Verb passthrough over `server.requestJson(...)` (serialization + header
    * defaults + 204→null + JSON.parse). Returns BOTH the parsed `data` and the
    * raw success-arm `result`, so the caller keeps its per-site `throwIfNotOk` /
-   * sign-in guards over `result`. `defaultSubdomain` is applied. Defaults the
-   * method to `GET`.
+   * sign-in guards over `result`. `defaultSubdomain` is applied.
    */
   requestJson<T = unknown>(
     method: 'GET' | 'POST' | 'PUT' | 'DELETE',
@@ -579,10 +578,9 @@ export interface RegisterBridgeHealthcheckToolArgs {
    */
   transport: Pick<FetchproxyTransport, 'runProbe' | 'status'>;
   /**
-   * Optional override for the probe's `fetchFn`. Defaults to
-   * `transport.server`-free `(path) => transport's own fetch isn't used`; most
-   * consumers pass `(path) => client.fetchHtml(path)` so the probe exercises the
-   * same client path real tools use (sign-in guards and all).
+   * Performs the actual probe fetch for `probePath`. Required — most consumers
+   * pass `(path) => client.fetchHtml(path)` so the probe exercises the same
+   * client path real tools use (sign-in guards and all).
    */
   probeFn: (path: string) => Promise<string>;
 }
