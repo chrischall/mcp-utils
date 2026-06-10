@@ -58,8 +58,13 @@ export const NumericIdString = z
  * (tempo account ids, ASC ids, gemini path ids) — defense-in-depth against
  * path traversal and query/fragment injection.
  *
- * Mirrors the `/^[A-Za-z0-9:_.-]+$/` + no-`..` pattern tempo uses for
- * AccountId, generalized into one reusable atom.
+ * This is a DENYLIST (`/^[^/?#\s]+$/` + no-`..`): it permits any character
+ * except the traversal/injection set, so it's strictly less restrictive than a
+ * per-id allowlist. Repos that hand-roll a stricter allowlist (e.g. tempo's
+ * AccountId `/^[A-Za-z0-9:_.-]+$/`) should KEEP it rather than swap to this —
+ * swapping would widen their accepted input. Use this atom for ids that have no
+ * tighter character constraint; it's the floor, not a replacement for a
+ * site-specific allowlist.
  */
 export const SafePathSegment = z
   .string()
