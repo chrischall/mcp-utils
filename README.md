@@ -230,6 +230,26 @@ a single hung row can't wedge the call. It always returns a full-length,
 input-ordered array. `setTimer`/`clearTimer` are injectable for tests. This
 hoists zillow's bulk-tool deadline + `pending`-backfill primitive.
 
+### `concurrency` — bounded async map
+
+`mapWithConcurrency` — a zero-dependency bounded-fan-out map that preserves
+**input order**.
+
+```ts
+import { mapWithConcurrency } from '@chrischall/mcp-utils';
+
+const rows = await mapWithConcurrency(ids, 6, (id, i) => fetchRow(id, i));
+```
+
+`mapWithConcurrency(items, limit, fn)` keeps at most `limit` calls in flight (a
+pool pulling off a shared cursor) and returns results in input order. It follows
+`Promise.all` failure semantics — the first rejecting `fn` rejects the whole
+call. This hoists the hand-rolled `mapLimit` copy-pasted across the fleet (e.g.
+artsonia's `download.ts`). The [`/fetchproxy`](#fetchproxy) subpath re-exports a
+same-named primitive from `@fetchproxy/server`; this is the zero-dep core one for
+non-bridge repos. Use `runBoundedBatch` instead when you need an overall deadline
+plus per-item backfill rather than a plain all-or-nothing map.
+
 ### `dates` — date-format converters
 
 `isoToDmy`, `dmyToIso`, `isoToCompactTimestamp`. For upstreams that don't speak
