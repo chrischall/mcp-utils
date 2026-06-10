@@ -660,8 +660,9 @@ export interface CookieSessionManagerOptions<S, R = Response> {
    * codes alone are insufficient — SignUpGenius serves a `200` HTML login page
    * on expiry, and Artsonia expires by redirecting away from the target URL.
    * May read the body/headers (return a promise) or just the status (sync).
-   * The `Response` is NOT consumed for you — if you read its body, pass a clone
-   * (`res.clone()`) so the caller can still read the original.
+   * When `R` is the web `Response` (the default), the body is NOT consumed for
+   * you — if you read it, pass a clone (`res.clone()`) so the caller can still
+   * read the original. (A custom `R` has whatever read semantics you give it.)
    *
    * **Optional.** Omit it for ensure-only consumers with no per-request expiry
    * path (e.g. Skylight, whose re-auth lives in {@link TokenManager}): the
