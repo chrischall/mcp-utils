@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.1](https://github.com/chrischall/mcp-utils/compare/v0.10.0...v0.10.1) (2026-06-10)
+
+
+### Documentation
+
+* correct SafePathSegment's JSDoc — it's a denylist, not an allowlist ([#46](https://github.com/chrischall/mcp-utils/issues/46)) ([598db82](https://github.com/chrischall/mcp-utils/commit/598db82caf1ad2f96dde89e16636652ca52c8784))
+* **skill:** refresh mcp-fleet-builder surface for 0.7–0.10 ([#48](https://github.com/chrischall/mcp-utils/issues/48)) ([5223523](https://github.com/chrischall/mcp-utils/commit/52235237b5fd92a3a54e663ef9db1580144380e2))
+
 ## [0.10.0](https://github.com/chrischall/mcp-utils/compare/v0.9.0...v0.10.0) (2026-06-10)
 
 
