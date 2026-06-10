@@ -89,4 +89,20 @@ describe('mapWithConcurrency', () => {
     expect(order).toEqual([1, 2, 3]);
     expect(maxInFlight).toBe(1);
   });
+
+  it('clamps limit <= 0 to serial (still correct, never zero runners)', async () => {
+    for (const limit of [0, -3]) {
+      let inFlight = 0;
+      let maxInFlight = 0;
+      const out = await mapWithConcurrency([1, 2, 3], limit, async (n) => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await Promise.resolve();
+        inFlight -= 1;
+        return n * 2;
+      });
+      expect(out).toEqual([2, 4, 6]); // all items still processed, in order
+      expect(maxInFlight).toBe(1); // clamped to 1, not 0 (which would hang)
+    }
+  });
 });

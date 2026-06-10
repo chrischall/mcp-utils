@@ -16,8 +16,12 @@
  * cursor; each result is written to its slot, so a later item that settles first
  * never reorders the output. Standard `Promise.all` semantics for failure: the
  * **first** rejecting `fn` rejects the whole call (the rejection is not
- * swallowed, and remaining not-yet-started items are not begun). Empty input
- * resolves to `[]` without calling `fn`; `limit >= items.length` behaves like
+ * swallowed). Like `Promise.all`, work already in flight is NOT cancelled, and
+ * the other pool runners keep pulling — so a few not-yet-started items may still
+ * begin before the rejection propagates; their results are discarded along with
+ * the rejected promise. (Use {@link runBoundedBatch} if you need each item's
+ * outcome captured rather than all-or-nothing.) Empty input resolves to `[]`
+ * without calling `fn`; `limit >= items.length` behaves like
  * `Promise.all(items.map(fn))`.
  *
  * This is the **zero-dependency core** map. Distinct relatives:
