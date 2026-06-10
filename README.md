@@ -292,6 +292,11 @@ const registry = createSessionRegistry();
 registerSessionTools(server, { registry /* ... */ });
 ```
 
+The `${prefix}_register_session` tool takes an optional `mark_active`
+(default `false`); passing `mark_active: true` makes the newly-registered
+session active in the same call instead of requiring a follow-up
+`${prefix}_set_active_session`.
+
 Includes `SessionStore`, `normalizeOrigin`, `AuthMode`, and `TokenManager`
 (with `TOKEN_REFRESH_SKEW_MS` for proactive refresh).
 

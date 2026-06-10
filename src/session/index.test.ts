@@ -129,6 +129,38 @@ describe('registerSessionTools', () => {
     await h.close();
   });
 
+  it('register_session with mark_active:true makes the new session active', async () => {
+    const reg = createSessionRegistry();
+    reg.register({ account_identity: 'first@x.com' });
+    const firstActive = reg.activeSessionId();
+    const h = await createTestHarness((server) => registerSessionTools(server, reg, { prefix: 'redfin' }));
+    const res = await h.callTool('redfin_register_session', {
+      account_identity: 'second@x.com',
+      mark_active: true,
+    });
+    const body = parseToolResult<{ session: SessionToken; active_session_id: string }>(res);
+    expect(body.session.account_identity).toBe('second@x.com');
+    expect(body.active_session_id).toBe(body.session.session_id);
+    expect(reg.activeSessionId()).toBe(body.session.session_id);
+    expect(reg.activeSessionId()).not.toBe(firstActive);
+    await h.close();
+  });
+
+  it('register_session without mark_active leaves the active session unchanged', async () => {
+    const reg = createSessionRegistry();
+    reg.register({ account_identity: 'first@x.com' });
+    const firstActive = reg.activeSessionId();
+    const h = await createTestHarness((server) => registerSessionTools(server, reg, { prefix: 'redfin' }));
+    const res = await h.callTool('redfin_register_session', {
+      account_identity: 'second@x.com',
+    });
+    const body = parseToolResult<{ session: SessionToken; active_session_id: string }>(res);
+    expect(body.session.account_identity).toBe('second@x.com');
+    expect(reg.activeSessionId()).toBe(firstActive);
+    expect(body.active_session_id).toBe(firstActive);
+    await h.close();
+  });
+
   it('set_active_session errors on unknown id', async () => {
     const reg = createSessionRegistry();
     const h = await createTestHarness((server) => registerSessionTools(server, reg, { prefix: 'homes' }));

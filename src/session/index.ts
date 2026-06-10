@@ -207,6 +207,12 @@ export interface RegisterSessionToolsOptions {
 /**
  * Register the structurally-identical session tool trio against `server`,
  * backed by `registry`. Replaces every MCP's hand-rolled `src/tools/sessions.ts`.
+ *
+ * `${prefix}_register_session` accepts an optional `mark_active` boolean
+ * (default `false`): when `true`, the newly-registered session is immediately
+ * made active in the same call (equivalent to a follow-up
+ * `${prefix}_set_active_session`). Omitting it preserves the
+ * first-registered-wins active-session behaviour.
  */
 export function registerSessionTools(
   server: McpServer,
@@ -225,7 +231,8 @@ export function registerSessionTools(
         `Register (or refresh) an authenticated ${label} session keyed by signed-in account identity. ` +
         'Re-registering the same `account_identity` updates the existing session rather than creating a duplicate. ' +
         'Returns the `session_id` to use when routing per-tool calls. ' +
-        'The first registered session becomes the default `active_session_id`.',
+        'The first registered session becomes the default `active_session_id`. ' +
+        'Pass `mark_active: true` to make the newly-registered session active in the same call.',
       annotations: {
         title: `Register a signed-in ${label} session`,
         readOnlyHint: false,
@@ -241,12 +248,20 @@ export function registerSessionTools(
           .string()
           .optional()
           .describe('Optional ISO timestamp at which the session expires.'),
+        mark_active: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe('When true, immediately make the newly-registered session the active one.'),
       },
     },
-    async ({ account_identity, auth_expires_at }) => {
+    async ({ account_identity, auth_expires_at, mark_active }) => {
       // Pass `auth_expires_at` through as-is: `undefined` means "keep existing",
       // never coerce with `?? null` (that would wipe a prior expiry).
       const session = registry.register({ account_identity, auth_expires_at });
+      // `mark_active` defaults to false, so callers that omit it keep the prior
+      // active session (the first-registered-wins behaviour) byte-for-byte.
+      if (mark_active) registry.setActive(session.session_id);
       return textResult({ session, active_session_id: registry.activeSessionId() });
     },
   );
