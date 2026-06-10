@@ -24,22 +24,27 @@ SKILL.md, manifest.json, server.json, .mcp.json, .claude-plugin/  # packaging
 
 Each `tools/*.ts` exports `registerXxxTools(server, deps)` that calls `server.registerTool(name, { description, annotations, inputSchema }, handler)` (high-level `McpServer` API with zod). `index.ts` only wires them.
 
-## @chrischall/mcp-utils surface
+## @chrischall/mcp-utils surface  (current: 0.10.x)
 
 Core entry (zero runtime deps — safe for any MCP):
 - `server`: `createMcpServer`, `runMcp({ name, version, banner?, deps, tools })`, `withGracefulShutdown`, `ToolRegistrar`
-- `response`: `textResult(data)` (the universal `{content:[{type:'text',text:JSON.stringify(data,null,2)}]}`), `errorResult`, `imageResult`, `rawTextResult`, `flattenJsonApi`
-- `errors`: `McpToolError` + `SessionNotAuthenticatedError`/`BotWallError`/`RateLimitError`/`UnreachableError`/`ModeMismatchError`, `createHelpfulError`, `wrapToolError`, `truncateErrorMessage` (redacts Bearer/JWT then caps at 500), `messageOf`
-- `config`: `readEnvVar`/`requireEnvVar` (trim + treat `''`/`'undefined'`/`'null'`/`${...}` as unset), `parseBoolEnv`, `loadDotenvSafely`, `expandPath`
-- `http`: `createApiClient({baseUrl,getToken,retry?})`, `buildQueryString`, `buildOptionalBody`, `formatApiError`, `parseLinkHeader`, `parseCookieJar`, `decodeJwtExp`/`decodeJwtSessionId`/`validateJwtExpiry`
-- `zod`: `paginationSchema`/`pageSchema`, `calculateOffset`, `toolAnnotations`, atoms (`PositiveInt`/`NonNegInt`/`NonEmptyString`/`IsoDate`/`IsoTime`), `extractTime`/`normalizeTime`
+- `response`: `textResult`/`jsonResult`, `errorResult` (redacts), `imageResult`, `rawTextResult`, `flattenJsonApi`, `deepMapStringField`
+- `errors`: `McpToolError` + `SessionNotAuthenticatedError`/`BotWallError`/`RateLimitError`/`UnreachableError`/`ModeMismatchError`, `createHelpfulError`, `wrapToolError`, `truncateErrorMessage` (redacts THEN caps 500), `redactSecrets` (Bearer/Basic/Cookie/Set-Cookie values, JWTs, `sk-`/`ghp_`/`xox?-`/`AIza`/`AKIA`/`whsec_` shapes, secret query params), `messageOf`
+- `config`: `readEnvVar`/`requireEnvVar` (trim + `''`/`'undefined'`/`'null'`/`${...}`→unset), `parseBoolEnv`, `loadDotenvSafely`, `expandPath`, `readPortEnv` (numeric+placeholder-hardened port), `createCachedJsonArrayLoader({envVar,defaults})` (env-named JSON-array file: parse + positive/negative cache — the COMMUNITIES_FILE loader)
+- `fs`: `fileBlob` (file-backed Blob for uploads), `readFileHead`
+- `http`: `createApiClient({baseUrl, getToken?|tokenManager?, tokenHeader?, baseHeaders?, retry?{count,delayMs,statuses?}, timeout?, onUnauthorized?, onRateLimited?})`, `ApiError`(.status)/`UpstreamHttpError`/`UnauthorizedError`/`RateLimitedError`/`RequestTimeoutError`, `buildQueryString`, `buildOptionalBody`, `formatApiError`, `parseLinkHeader`, `parseCookieJar` (Set-Cookie) + `parseCookieHeader` (request Cookie), `CookieJar` (stateful absorb/get/header) + `isDeletionCookie`, `createThrottle` (serialized min-interval — rate-limited APIs), `runBoundedBatch(items,worker,{deadlineMs,onTimeout,concurrency?,onError?})` (overall deadline + per-item backfill — bulk tools), `decodeJwtExp`/`decodeJwtSessionId`/`decodeJwtClaim`/`validateJwtExpiry`
+- `zod`: `paginationSchema`/`pageSchema`, `calculateOffset`, `toolAnnotations`, atoms (`PositiveInt`/`NonNegInt`/`NonEmptyString`/`IsoDate`/`IsoTime`/`NumericIdString`/`SafePathSegment`), `schemaConfirm`/`schemaOrigin`, `extractTime`/`normalizeTime`. **`SafePathSegment` is a DENYLIST** (rejects `/ .. ? #` + ws) — a repo with a stricter per-id ALLOWLIST (e.g. tempo `AccountId` `/^[A-Za-z0-9:_.-]+$/`) KEEPS it; swapping would widen input.
+- `concurrency`: `mapWithConcurrency(items, limit, fn)` — zero-dep bounded, input-ordered map (the core one; `/fetchproxy` re-exports `@fetchproxy/server`'s same-named primitive for bridge repos)
+- `dates`: `isoToDmy`/`dmyToIso`/`isoToCompactTimestamp` (pair with `deepMapStringField` to remap a date field across a response)
 - `auth`: `createAuthResolver`, `resolveAuthPattern`, `sessionLoginFlow`, `createOAuth2Refresher`
 
 Subpath entries (only pull their heavy/optional dep when imported):
-- `@chrischall/mcp-utils/session` — `createSessionRegistry`, `registerSessionTools`, `SessionStore` (disk, 0600/0700), `TokenManager` (race-safe refresh)
-- `@chrischall/mcp-utils/fetchproxy` — `createFetchproxyTransport`, `createBootstrapOpts`, re-exports of `@fetchproxy/server` primitives + `classifyBridgeError`
-- `@chrischall/mcp-utils/html` — `parsePropertyTable`, `extractJsonFromHtml`, etc. (needs `node-html-parser`)
+- `@chrischall/mcp-utils/session` — `createSessionRegistry` + `registerSessionTools(server, registry, {prefix, serviceLabel?})` (adopt instead of hand-rolling session tools: `<p>_register_session` [`account_identity` required, `auth_expires_at?`, `mark_active?`], `_set_active_session`, `_get_session_context` — zillow/redfin/homes are on it), `SessionStore` (disk 0600/0700, `.corrupt` backup), `TokenManager` (race-safe refresh + double-refresh guard; a `ReactiveTokenSource` for `createApiClient({tokenManager})`), **`CookieSessionManager<S, R=Response>`** (the cookie-session analog of TokenManager: `ensure()` single-flight login, `withSession(call)` exactly-one replay-on-expiry, `invalidate()`; `isExpired?(res)` predicate — can sniff a 200-HTML-login-page body, not just status; `isPermanentError?` to cache config errors; canvas/signupgenius/skylight/artsonia/evite are on it)
+- `@chrischall/mcp-utils/fetchproxy` — `createFetchproxyTransport(opts)` owns server construction + `start/close/status` + the verb adapters (`fetch`/`requestJson`/`runProbe`, `defaultSubdomain?`) + opt-in `logListening` banner + `serverVersion` in `status()` + a `createServer?` TEST SEAM (inject a mock server — unit-test the transport WITHOUT `vi.mock('@fetchproxy/server')`); `registerBridgeHealthcheckTool({server,prefix,probePath,hostLabel,transport,probeFn})` (the `<prefix>_healthcheck` tool — reads the REAL port, not a 37149 literal); `createBootstrapOpts`; re-exports of `@fetchproxy/server` primitives (`mapWithConcurrency`, `withDeadline`, `retryOnceOnTimeout`, `classifyBridgeError`/`classifyRowError`, `chunk`, …)
+- `@chrischall/mcp-utils/html` — `parsePropertyTable`, `extractJsonFromHtml`, `findLinksUnderHeading`, etc. (needs `node-html-parser`)
 - `@chrischall/mcp-utils/test` — `createTestHarness`, `parseToolResult`, `versionSyncTest`
+
+**Library→migrate discipline:** when you add a helper to mcp-utils, also migrate the hand-rolled consumers in the same wave — don't leave the loop half-finished (that's how `runWithDeadline`/`mapLimit`/the session registries drifted into N copies). Building a shared helper that no repo adopts is half a job.
 
 ## Bootstrap (index.ts) — both archetypes
 
