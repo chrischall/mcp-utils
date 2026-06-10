@@ -655,8 +655,12 @@ export interface CookieSession {
   csrfToken?: string;
 }
 
-/** Options for {@link CookieSessionManager}. `S` is the caller-defined session shape. */
-export interface CookieSessionManagerOptions<S> {
+/**
+ * Options for {@link CookieSessionManager}. `S` is the caller-defined session
+ * shape; `R` is the response type `withSession`'s `call` resolves to, defaulting
+ * to the web {@link Response} (override it for a custom/non-fetch transport).
+ */
+export interface CookieSessionManagerOptions<S, R = Response> {
   /**
    * Site-specific login that mints a fresh cookie session. The manager owns
    * *when* this runs — lazily on first {@link CookieSessionManager.ensure},
@@ -671,10 +675,16 @@ export interface CookieSessionManagerOptions<S> {
    * codes alone are insufficient — SignUpGenius serves a `200` HTML login page
    * on expiry, and Artsonia expires by redirecting away from the target URL.
    * May read the body/headers (return a promise) or just the status (sync).
-   * The `Response` is NOT consumed for you — if you read its body, pass a clone
-   * (`res.clone()`) so the caller can still read the original.
+   * When `R` is the web `Response` (the default), the body is NOT consumed for
+   * you — if you read it, pass a clone (`res.clone()`) so the caller can still
+   * read the original. (A custom `R` has whatever read semantics you give it.)
+   *
+   * **Optional.** Omit it for ensure-only consumers with no per-request expiry
+   * path (e.g. Skylight, whose re-auth lives in {@link TokenManager}): the
+   * default `() => false` treats every response as non-expired, so
+   * {@link CookieSessionManager.withSession}'s replay path simply never triggers.
    */
-  isExpired: (res: Response) => boolean | Promise<boolean>;
+  isExpired?: (res: R) => boolean | Promise<boolean>;
   /**
    * Distinguish a *permanent* configuration error (missing/invalid credentials)
    * from a *transient* login failure (network blip, 5xx, login rate-limit). A
@@ -708,24 +718,38 @@ export interface CookieSessionManagerOptions<S> {
  *   ({@link CookieSessionManagerOptions.isPermanentError}); transient login
  *   failures stay retryable (Skylight's marker discipline).
  *
+ * Two type parameters: `S` is the caller-defined session shape, and `R` is the
+ * response type {@link CookieSessionManager.withSession}'s `call` resolves to,
+ * defaulting to the web {@link Response}. The manager is response-agnostic — it
+ * only hands `R` to {@link CookieSessionManagerOptions.isExpired} and never
+ * inspects it — so override `R` for a custom/non-fetch transport (e.g.
+ * Artsonia's `{ setCookie?, location?, url, body }`). Existing adopters that
+ * write `CookieSessionManager<MySession>` keep `R = Response` unchanged.
+ *
+ * {@link CookieSessionManagerOptions.isExpired} is **optional** and defaults to
+ * `() => false`, so ensure-only consumers with no per-request expiry path
+ * (Skylight) can omit it; `withSession` then simply never replays.
+ *
  * Target consumers (the 5 cohort MCPs whose hand-rolled re-login this replaces):
  * `artsonia-mcp` (`AuthManager`), `canvas-parent-mcp` (`ensureAuth` + 401-replay,
  * the reference impl), `evite-mcp` (`getSession`/`reauthenticate` + CSRF),
  * `signupgenius-mcp` (`ensureAuth` + 401/403/200-HTML replay), and `skylight-mcp`
  * (`makeGetClient` single-flight + `NO_ENV_CONFIG_MARKER` caching).
  */
-export class CookieSessionManager<S = CookieSession> {
+export class CookieSessionManager<S = CookieSession, R = Response> {
   private session: S | undefined;
   private inFlight: Promise<S> | undefined;
   /** A cached *permanent* config error: once set, every `ensure` rethrows it. */
   private permanentError: unknown | undefined;
   private readonly loginFn: () => Promise<S>;
-  private readonly isExpiredFn: (res: Response) => boolean | Promise<boolean>;
+  private readonly isExpiredFn: (res: R) => boolean | Promise<boolean>;
   private readonly isPermanentErrorFn: (err: unknown) => boolean;
 
-  constructor(opts: CookieSessionManagerOptions<S>) {
+  constructor(opts: CookieSessionManagerOptions<S, R>) {
     this.loginFn = opts.login;
-    this.isExpiredFn = opts.isExpired;
+    // Optional: ensure-only consumers (no per-request expiry path) omit it; the
+    // `() => false` default makes withSession's replay path never trigger.
+    this.isExpiredFn = opts.isExpired ?? (() => false);
     this.isPermanentErrorFn = opts.isPermanentError ?? (() => false);
   }
 
@@ -798,8 +822,12 @@ export class CookieSessionManager<S = CookieSession> {
    * rather than looping. If the re-login itself fails, the original
    * (expired-looking) response is returned so the caller can surface a clean
    * sign-in error rather than the login failure.
+   *
+   * `call` resolves to `R` (the generic response type, default {@link Response});
+   * the manager passes it untouched to {@link CookieSessionManagerOptions.isExpired}
+   * and returns it untouched, so a custom transport type flows through cleanly.
    */
-  async withSession(call: (session: S) => Promise<Response>): Promise<Response> {
+  async withSession(call: (session: S) => Promise<R>): Promise<R> {
     const session = await this.ensure();
     const res = await call(session);
     if (!(await this.isExpiredFn(res))) return res;
@@ -826,8 +854,8 @@ export class CookieSessionManager<S = CookieSession> {
 }
 
 /** Construct a {@link CookieSessionManager}. */
-export function createCookieSessionManager<S = CookieSession>(
-  opts: CookieSessionManagerOptions<S>,
-): CookieSessionManager<S> {
-  return new CookieSessionManager<S>(opts);
+export function createCookieSessionManager<S = CookieSession, R = Response>(
+  opts: CookieSessionManagerOptions<S, R>,
+): CookieSessionManager<S, R> {
+  return new CookieSessionManager<S, R>(opts);
 }

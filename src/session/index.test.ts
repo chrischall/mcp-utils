@@ -823,4 +823,54 @@ describe('CookieSessionManager', () => {
     // both detected expiry, but the re-login coalesced into ONE login call
     expect(login).toHaveBeenCalledTimes(2); // 1 initial ensure + 1 coalesced re-login
   });
+
+  it('isExpired is OPTIONAL — omitting it means withSession NEVER replays (skylight ensure-only)', async () => {
+    // Skylight has no per-request expiry path (its re-auth lives in TokenManager),
+    // so it should not need to pass a meaningless `isExpired: () => false` stub.
+    const login = vi.fn(async (): Promise<FakeSession> => ({ cookieHeader: 'sid=1' }));
+    const mgr = new CookieSessionManager<FakeSession>({ login });
+
+    // A 401-equivalent response is returned AS-IS (the default never flags expiry),
+    // and login is called exactly once (no replay, no second login).
+    const call = vi.fn(async () => new Response(null, { status: 401 }));
+    const res = await mgr.withSession(call);
+
+    expect(res.status).toBe(401);
+    expect(call).toHaveBeenCalledOnce();
+    expect(login).toHaveBeenCalledOnce();
+  });
+
+  it('a custom response type R flows through withSession + a provided isExpired<R> and replays once on expiry (artsonia non-fetch transport)', async () => {
+    // Artsonia returns a custom transport response, not the Fetch `Response`.
+    interface ArtsoniaResponse {
+      setCookie?: string;
+      location?: string;
+      url: string;
+      body: string;
+    }
+    const login = vi
+      .fn<() => Promise<FakeSession>>()
+      .mockResolvedValueOnce({ cookieHeader: 'sid=stale' })
+      .mockResolvedValueOnce({ cookieHeader: 'sid=fresh' });
+
+    // R is the custom response; isExpired reads R-specific members (location/url).
+    const mgr = new CookieSessionManager<FakeSession, ArtsoniaResponse>({
+      login,
+      isExpired: (res) => /login\.asp/i.test(res.location ?? res.url),
+    });
+
+    const seen: string[] = [];
+    const call = vi.fn(async (s: FakeSession): Promise<ArtsoniaResponse> => {
+      seen.push(s.cookieHeader);
+      return seen.length === 1
+        ? { url: '/members/page.asp', location: '/members/login.asp', body: '' }
+        : { url: '/members/page.asp', body: '{"ok":true}' };
+    });
+
+    const res = await mgr.withSession(call);
+    expect(res.body).toBe('{"ok":true}');
+    expect(seen).toEqual(['sid=stale', 'sid=fresh']);
+    expect(call).toHaveBeenCalledTimes(2); // exactly one replay
+    expect(login).toHaveBeenCalledTimes(2);
+  });
 });
