@@ -20,6 +20,7 @@ export * from './errors/index.js';
 export * from './config/index.js';
 export * from './fs/index.js';
 export * from './http/index.js';
+export * from './concurrency/index.js';
 export * from './dates/index.js';
 export * from './zod/index.js';
 export * from './auth/index.js';
