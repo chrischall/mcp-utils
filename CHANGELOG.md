@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.0](https://github.com/chrischall/mcp-utils/compare/v0.8.0...v0.9.0) (2026-06-10)
+
+
+### Features
+
+* **session:** add optional mark_active to registerSessionTools register tool ([#41](https://github.com/chrischall/mcp-utils/issues/41)) ([a78ed37](https://github.com/chrischall/mcp-utils/commit/a78ed37446f40d0e56583e6d46048b83338a4e14))
+* **session:** CookieSessionManager — optional isExpired + generic response type ([#40](https://github.com/chrischall/mcp-utils/issues/40)) ([7f8d87f](https://github.com/chrischall/mcp-utils/commit/7f8d87ffe401d1d7a776ada3216efd2c0e8b609c))
+
 ## [0.8.0](https://github.com/chrischall/mcp-utils/compare/v0.7.0...v0.8.0) (2026-06-09)
 
 
