@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.0](https://github.com/chrischall/mcp-utils/compare/v0.9.0...v0.10.0) (2026-06-10)
+
+
+### Features
+
+* **concurrency:** add zero-dep mapWithConcurrency core helper ([#43](https://github.com/chrischall/mcp-utils/issues/43)) ([9e1e3de](https://github.com/chrischall/mcp-utils/commit/9e1e3de1d24448c0f1e9cb4d8c3932b4d7f183c7))
+* **fetchproxy:** opt-in banner, serverVersion in status(), mock-injectable server ([#44](https://github.com/chrischall/mcp-utils/issues/44)) ([8b76761](https://github.com/chrischall/mcp-utils/commit/8b7676125efb46ecf4f971914da3048f423be020))
+
 ## [0.9.0](https://github.com/chrischall/mcp-utils/compare/v0.8.0...v0.9.0) (2026-06-10)
 
 
