@@ -342,8 +342,10 @@ export function createFetchproxyTransport<T = FetchproxyTransport>(
             `(role=${server.role ?? 'unknown'}, version=${serverOpts.version})`,
         );
       }
-      if (debug) {
-        // Stderr only — stdio MCP transports reserve stdout for JSON-RPC.
+      else if (debug) {
+        // Only when logListening didn't already print the (richer, port-bearing)
+        // canonical banner — this debug line is a strict subset of it, so emitting
+        // both is redundant. Stderr only — stdout is the JSON-RPC channel.
         console.error(
           `[${serverOpts.serverName}:bridge] listening ` +
             `(role=${server.role ?? 'unknown'}, version=${serverOpts.version})`,

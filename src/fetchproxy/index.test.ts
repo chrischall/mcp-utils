@@ -235,6 +235,26 @@ describe('createFetchproxyTransport', () => {
     await t.close();
   });
 
+  it('emits only the canonical banner (not the redundant debug line) when logListening + debugEnvVar are both on', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const t = createFetchproxyTransport({
+      serverName: 'compass-mcp',
+      version: '1.2.3',
+      domains: ['compass.com'],
+      port: 40556,
+      logListening: true,
+      debugEnvVar: 'FP_TEST_DEBUG',
+      env: { FP_TEST_DEBUG: '1' },
+      identityDir,
+    });
+    await t.start();
+    // The debug line is a strict subset of the canonical one, so only the
+    // canonical (port-bearing) banner is emitted — not both.
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    expect(errSpy.mock.calls[0].join(' ')).toContain('listening on 127.0.0.1:40556');
+    await t.close();
+  });
+
   // --- Enhancement 2: serverVersion in status() ----------------------------
   it('status() carries serverVersion sourced from the version opt', async () => {
     const t = createFetchproxyTransport({
