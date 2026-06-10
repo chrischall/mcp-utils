@@ -179,7 +179,12 @@ export interface FetchproxyTransport {
   start(): Promise<void>;
   /** Tear the bridge connection down. Safe to call before {@link start}. */
   close(): Promise<void>;
-  /** Process-wide bridge freshness snapshot, for a healthcheck tool. */
+  /**
+   * Process-wide bridge freshness snapshot, for a healthcheck tool. The
+   * factory additively pins `serverVersion` to the caller's `version` opt — the
+   * field homes / redfin / compass each projected by hand — so consumers can
+   * delegate `status()` straight through without re-wrapping.
+   */
   status(): ReturnType<FetchproxyServer['bridgeHealth']>;
   /** Bridge role; `null` until the first verb call / explicit connect. */
   readonly role: FetchproxyServer['role'];
@@ -239,13 +244,48 @@ export type CreateFetchproxyTransportOptions = FetchproxyServerOpts & {
    * and ignore this entirely.
    */
   defaultSubdomain?: string;
+  /**
+   * When `true`, {@link FetchproxyTransport.start} emits a one-line startup
+   * banner to **stderr** (stdout is reserved for the JSON-RPC channel) in the
+   * canonical fleet format:
+   *
+   * ```
+   * [<serverName>:bridge] listening on 127.0.0.1:<port> (role=<role ?? 'unknown'>, version=<version>)
+   * ```
+   *
+   * `<port>` is the bridge's resolved port (from `bridgeHealth()` after
+   * `listen()`), so it reflects an overridden port rather than a literal.
+   * Default `false` keeps existing consumers silent — they opt in to drop the
+   * hand-rolled banner redfin / homes / compass each wrote verbatim. Independent
+   * of {@link debugEnvVar} (which gates the richer per-request debug logging).
+   */
+  logListening?: boolean;
+  /**
+   * Test seam: factory that constructs the underlying `FetchproxyServer` from
+   * the forwarded `FetchproxyServerOpts`. Defaults to
+   * `(o) => new FetchproxyServer(o)`. A consumer's vitest passes a factory
+   * returning a mock so it can capture the constructor opts and stub verbs
+   * (e.g. `download`) WITHOUT `vi.mock('@fetchproxy/server')` — which can't
+   * reach the `new FetchproxyServer` call buried inside this package's prebuilt
+   * dist. The default path is unchanged: it routes through the already-imported
+   * `FetchproxyServer`, adding no new eager `@fetchproxy/server` import.
+   */
+  createServer?: (opts: FetchproxyServerOpts) => FetchproxyServer;
 };
 
 /**
  * Wrap a `FetchproxyServer` in the `start`/`close`/`status` lifecycle the
  * per-MCP transport interface expects. The full `FetchproxyServerOpts` is
  * forwarded verbatim (so `fetchTimeoutMs`, `keepAliveIntervalMs`, capture
- * declarations, etc. all pass through); the only added knob is `debugEnvVar`.
+ * declarations, etc. all pass through). The added knobs are:
+ *
+ *  - `debugEnvVar` — env-gated per-request debug logging;
+ *  - `defaultSubdomain` — the per-call subdomain the verb adapters apply;
+ *  - `logListening` — opt-in canonical startup banner on `start()` (stderr);
+ *  - `createServer` — a test seam to inject a mock `FetchproxyServer`.
+ *
+ * `status()` additively pins `serverVersion` to the `version` opt, so consumers
+ * no longer re-wrap `bridgeHealth()` just to project it.
  *
  * Returns the wrapper typed as the caller's `T` (defaulting to
  * {@link FetchproxyTransport}) so it can satisfy a structurally-compatible
@@ -254,13 +294,13 @@ export type CreateFetchproxyTransportOptions = FetchproxyServerOpts & {
  * @example
  * const transport = createFetchproxyTransport<RedfinTransport>({
  *   serverName: 'redfin-mcp', version, domains: ['redfin.com'],
- *   debugEnvVar: 'REDFIN_DEBUG',
+ *   debugEnvVar: 'REDFIN_DEBUG', logListening: true,
  * });
  */
 export function createFetchproxyTransport<T = FetchproxyTransport>(
   opts: CreateFetchproxyTransportOptions,
 ): T {
-  const { debugEnvVar, env, defaultSubdomain, ...serverOpts } = opts;
+  const { debugEnvVar, env, defaultSubdomain, logListening, createServer, ...serverOpts } = opts;
 
   if (!serverOpts.serverName || serverOpts.serverName.trim().length === 0) {
     throw new Error('createFetchproxyTransport: `serverName` is required.');
@@ -269,7 +309,11 @@ export function createFetchproxyTransport<T = FetchproxyTransport>(
     throw new Error('createFetchproxyTransport: at least one `domains` entry is required.');
   }
 
-  const server = new FetchproxyServer(serverOpts);
+  // Default path is identical to before — route through the already-imported
+  // `FetchproxyServer` (no new eager `@fetchproxy/server` import). A test seam
+  // (`createServer`) lets a consumer inject a mock instead.
+  const construct = createServer ?? ((o: FetchproxyServerOpts) => new FetchproxyServer(o));
+  const server = construct(serverOpts);
   const debug = debugEnvVar !== undefined && envFlagEnabled(debugEnvVar, env ?? process.env);
 
   // Apply `defaultSubdomain` only when the call didn't override it AND a
@@ -289,6 +333,15 @@ export function createFetchproxyTransport<T = FetchproxyTransport>(
     },
     async start() {
       await server.listen();
+      if (logListening) {
+        // Canonical fleet banner (compass's restored format). Stderr only —
+        // stdio MCP transports reserve stdout for JSON-RPC. The port comes
+        // from the live bridge health so an overridden port is reflected.
+        console.error(
+          `[${serverOpts.serverName}:bridge] listening on 127.0.0.1:${server.bridgeHealth().port} ` +
+            `(role=${server.role ?? 'unknown'}, version=${serverOpts.version})`,
+        );
+      }
       if (debug) {
         // Stderr only — stdio MCP transports reserve stdout for JSON-RPC.
         console.error(
@@ -301,7 +354,12 @@ export function createFetchproxyTransport<T = FetchproxyTransport>(
       await server.close();
     },
     status() {
-      return server.bridgeHealth();
+      // Additively guarantee `serverVersion` from the caller's `version` opt.
+      // `bridgeHealth()` already carries `serverVersion` (the server is built
+      // with `version: opts.version`), so this is value-preserving — but
+      // pinning it here lets the factory own the contract consumers projected
+      // by hand (homes/redfin/compass), so they don't have to re-wrap.
+      return { ...server.bridgeHealth(), serverVersion: serverOpts.version };
     },
     async fetch(init) {
       const response: HttpResponse = await server.request(init.method, init.path, withSubdomain({
