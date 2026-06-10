@@ -295,16 +295,28 @@ registerSessionTools(server, { registry /* ... */ });
 Includes `SessionStore`, `normalizeOrigin`, `AuthMode`, and `TokenManager`
 (with `TOKEN_REFRESH_SKEW_MS` for proactive refresh).
 
-`CookieSessionManager<S>` is the cookie-session analog of `TokenManager` for
-sites authenticated by a browser-style cookie session rather than a bearer
-token. It owns *when* to log in (single-flight, so concurrent callers coalesce
-into ONE login), clears the in-flight promise on settle (a rejected login never
-sticks — the next `ensure()` retries), and `withSession()` re-logs-in and
-replays a request **exactly once** on a detected expiry (no infinite loop). The
-injected `isExpired(res)` predicate is the hook for body/URL heuristics — so a
-`200` serving an HTML login page or a redirect away from the target is treated
-as expired, not just `401`/`403`. An optional `isPermanentError` caches genuine
-missing-config errors while leaving transient login failures retryable.
+`CookieSessionManager<S, R = Response>` is the cookie-session analog of
+`TokenManager` for sites authenticated by a browser-style cookie session rather
+than a bearer token. It owns *when* to log in (single-flight, so concurrent
+callers coalesce into ONE login), clears the in-flight promise on settle (a
+rejected login never sticks — the next `ensure()` retries), and `withSession()`
+re-logs-in and replays a request **exactly once** on a detected expiry (no
+infinite loop). The injected `isExpired(res)` predicate is the hook for body/URL
+heuristics — so a `200` serving an HTML login page or a redirect away from the
+target is treated as expired, not just `401`/`403`. An optional
+`isPermanentError` caches genuine missing-config errors while leaving transient
+login failures retryable.
+
+`isExpired` is **optional** — omit it for ensure-only consumers with no
+per-request expiry path (e.g. Skylight, whose re-auth lives in `TokenManager`);
+it defaults to `() => false`, so `withSession()` simply never replays.
+
+The second type param `R` (default `Response`) is the response type
+`withSession`'s `call` resolves to. The manager is response-agnostic — it only
+hands `R` to `isExpired` and returns it untouched — so override `R` for a custom
+or non-fetch transport (e.g. Artsonia's `{ setCookie?, location?, url, body }`).
+Existing adopters writing `CookieSessionManager<MySession>` keep `R = Response`
+with **no call-site changes**.
 
 ```ts
 const sessions = new CookieSessionManager<{ cookieHeader: string; csrfToken?: string }>({
@@ -316,6 +328,12 @@ const sessions = new CookieSessionManager<{ cookieHeader: string; csrfToken?: st
 const res = await sessions.withSession((s) =>
   fetch(url, { headers: { cookie: s.cookieHeader } }),
 );
+
+// Custom non-fetch transport: parameterize R (and isExpired reads R's members).
+const custom = new CookieSessionManager<MySession, MyResponse>({
+  login: () => loginWithPassword(),
+  isExpired: (res) => /login\.asp/i.test(res.location ?? res.url),
+});
 ```
 
 Replaces the hand-rolled re-login / single-flight / 401-replay code in
