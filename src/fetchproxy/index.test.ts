@@ -200,6 +200,106 @@ describe('createFetchproxyTransport', () => {
       }),
     ).toThrow(/serverName/i);
   });
+
+  // --- Enhancement 1: opt-in startup banner --------------------------------
+  it('does NOT emit a startup banner by default (logListening unset)', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const t = createFetchproxyTransport({
+      serverName: 'compass-mcp',
+      version: '1.2.3',
+      domains: ['compass.com'],
+      identityDir,
+    });
+    await t.start();
+    expect(errSpy).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('emits the canonical startup banner to stderr when logListening is true', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const t = createFetchproxyTransport({
+      serverName: 'compass-mcp',
+      version: '1.2.3',
+      domains: ['compass.com'],
+      port: 40555,
+      logListening: true,
+      identityDir,
+    });
+    await t.start();
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    const line = errSpy.mock.calls[0].join(' ');
+    // Canonical compass format: includes 127.0.0.1:<port>, role, version.
+    expect(line).toBe(
+      '[compass-mcp:bridge] listening on 127.0.0.1:40555 (role=unknown, version=1.2.3)',
+    );
+    await t.close();
+  });
+
+  it('emits only the canonical banner (not the redundant debug line) when logListening + debugEnvVar are both on', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const t = createFetchproxyTransport({
+      serverName: 'compass-mcp',
+      version: '1.2.3',
+      domains: ['compass.com'],
+      port: 40556,
+      logListening: true,
+      debugEnvVar: 'FP_TEST_DEBUG',
+      env: { FP_TEST_DEBUG: '1' },
+      identityDir,
+    });
+    await t.start();
+    // The debug line is a strict subset of the canonical one, so only the
+    // canonical (port-bearing) banner is emitted — not both.
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    expect(errSpy.mock.calls[0].join(' ')).toContain('listening on 127.0.0.1:40556');
+    await t.close();
+  });
+
+  // --- Enhancement 2: serverVersion in status() ----------------------------
+  it('status() carries serverVersion sourced from the version opt', async () => {
+    const t = createFetchproxyTransport({
+      serverName: 'homes-mcp',
+      version: '7.7.7',
+      domains: ['homes.com'],
+      identityDir,
+    });
+    const health = t.status();
+    expect(health.serverVersion).toBe('7.7.7');
+    await t.close();
+  });
+
+  // --- Enhancement 3: mock-injectable server (test seam) -------------------
+  it('uses an injected createServer factory instead of constructing a real server', () => {
+    const ctorOptsMock = vi.fn();
+    const downloadMock = vi.fn();
+    const fakeServer = {
+      role: null,
+      download: downloadMock,
+      request: vi.fn(),
+      listen: vi.fn(),
+      close: vi.fn(),
+      bridgeHealth: vi.fn(),
+    };
+    const t = createFetchproxyTransport({
+      serverName: 'musescore-mcp',
+      version: '0.0.0-test',
+      domains: ['musescore.com'],
+      identityDir,
+      // Inject a mock server: no real FetchproxyServer / WebSocket is built.
+      createServer: (opts) => {
+        ctorOptsMock(opts);
+        return fakeServer as never;
+      },
+    });
+    expect(ctorOptsMock).toHaveBeenCalledOnce();
+    // The injected instance is the one exposed on `.server` (verb passthrough).
+    expect(t.server).toBe(fakeServer);
+    // The forwarded opts exclude the factory-only knobs (createServer, etc.).
+    const forwarded = ctorOptsMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(forwarded.serverName).toBe('musescore-mcp');
+    expect(forwarded).not.toHaveProperty('createServer');
+    expect(forwarded).not.toHaveProperty('logListening');
+  });
 });
 
 describe('createBootstrapOpts', () => {

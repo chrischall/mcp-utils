@@ -379,6 +379,45 @@ served from `www` (redfin/homes/compass); omit it for apex-served sites
 musescore's `download` capability) stay caller-supplied — the factory covers the
 common subset, not the long tail.
 
+**Opt-in startup banner.** Set `logListening: true` and `start()` emits the
+canonical fleet banner to **stderr** (stdout is the JSON-RPC channel) once the
+bridge is listening:
+
+```
+[<serverName>:bridge] listening on 127.0.0.1:<port> (role=<role ?? 'unknown'>, version=<version>)
+```
+
+The port is read from the live `bridgeHealth()`, so an overridden port is
+reflected (no hardcoded literal). Default `false` keeps current consumers silent
+— they opt in to drop their hand-rolled banner. This is independent of
+`debugEnvVar`, which gates the richer per-request debug logging.
+
+**`serverVersion` in `status()`.** `status()` returns the `bridgeHealth()`
+snapshot with `serverVersion` additively pinned to the `version` opt — the field
+redfin / homes / compass each projected by hand. Consumers can delegate
+`status()` straight through instead of re-wrapping the health snapshot.
+
+**Mock-injectable server (test seam).** Pass `createServer` to inject a mock
+`FetchproxyServer` instead of the factory constructing a real one (default
+`(opts) => new FetchproxyServer(opts)`). A consumer's vitest can capture the
+constructor opts and stub verbs (e.g. `download`) without
+`vi.mock('@fetchproxy/server')` — which can't reach the `new FetchproxyServer`
+call inside this package's prebuilt dist. The default path is unchanged and adds
+no new eager `@fetchproxy/server` import.
+
+```ts
+// In a consumer's transport test:
+const ctorOpts = vi.fn();
+const t = createFetchproxyTransport({
+  serverName: 'musescore-mcp', version, domains: ['musescore.com'],
+  createServer: (opts) => {
+    ctorOpts(opts);
+    return { download: downloadMock, /* …stubbed verbs… */ } as never;
+  },
+});
+expect(ctorOpts.mock.calls[0][0].capabilities).toEqual(['fetch', 'download']);
+```
+
 **Bridge-healthcheck tool factory.** `registerBridgeHealthcheckTool({ server,
 prefix, probePath, hostLabel, transport, probeFn })` registers a
 `<prefix>_healthcheck` tool that round-trips `probePath` through the bridge and
