@@ -1,5 +1,9 @@
 # @chrischall/mcp-utils
 
+[![CI](https://github.com/chrischall/mcp-utils/actions/workflows/ci.yml/badge.svg)](https://github.com/chrischall/mcp-utils/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@chrischall/mcp-utils)](https://www.npmjs.com/package/@chrischall/mcp-utils)
+[![license](https://img.shields.io/npm/l/@chrischall/mcp-utils)](LICENSE)
+
 Shared scaffolding for the **chrischall MCP fleet** — the generic MCP glue
 hoisted out of ~19 sibling servers so each one no longer reimplements server
 bootstrap, tool-result formatting, helpful errors, hardened env/config, a bearer
