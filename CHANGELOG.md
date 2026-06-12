@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.3](https://github.com/chrischall/mcp-utils/compare/v0.10.2...v0.10.3) (2026-06-12)
+
+
+### Documentation
+
+* **skill:** capture shared-workflow adoption + bootstrap learnings ([#56](https://github.com/chrischall/mcp-utils/issues/56)) ([530bfa1](https://github.com/chrischall/mcp-utils/commit/530bfa1165a9458b54f1d5283489457ec72fa81b))
+
 ## [0.10.2](https://github.com/chrischall/mcp-utils/compare/v0.10.1...v0.10.2) (2026-06-12)
 
 
