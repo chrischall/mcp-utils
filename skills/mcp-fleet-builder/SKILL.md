@@ -143,7 +143,7 @@ A new fleet repo isn't done until ALL of this exists. Each line below was a real
 
 **Publish scaffold** (also list in package.json `files`): `manifest.json` (mcpb; `runtimes.node` floor stays at an **LTS** like `>=22.5`, not 26, so LTS users install), `server.json` (registry; description **≤ 100 chars** or `mcp-publisher` 422s), `.claude-plugin/plugin.json` + `marketplace.json`, `.mcp.json`, `skills/<name>/SKILL.md`, and **`.mcpbignore`** so `mcpb pack` ships only `dist/bundle.js` + `manifest.json` + `package.json` — exclude `src/`, `tests/`, `docs/`, `node_modules/`, `.env*`, the registry/plugin manifests, **and** `release-please-config.json` / `.release-please-manifest.json` / `CHANGELOG.md`.
 
-**mcp-publisher** — install via the shared pinned, SHA-256-verified action `chrischall/mcp-utils/.github/actions/install-mcp-publisher@<tag>`, NOT the upstream `releases/latest | tar xz` (that binary runs with the OIDC + RELEASE_PAT + CLAWHUB tokens).
+**mcp-publisher** — install via the shared pinned, SHA-256-verified action `chrischall/workflows/.github/actions/install-mcp-publisher@main`, NOT the upstream `releases/latest | tar xz` (that binary runs with the OIDC + RELEASE_PAT + CLAWHUB tokens).
 
 ## Gotchas (hard-won)
 
