@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.10.2](https://github.com/chrischall/mcp-utils/compare/v0.10.1...v0.10.2) (2026-06-12)
+
+
+### Bug Fixes
+
+* bot PRs bypass the CI gate unconditionally ([#52](https://github.com/chrischall/mcp-utils/issues/52)) ([3b8f692](https://github.com/chrischall/mcp-utils/commit/3b8f692e3cf3f05737729bbbca1363718f3edefb))
+
+
+### Documentation
+
+* add MIT LICENSE file and README badges ([#49](https://github.com/chrischall/mcp-utils/issues/49)) ([aab0e5a](https://github.com/chrischall/mcp-utils/commit/aab0e5adb0e18fc6d7b64f34d7e246be134ce8ea))
+
 ## [0.10.1](https://github.com/chrischall/mcp-utils/compare/v0.10.0...v0.10.1) (2026-06-10)
 
 
