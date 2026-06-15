@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.4](https://github.com/chrischall/mcp-utils/compare/v0.10.3...v0.10.4) (2026-06-15)
+
+
+### Documentation
+
+* add CLAUDE.md with project context and auto-review follow-up convention ([#58](https://github.com/chrischall/mcp-utils/issues/58)) ([4d1ec4e](https://github.com/chrischall/mcp-utils/commit/4d1ec4edccc03e45a60358512e147ba4431d79ab))
+
 ## [0.10.3](https://github.com/chrischall/mcp-utils/compare/v0.10.2...v0.10.3) (2026-06-12)
 
 
