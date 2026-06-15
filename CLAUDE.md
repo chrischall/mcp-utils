@@ -64,7 +64,7 @@ This package handles bearer tokens, cookies, and JWTs on behalf of the whole fle
 `release-please` owns versioning. Don't edit `version` in `package.json`, `.release-please-manifest.json`, or create tags by hand.
 
 - It reads **Conventional Commit** messages on `main`. Because the repo squash-merges, **the PR title becomes the squash subject** that release-please parses — so the PR title must be a conventional commit (`feat:`, `fix:`, `docs:`, `refactor:`, `perf:`, `chore:`, …). A non-conventional title bumps nothing and ships nothing.
-- Changelog sections are configured in `release-please-config.json` (`feat`→Features, `fix`→Bug Fixes, `perf`→Performance, `refactor`→Refactor, `docs`→Documentation; `test`/`build`/`ci`/`chore` are hidden).
+- Changelog sections are configured in `release-please-config.json` (`feat`→Features, `fix`→Bug Fixes, `perf`→Performance, `revert`→Reverts, `refactor`→Refactor, `docs`→Documentation; `test`/`build`/`ci`/`chore` are hidden).
 - Merging the release PR tags `v<VERSION>` and the `publish` job ships to npm with provenance (OIDC). Publish is idempotent (skips a version already on the registry).
 
 ## How PRs merge (automated — don't run `gh pr merge`)
