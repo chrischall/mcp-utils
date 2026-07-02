@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.10.5](https://github.com/chrischall/mcp-utils/compare/v0.10.4...v0.10.5) (2026-07-02)
+
+
+### Documentation
+
+* fold alltrails-mcp learnings into mcp-fleet-builder ([#65](https://github.com/chrischall/mcp-utils/issues/65)) ([d6bddbb](https://github.com/chrischall/mcp-utils/commit/d6bddbb34b6261b196ad02f9c83ace7df6489856))
+* **skill:** fold alltrails-mcp lessons into mcp-fleet-builder ([#64](https://github.com/chrischall/mcp-utils/issues/64)) ([466d213](https://github.com/chrischall/mcp-utils/commit/466d21325fb353bcedbbe8761e4a6ac7ff04b99e))
+* **skill:** fold flightaware-mcp lessons into mcp-fleet-builder ([#62](https://github.com/chrischall/mcp-utils/issues/62)) ([27fbd31](https://github.com/chrischall/mcp-utils/commit/27fbd31ebcf822c859736a77cb55cc7b507ad3f9))
+
 ## [0.10.4](https://github.com/chrischall/mcp-utils/compare/v0.10.3...v0.10.4) (2026-06-15)
 
 
