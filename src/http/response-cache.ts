@@ -98,7 +98,7 @@ export function createResponseCache<V = unknown>(opts: ResponseCacheOptions): Re
     get,
     set,
     async fetchThrough(key: string, load: () => Promise<V>, tier = 'dynamic'): Promise<V> {
-      const hit = get(key, tier);
+      const hit = get(key);
       if (hit !== undefined) return hit;
       const value = await load();
       set(key, value, tier);
