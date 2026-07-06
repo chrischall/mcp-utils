@@ -44,7 +44,20 @@ describe('writeBinaryOutput / uniquePath baseName traversal guard', () => {
     expect(path).toBe(join(dir, 'shot.png'));
   });
 
-  it('a baseName that sanitizes to empty still produces a file in dir', () => {
+  it('a baseName that sanitizes to empty (a lone ".") falls back to a file in dir', () => {
+    // '.' has no separators and only one dot, so both replace passes leave it
+    // and the leading-dot strip empties it → the 'file' fallback fires.
+    const path = writeBinaryOutput({
+      dir,
+      baseName: '.',
+      base64: Buffer.from('x').toString('base64'),
+      extension: 'bin',
+    });
+    expect(path).toBe(join(dir, 'file.bin'));
+    expect(existsSync(path)).toBe(true);
+  });
+
+  it('keeps a traversal-only baseName ("../..") inside dir', () => {
     const path = writeBinaryOutput({
       dir,
       baseName: '../..',

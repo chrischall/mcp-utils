@@ -29,6 +29,21 @@ describe('redactSecrets — JSON-valued secret keys', () => {
     expect(out).toContain('"token_type":"Bearer"');
   });
 
+  it('fully redacts a double-quoted value containing an apostrophe (no tail leak)', () => {
+    // The value class must stop at the SAME quote that opened it — a shared
+    // [^"']* would halt at the apostrophe and leak the suffix.
+    const out = redactSecrets(`{"password":"hunter's2secret"}`);
+    expect(out).not.toContain("'s2secret");
+    expect(out).not.toContain('hunter');
+    expect(out).toBe('{"password":"[REDACTED]"}');
+  });
+
+  it('leaves client_id visible — a public OAuth identifier, not a credential (RFC 6749 §2.2)', () => {
+    const out = redactSecrets('{"client_id":"my-app-1234","client_secret":"realsecretvalue"}');
+    expect(out).toContain('"client_id":"my-app-1234"');
+    expect(out).not.toContain('realsecretvalue');
+  });
+
   it('still redacts before truncation (order preserved) for JSON bodies', () => {
     const body = '{"refresh_token":"' + 'A'.repeat(600) + '"}';
     const out = truncateErrorMessage(body, 100);
