@@ -304,3 +304,57 @@ export async function loadDotenvSafely(opts: LoadDotenvOptions = {}): Promise<bo
     return false;
   }
 }
+
+/** Options for {@link readIntEnv}. */
+export interface ReadIntEnvOptions {
+  /** The source to read from. Defaults to {@link process.env}. */
+  env?: EnvSource;
+  /** Result when the variable is unset, junk, or out of range. */
+  default?: number;
+  /** Inclusive lower bound. Defaults to `0` — the fleet's env ints (timeouts, counts) are non-negative. */
+  min?: number;
+  /** Inclusive upper bound. Unbounded when omitted. */
+  max?: number;
+}
+
+/**
+ * Read an integer from an environment variable, hardened like {@link readEnvVar}
+ * (trim, treat blank / `'undefined'` / `'null'` / unsubstituted `${...}` as
+ * unset) PLUS a strict integer parse (`12abc`, `1.5`, `0x10` are rejected) and
+ * an optional `[min, max]` range check.
+ *
+ * Returns `opts.default` (or `undefined`) when unset, junk, or out of range.
+ * Consolidates the hand-rolled numeric env readers across the fleet
+ * (alltrails `getRequestTimeoutMs`, getyourguide `requestTimeoutMs`, …) the way
+ * {@link readPortEnv} consolidated the port variant.
+ */
+export function readIntEnv(key: string, opts: ReadIntEnvOptions = {}): number | undefined {
+  const raw = readEnvVar(key, opts.env ? { env: opts.env } : {});
+  if (raw === undefined) return opts.default;
+  if (!/^-?\d+$/.test(raw)) return opts.default;
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n)) return opts.default;
+  const min = opts.min ?? 0;
+  if (n < min) return opts.default;
+  if (opts.max !== undefined && n > opts.max) return opts.default;
+  return n;
+}
+
+/**
+ * Read a TTL expressed in **seconds** from an environment variable and return
+ * **milliseconds** — the `<SVC>_CACHE_TTL` / `<SVC>_STATIC_CACHE_TTL` reader
+ * triplicated across flightaware / viator / tripadvisor.
+ *
+ * Semantics (matching all three donors):
+ *  - unset / placeholder / junk / negative → `defaultMs`,
+ *  - an explicit `'0'` → `0` (caching disabled) — NOT the default,
+ *  - a non-negative integer → `n * 1000`.
+ */
+export function readTtlMsEnv(
+  key: string,
+  defaultMs: number,
+  opts: { env?: EnvSource } = {},
+): number {
+  const seconds = readIntEnv(key, { ...(opts.env ? { env: opts.env } : {}), min: 0 });
+  return seconds === undefined ? defaultMs : seconds * 1000;
+}

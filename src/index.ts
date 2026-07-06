@@ -24,3 +24,4 @@ export * from './concurrency/index.js';
 export * from './dates/index.js';
 export * from './zod/index.js';
 export * from './auth/index.js';
+export * from './scrape/index.js';

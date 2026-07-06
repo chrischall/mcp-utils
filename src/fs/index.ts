@@ -67,3 +67,5 @@ export async function readFileHead(path: string, bytes: number): Promise<Buffer>
     await fh.close();
   }
 }
+
+export * from './output.js';

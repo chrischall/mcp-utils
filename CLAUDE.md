@@ -24,7 +24,7 @@ The package exports a light **core barrel** plus heavier **subpath entries** so 
 
 | Import | Module(s) | Notes |
 | --- | --- | --- |
-| `@chrischall/mcp-utils` | `server` `response` `errors` `config` `fs` `http` `concurrency` `dates` `zod` `auth` | core barrel — re-exported from `src/index.ts` |
+| `@chrischall/mcp-utils` | `server` `response` `errors` `config` `fs` `http` `concurrency` `dates` `zod` `auth` `scrape` | core barrel — re-exported from `src/index.ts` |
 | `@chrischall/mcp-utils/session` | `session` | session registry / disk store / `TokenManager` / `CookieSessionManager` |
 | `@chrischall/mcp-utils/fetchproxy` | `fetchproxy` | transport adapter; needs optional peer `@fetchproxy/server` |
 | `@chrischall/mcp-utils/html` | `html` | HTML scraping helpers; needs optional peer `node-html-parser` |
@@ -41,7 +41,8 @@ What each core module owns (see the long header docblock at the top of each `ind
 - **concurrency** — `mapLimit` (zero-dep ordered bounded fan-out).
 - **dates** — pure lexical date reformatters (no `Date`/`Intl` — avoids timezone off-by-one).
 - **zod** — schema atoms + tool-annotation helpers (zod v4, raw-shape style).
-- **auth** — credential-resolver *skeletons*; per-site params are injected, nothing branches on site identity.
+- **auth** — credential-resolver *skeletons*; per-site params are injected, nothing branches on site identity. Plus `createCachedTokenSource` (single-flight cached mint) and `signEs256Jwt`.
+- **scrape** — zero-dep string/JSON extraction for SSR pages (entity decode, balanced-bracket walking, JSON-LD/OpenGraph readers, deep shape-walkers, Cloudflare-interstitial detection, anti-XSSI guard strip). DOM-level scraping stays in `/html` (optional peer).
 - **session** — `SessionRegistry` (in-memory), `SessionStore` (disk, 0600/0700 perms), `TokenManager` (single-flight refresh + 401-replay), `CookieSessionManager`.
 
 ## Security posture (do not regress)

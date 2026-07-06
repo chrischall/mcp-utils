@@ -65,15 +65,24 @@ export class SessionNotAuthenticatedError extends McpToolError {
 export class BotWallError extends McpToolError {
   /** Suggested seconds to wait before retrying the blocked request(s). */
   readonly retryAfterSeconds: number;
+  /** The wall vendor when the classifier identified one (e.g. `'DataDome'`, `'Cloudflare'`). */
+  readonly vendor?: string;
 
-  constructor(path: string, retryAfterSeconds: number = DEFAULT_BOT_WALL_RETRY_AFTER_S) {
+  constructor(
+    path: string,
+    retryAfterSeconds: number = DEFAULT_BOT_WALL_RETRY_AFTER_S,
+    opts?: { vendor?: string },
+  ) {
+    // Keep the historical no-vendor message byte-identical ("an anti-bot …").
+    const wall = opts?.vendor ? `a ${opts.vendor} anti-bot CAPTCHA wall` : 'an anti-bot CAPTCHA wall';
     const hint = `Back off and retry (suggested wait: ${retryAfterSeconds}s). If it persists, open the site in your browser, clear the CAPTCHA, then retry with a smaller batch.`;
     super(
-      `Served an anti-bot CAPTCHA wall for ${path} — the request was rate-limited, not a missing resource. ${hint}`,
+      `Served ${wall} for ${path} — the request was rate-limited, not a missing resource. ${hint}`,
       { hint },
     );
     this.name = 'BotWallError';
     this.retryAfterSeconds = retryAfterSeconds;
+    if (opts?.vendor !== undefined) this.vendor = opts.vendor;
   }
 }
 
@@ -225,4 +234,29 @@ export function wrapToolError(toolName: string, err: unknown): McpToolError {
   const message = inner.includes(prefix) ? inner : `${prefix} ${inner}`;
   const hint = err instanceof McpToolError ? err.hint : undefined;
   return new McpToolError(truncateErrorMessage(message), { hint, cause: err });
+}
+
+/** Options for {@link maskSecret}. */
+export interface MaskSecretOptions {
+  /** Leading characters kept visible. Defaults to 8. */
+  head?: number;
+  /** Trailing characters kept visible. Defaults to 4. */
+  tail?: number;
+}
+
+/**
+ * Mask a credential for display in a confirmation message: keep the first
+ * `head` and last `tail` characters with an ellipsis between
+ * (`abcdefgh…wxyz`). A value too short to mask safely (≤ `head + tail` chars)
+ * is fully hidden as `…` — a partial reveal of a short secret would leak most
+ * of it.
+ *
+ * Consolidates onehome's `fingerprint()` — for `<svc>_set_session`-style tools
+ * that echo back WHICH credential they stored without echoing the credential.
+ */
+export function maskSecret(value: string, opts: MaskSecretOptions = {}): string {
+  const head = opts.head ?? 8;
+  const tail = opts.tail ?? 4;
+  if (value.length <= head + tail) return '…';
+  return `${value.slice(0, head)}…${value.slice(value.length - tail)}`;
 }

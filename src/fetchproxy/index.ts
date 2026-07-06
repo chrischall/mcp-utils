@@ -609,7 +609,12 @@ export interface BridgeHealthcheckResult {
     body_length?: number;
   };
   error?: {
-    kind: BridgeErrorInfo['type'];
+    /**
+     * The classified error kind. Normally one of `BridgeErrorInfo['type']`;
+     * a consumer-supplied {@link RegisterBridgeHealthcheckToolArgs.classifyThrown}
+     * can introduce site-specific kinds (e.g. workday's `'session_expired'`).
+     */
+    kind: string;
     message: string;
     /** Server-authored next-step hint (`FetchproxyBridgeDownError.hint`), when present. */
     bridge_hint?: string;
@@ -617,6 +622,9 @@ export interface BridgeHealthcheckResult {
   /** Plain-English next-step suggestion derived from the result. */
   hint: string;
 }
+
+/** The hint-ladder arms whose copy {@link RegisterBridgeHealthcheckToolArgs.hints} can override. */
+export type HealthcheckHintArm = 'ok' | 'bridge_down' | 'no_role' | 'timeout' | 'protocol' | 'unknown';
 
 /** Options for {@link registerBridgeHealthcheckTool}. */
 export interface RegisterBridgeHealthcheckToolArgs {
@@ -643,6 +651,21 @@ export interface RegisterBridgeHealthcheckToolArgs {
    * client path real tools use (sign-in guards and all).
    */
   probeFn: (path: string) => Promise<string>;
+  /**
+   * Map the error the probe THREW to a site-specific `{ kind, hint? }` —
+   * e.g. workday classifies its `SessionNotAuthenticatedError` as
+   * `session_expired` with SSO re-sign-in copy. Return `undefined` to keep the
+   * default classification. A returned `hint` wins the whole result hint.
+   * Absorbs the error-kind special cases that kept workday / zillow / etix on
+   * hand-rolled healthchecks.
+   */
+  classifyThrown?: (err: unknown) => { kind: string; hint?: string } | undefined;
+  /**
+   * Per-arm overrides for the default hint copy (e.g. etix replacing the
+   * generic timeout hint with DataDome-specific guidance). A
+   * {@link classifyThrown} hint takes precedence over these.
+   */
+  hints?: Partial<Record<HealthcheckHintArm, string>>;
 }
 
 /**
@@ -662,7 +685,7 @@ function healthcheckHint(args: {
   hostLabel: string;
   prefix: string;
   probePath: string;
-  errorKind?: BridgeErrorInfo['type'];
+  errorKind?: string;
   bridgeHint?: string;
 }): string {
   const { hostLabel, prefix, probePath, port } = args;
@@ -704,7 +727,7 @@ function healthcheckHint(args: {
  * });
  */
 export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToolArgs): void {
-  const { server, prefix, probePath, hostLabel, transport, probeFn } = args;
+  const { server, prefix, probePath, hostLabel, transport, probeFn, classifyThrown, hints } = args;
   const probeUrl = `https://${hostLabel}${probePath}`;
 
   server.registerTool(
@@ -746,6 +769,7 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
 
       let error: BridgeHealthcheckResult['error'];
       let bridgeHint: string | undefined;
+      let customHint: string | undefined;
       if (probeResult.error) {
         // `runProbe` already classified the throw into `probeResult.error.kind`
         // (fetchproxy's raw vocabulary). Trust that as the discriminator —
@@ -753,10 +777,19 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
         // re-classifying a plain `{kind,message}` object. Use the typed `thrown`
         // (set by our probe wrapper) only to lift the server-authored
         // `FetchproxyBridgeDownError.hint`.
-        const kind: BridgeErrorInfo['type'] =
+        let kind: string =
           probeResult.error.kind === 'other' ? 'unknown' : probeResult.error.kind;
         bridgeHint =
           thrown instanceof FetchproxyBridgeDownError ? thrown.hint : undefined;
+        // A consumer classifier can re-kind the thrown error (e.g. workday's
+        // session_expired) and supply site-specific next-step copy.
+        if (thrown !== undefined && classifyThrown) {
+          const custom = classifyThrown(thrown);
+          if (custom) {
+            kind = custom.kind;
+            customHint = custom.hint;
+          }
+        }
         error = {
           kind,
           message: probeResult.error.message,
@@ -768,6 +801,32 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
       // off the live status snapshot (same call, so it's current).
       const lastExtensionMessageAt = transport.status().lastExtensionMessageAt;
 
+      // Which ladder arm applies — mirrors healthcheckHint's precedence order —
+      // so per-arm `hints` overrides land on the same arm the default copy would.
+      const arm: HealthcheckHintArm = ok
+        ? 'ok'
+        : error?.kind === 'bridge_down'
+          ? 'bridge_down'
+          : probeResult.bridge.role === null
+            ? 'no_role'
+            : error?.kind === 'timeout'
+              ? 'timeout'
+              : error?.kind === 'protocol' || error?.kind === 'http'
+                ? 'protocol'
+                : 'unknown';
+
+      const defaultHint = healthcheckHint({
+        ok,
+        role: probeResult.bridge.role,
+        // FIX: the real configured port from bridgeHealth(), not a literal 37149.
+        port: probeResult.bridge.port,
+        hostLabel,
+        prefix,
+        probePath,
+        errorKind: error?.kind,
+        bridgeHint: error?.kind === 'bridge_down' ? bridgeHint : undefined,
+      });
+
       const result: BridgeHealthcheckResult = {
         ok,
         bridge: {
@@ -776,17 +835,8 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
         },
         probe,
         ...(error ? { error } : {}),
-        hint: healthcheckHint({
-          ok,
-          role: probeResult.bridge.role,
-          // FIX: the real configured port from bridgeHealth(), not a literal 37149.
-          port: probeResult.bridge.port,
-          hostLabel,
-          prefix,
-          probePath,
-          errorKind: error?.kind,
-          bridgeHint: error?.kind === 'bridge_down' ? bridgeHint : undefined,
-        }),
+        // Precedence: classifyThrown's hint > per-arm override > default ladder.
+        hint: customHint ?? hints?.[arm] ?? defaultHint,
       };
 
       return {

@@ -538,3 +538,6 @@ export function createOAuth2Refresher(
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+export * from './cached-token.js';
+export * from './es256.js';
