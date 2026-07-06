@@ -175,14 +175,37 @@ const API_KEY_RE = new RegExp(
 // matches; that constraint is what makes short names like `key`/`sig` safe.
 const QUERY_SECRET_RE =
   /([?&](?:access_token|refresh_token|client_secret|api_?key|signature|token|key|sig)=)[^&#\s"'<>`]+/gi;
+// AWS SigV4 presigned-URL credential params. Their `X-Amz-` prefix defeats the
+// short-name anchoring in QUERY_SECRET_RE (`&X-Amz-Security-Token=` has `-`, not
+// `&`, before `token`), so match the full param names explicitly — an S3 error
+// body can echo a presigned URL carrying a temporary STS security token.
+const AWS_SIGV4_RE =
+  /([?&]X-Amz-(?:Signature|Security-Token|Credential)=)[^&#\s"'<>`]+/gi;
+// Secret-bearing JSON values — `"refresh_token": "…"` in a token-endpoint or
+// upstream error body. The KEY must be a quote-wrapped exact secret name (so
+// `"token_type":"Bearer"` and other non-secret keys are untouched), and only
+// the string VALUE is redacted. Covers the OAuth/login bodies the query-param
+// redactor misses (they arrive as JSON, not a URL).
+//
+// Two variants — double- vs single-quoted — because the value char class must
+// stop at the SAME quote that opened it: a shared `[^"']*` would halt at an
+// apostrophe inside a double-quoted value (`"password":"hunter's2"` → leaks
+// `'s2`). `client_id` is deliberately NOT in the key set: RFC 6749 §2.2 treats
+// it as a public identifier, not a credential (QUERY_SECRET_RE omits it too).
+const JSON_SECRET_KEYS = 'access_token|refresh_token|client_secret|api_?key|password|passwd|secret|token';
+const JSON_SECRET_DQ_RE = new RegExp(`("(?:${JSON_SECRET_KEYS})"\\s*:\\s*")[^"]*(")`, 'gi');
+const JSON_SECRET_SQ_RE = new RegExp(`('(?:${JSON_SECRET_KEYS})'\\s*:\\s*')[^']*(')`, 'gi');
 
 /**
  * Redact secrets that commonly leak into upstream error bodies before the text
  * is surfaced to a client: `Bearer <token>` / `Authorization: Basic <…>` headers,
  * `Cookie:` / `Set-Cookie:` header values (cookie names stay visible), standalone
  * JWTs, well-known API-key shapes (OpenAI/Anthropic `sk-…`, GitHub `ghp_…`,
- * Slack `xox?-…`, Google `AIza…`, AWS `AKIA…`, `whsec_…`), and secret-bearing
- * URL query params (`access_token`, `api_key`, `token`, `key`, `sig`, …).
+ * Slack `xox?-…`, Google `AIza…`, AWS `AKIA…`, `whsec_…`), secret-bearing
+ * URL query params (`access_token`, `api_key`, `token`, `key`, `sig`, …), and
+ * quote-wrapped JSON secret values (`"refresh_token":"…"` in an OAuth/error
+ * body — the key must be an exact secret name, so `"token_type":"Bearer"` and
+ * other non-secret keys stay visible).
  *
  * Exported so fleet repos can redact custom strings (log lines, debug payloads)
  * without taking on {@link truncateErrorMessage}'s length cap.
@@ -198,6 +221,9 @@ export function redactSecrets(text: string): string {
     )
     .replace(API_KEY_RE, '[REDACTED]')
     .replace(QUERY_SECRET_RE, '$1[REDACTED]')
+    .replace(AWS_SIGV4_RE, '$1[REDACTED]')
+    .replace(JSON_SECRET_DQ_RE, '$1[REDACTED]$2')
+    .replace(JSON_SECRET_SQ_RE, '$1[REDACTED]$2')
     .replace(JWT_RE, '[REDACTED]');
 }
 
