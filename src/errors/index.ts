@@ -175,14 +175,24 @@ const API_KEY_RE = new RegExp(
 // matches; that constraint is what makes short names like `key`/`sig` safe.
 const QUERY_SECRET_RE =
   /([?&](?:access_token|refresh_token|client_secret|api_?key|signature|token|key|sig)=)[^&#\s"'<>`]+/gi;
+// Secret-bearing JSON values — `"refresh_token": "…"` in a token-endpoint or
+// upstream error body. The KEY must be a quote-wrapped exact secret name (so
+// `"token_type":"Bearer"` and other non-secret keys are untouched), and only
+// the string VALUE is redacted. Covers the OAuth/login bodies the query-param
+// redactor misses (they arrive as JSON, not a URL).
+const JSON_SECRET_RE =
+  /(["'](?:access_token|refresh_token|client_secret|client_id|api_?key|password|passwd|secret|token)["']\s*:\s*["'])[^"']*(["'])/gi;
 
 /**
  * Redact secrets that commonly leak into upstream error bodies before the text
  * is surfaced to a client: `Bearer <token>` / `Authorization: Basic <…>` headers,
  * `Cookie:` / `Set-Cookie:` header values (cookie names stay visible), standalone
  * JWTs, well-known API-key shapes (OpenAI/Anthropic `sk-…`, GitHub `ghp_…`,
- * Slack `xox?-…`, Google `AIza…`, AWS `AKIA…`, `whsec_…`), and secret-bearing
- * URL query params (`access_token`, `api_key`, `token`, `key`, `sig`, …).
+ * Slack `xox?-…`, Google `AIza…`, AWS `AKIA…`, `whsec_…`), secret-bearing
+ * URL query params (`access_token`, `api_key`, `token`, `key`, `sig`, …), and
+ * quote-wrapped JSON secret values (`"refresh_token":"…"` in an OAuth/error
+ * body — the key must be an exact secret name, so `"token_type":"Bearer"` and
+ * other non-secret keys stay visible).
  *
  * Exported so fleet repos can redact custom strings (log lines, debug payloads)
  * without taking on {@link truncateErrorMessage}'s length cap.
@@ -198,6 +208,7 @@ export function redactSecrets(text: string): string {
     )
     .replace(API_KEY_RE, '[REDACTED]')
     .replace(QUERY_SECRET_RE, '$1[REDACTED]')
+    .replace(JSON_SECRET_RE, '$1[REDACTED]$2')
     .replace(JWT_RE, '[REDACTED]');
 }
 
