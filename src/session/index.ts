@@ -695,6 +695,28 @@ export interface CookieSessionManagerOptions<S, R = Response> {
    * (always retry) — the safe default for sites with no config/transient split.
    */
   isPermanentError?: (err: unknown) => boolean;
+  /**
+   * Proactive session TTL, in milliseconds. A session older than this (by
+   * login/seed time) is treated as stale: the next {@link ensure} invalidates
+   * and re-logs-in (single-flight — a stale burst coalesces onto ONE login).
+   * Omit for reactive-only expiry via {@link isExpired}. Mirrors
+   * infinitecampus's 5-hour `SESSION_TTL_MS` (which hand-rolled an
+   * `ensureFresh` wrapper for exactly this) and {@link TokenManager}'s
+   * proactive-refresh discipline.
+   */
+  maxAgeMs?: number;
+  /** Injectable clock for {@link maxAgeMs} staleness (defaults to `Date.now`) — for tests. */
+  now?: () => number;
+  /**
+   * Called when {@link CookieSessionManager.withSession}'s expiry-replay
+   * re-login FAILS — by default that failure is swallowed and the original
+   * expired-looking response is returned, which hides an actionable login
+   * error (e.g. "fetchproxy bridge down — open a signed-in tab") behind a
+   * generic 401. Use this hook to record the error (infinitecampus's
+   * `lastLoginError` bookkeeping) or `throw err` inside it to surface the
+   * login failure to the caller instead of the stale response.
+   */
+  onReplayLoginError?: (err: unknown) => void;
 }
 
 /**
@@ -741,9 +763,14 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
   private inFlight: Promise<S> | undefined;
   /** A cached *permanent* config error: once set, every `ensure` rethrows it. */
   private permanentError: unknown | undefined;
+  /** When the current session was minted (login) or installed (seed) — for maxAgeMs. */
+  private sessionAt = 0;
   private readonly loginFn: () => Promise<S>;
   private readonly isExpiredFn: (res: R) => boolean | Promise<boolean>;
   private readonly isPermanentErrorFn: (err: unknown) => boolean;
+  private readonly maxAgeMs: number | undefined;
+  private readonly now: () => number;
+  private readonly onReplayLoginErrorFn: ((err: unknown) => void) | undefined;
 
   constructor(opts: CookieSessionManagerOptions<S, R>) {
     this.loginFn = opts.login;
@@ -751,11 +778,19 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
     // `() => false` default makes withSession's replay path never trigger.
     this.isExpiredFn = opts.isExpired ?? (() => false);
     this.isPermanentErrorFn = opts.isPermanentError ?? (() => false);
+    this.maxAgeMs = opts.maxAgeMs;
+    this.now = opts.now ?? Date.now;
+    this.onReplayLoginErrorFn = opts.onReplayLoginError;
   }
 
   /** The current session, or `undefined` before the first successful login. */
   get current(): S | undefined {
     return this.session;
+  }
+
+  /** True when {@link CookieSessionManagerOptions.maxAgeMs} says the session is too old. */
+  private isStale(): boolean {
+    return this.maxAgeMs !== undefined && this.now() - this.sessionAt >= this.maxAgeMs;
   }
 
   /**
@@ -766,14 +801,36 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
    * the next call retries. A login error classified permanent by
    * {@link CookieSessionManagerOptions.isPermanentError} is cached and rethrown
    * on every later call; a transient error is not cached (next call retries).
+   * With {@link CookieSessionManagerOptions.maxAgeMs} set, a session past its
+   * TTL is invalidated first, so the call falls through to a (single-flight)
+   * re-login.
    */
   async ensure(): Promise<S> {
-    if (this.session !== undefined) return this.session;
+    if (this.session !== undefined) {
+      if (!this.isStale()) return this.session;
+      this.invalidate(); // proactive TTL expiry → fall through to re-login
+    }
     if (this.permanentError !== undefined) throw this.permanentError;
     if (this.inFlight === undefined) {
       this.inFlight = this.runLogin();
     }
     return this.inFlight;
+  }
+
+  /**
+   * Install an externally-minted session (e.g. infinitecampus's CUPS linked-
+   * district discovery, which mints sessions outside {@link
+   * CookieSessionManagerOptions.login}). The seed becomes the current session
+   * with a fresh {@link CookieSessionManagerOptions.maxAgeMs} clock, and any
+   * in-flight login is DETACHED: its waiters still receive its result, but a
+   * late resolution will not overwrite the seed. A cached permanent config
+   * error is left intact — the login path is still misconfigured, and the next
+   * post-seed re-login should keep saying so.
+   */
+  seed(session: S): void {
+    this.session = session;
+    this.sessionAt = this.now();
+    this.inFlight = undefined; // detach any in-flight login (it won't re-stamp)
   }
 
   /**
@@ -790,7 +847,10 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
     holder.p = (async () => {
       try {
         const session = await this.loginFn();
-        if (this.inFlight === holder.p) this.session = session;
+        if (this.inFlight === holder.p) {
+          this.session = session;
+          this.sessionAt = this.now();
+        }
         return session;
       } catch (err) {
         if (this.isPermanentErrorFn(err)) this.permanentError = err;
@@ -844,9 +904,12 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
     let fresh: S;
     try {
       fresh = await this.ensure();
-    } catch {
-      // Re-login failed (no creds, login rejected, …): surface the original
-      // expired response so the caller maps it to a clean sign-in error.
+    } catch (err) {
+      // Re-login failed (no creds, login rejected, …): by default surface the
+      // original expired response so the caller maps it to a clean sign-in
+      // error. The hook lets a consumer record the login error — or throw it
+      // to surface the actionable failure instead of the stale response.
+      this.onReplayLoginErrorFn?.(err);
       return res;
     }
     return call(fresh);
