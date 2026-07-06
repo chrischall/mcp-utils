@@ -39,12 +39,27 @@ const NAMED_ENTITIES: Record<string, string> = {
  */
 export function decodeHtmlEntities(text: string): string {
   return text
-    .replace(/&#(\d+);/g, (_, d: string) => String.fromCodePoint(Number(d)))
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, h: string) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (whole, d: string) => codePointOr(Number(d), whole))
+    .replace(/&#x([0-9a-fA-F]+);/g, (whole, h: string) => codePointOr(parseInt(h, 16), whole))
     .replace(/&(nbsp|lt|gt|quot|apos);/gi, (whole, name: string) => {
       return NAMED_ENTITIES[name.toLowerCase()] ?? whole;
     })
     .replace(/&amp;/gi, '&');
+}
+
+/**
+ * `String.fromCodePoint` for a scraped numeric entity, but SAFE: an out-of-range
+ * code point (> 0x10FFFF, e.g. `&#999999999999;`) or a surrogate throws
+ * `RangeError`, which on hostile input would crash the extractor. Return the raw
+ * entity text unchanged instead, preserving the module's never-throw contract.
+ */
+function codePointOr(code: number, raw: string): string {
+  if (!Number.isInteger(code) || code < 0 || code > 0x10ffff) return raw;
+  try {
+    return String.fromCodePoint(code);
+  } catch {
+    return raw;
+  }
 }
 
 /**
@@ -199,19 +214,56 @@ export function extractJsonAfterMarker(
 // JSON-LD / OpenGraph readers
 // ---------------------------------------------------------------------------
 
-const LD_JSON_RE =
-  /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+const LD_JSON_ATTR_RE = /type\s*=\s*["']application\/ld\+json["']/i;
+
+/**
+ * Find the next opening tag `<name` in `html` at or after `from`, respecting a
+ * tag-name boundary (so `<scriptish` doesn't match `<script`) and returning the
+ * index of the `<`, or `-1`. `lowerHtml` is the pre-lowercased haystack; `name`
+ * must be lowercase. Uses `indexOf` (linear) — the string primitives don't
+ * backtrack, unlike a `/<name\b[^>]*>/g` regex which is O(n²) across many
+ * openers when the closing `>` is withheld.
+ */
+function nextTagOpen(lowerHtml: string, name: string, from: number): number {
+  const needle = `<${name}`;
+  for (let i = lowerHtml.indexOf(needle, from); i >= 0; i = lowerHtml.indexOf(needle, i + 1)) {
+    const after = lowerHtml[i + needle.length];
+    // A real tag boundary: end, `>`, whitespace, or self-close/slash.
+    if (after === undefined || after === '>' || after === '/' || after === ' ' || after === '\t' || after === '\n' || after === '\r' || after === '\f') {
+      return i;
+    }
+  }
+  return -1;
+}
 
 /**
  * Parse every `<script type="application/ld+json">` block in the page,
  * skipping malformed ones. Returns the parsed values in document order.
  * Consolidates etix's / tripadvisor's ld+json block iteration.
+ *
+ * Linear-time by construction: `indexOf`-driven tag scanning (find `<script`,
+ * find its `>`, find `</script>`), never a `[^>]*>` regex — the previous
+ * single mega-regex was O(n³) and its `[^>]*>`-per-opener replacement is still
+ * O(n²); string `indexOf` doesn't backtrack, so an unterminated
+ * `<script type="application/ld+json"` flood can't pin the event loop.
  */
 export function extractJsonLdBlocks(html: string): unknown[] {
   const out: unknown[] = [];
-  for (const m of html.matchAll(LD_JSON_RE)) {
+  const lower = html.toLowerCase();
+  let i = 0;
+  for (;;) {
+    const open = nextTagOpen(lower, 'script', i);
+    if (open < 0) break;
+    const tagEnd = html.indexOf('>', open);
+    if (tagEnd < 0) break; // unterminated opening tag — nothing more to extract
+    const attrs = html.slice(open + '<script'.length, tagEnd);
+    const bodyStart = tagEnd + 1;
+    const bodyEnd = lower.indexOf('</script>', bodyStart);
+    if (bodyEnd < 0) break; // no closing tag
+    i = bodyEnd + '</script>'.length;
+    if (!LD_JSON_ATTR_RE.test(attrs)) continue;
     try {
-      out.push(JSON.parse((m[1] ?? '').trim()) as unknown);
+      out.push(JSON.parse(html.slice(bodyStart, bodyEnd).trim()) as unknown);
     } catch {
       // Malformed block — skip, per every donor.
     }
@@ -249,28 +301,38 @@ export function findJsonLdEntity(html: string, type: string): Record<string, unk
   return null;
 }
 
-/** Escape a literal for embedding in a RegExp source. */
-function escapeRe(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
+// These run only on a SINGLE bounded `<meta …>` tag's attribute text, so they
+// carry no ReDoS risk (input is one tag, not the whole document).
+const META_CONTENT_RE = /\bcontent\s*=\s*["']([^"']*)["']/i;
+const META_PROP_RE = /\b(?:property|name)\s*=\s*["']([^"']*)["']/i;
 
 /**
  * Read a `<meta property="og:…" content="…">` value, tolerant of either
- * attribute order (both occur in the wild — etix's `ogContent`). The content is
- * entity-decoded. Returns `undefined` when the property is absent.
+ * attribute order (both occur in the wild — etix's `ogContent`) and of
+ * `name=`-keyed OpenGraph. The content is entity-decoded. Returns `undefined`
+ * when the property is absent.
+ *
+ * Linear-time by construction: `indexOf`-driven `<meta …>` scanning, reading
+ * the `property`/`content` attributes WITHIN each single (bounded) tag — never
+ * a `<meta\s[^>]*PROP[^>]*content…` regex, which backtracked quadratically on a
+ * flood of unterminated `<meta property=…` (a ReDoS on hostile scraped HTML).
  */
 export function ogContent(html: string, property: string): string | undefined {
-  const prop = escapeRe(property);
-  const propFirst = new RegExp(
-    `<meta\\s[^>]*property\\s*=\\s*["']${prop}["'][^>]*content\\s*=\\s*["']([^"']*)["']`,
-    'i',
-  );
-  const contentFirst = new RegExp(
-    `<meta\\s[^>]*content\\s*=\\s*["']([^"']*)["'][^>]*property\\s*=\\s*["']${prop}["']`,
-    'i',
-  );
-  const m = propFirst.exec(html) ?? contentFirst.exec(html);
-  return m?.[1] !== undefined ? decodeHtmlEntities(m[1]) : undefined;
+  const want = property.toLowerCase();
+  const lower = html.toLowerCase();
+  let i = 0;
+  for (;;) {
+    const open = nextTagOpen(lower, 'meta', i);
+    if (open < 0) return undefined;
+    const tagEnd = html.indexOf('>', open);
+    if (tagEnd < 0) return undefined; // unterminated tag — nothing more to read
+    const attrs = html.slice(open + '<meta'.length, tagEnd);
+    i = tagEnd + 1;
+    const prop = META_PROP_RE.exec(attrs);
+    if (!prop || prop[1]?.toLowerCase() !== want) continue;
+    const content = META_CONTENT_RE.exec(attrs);
+    if (content?.[1] !== undefined) return decodeHtmlEntities(content[1]);
+  }
 }
 
 // ---------------------------------------------------------------------------
