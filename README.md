@@ -240,7 +240,7 @@ mapping (gzip sales reports, PNG maps, attachment downloads).
 `createResponseCache({ ttlMs: { dynamic, static }, maxEntries })` is the bounded
 tiered-TTL response cache for billed / rate-limited reads (flightaware / viator
 / tripadvisor): key on the request path (and body for POST-reads), route
-reference data through the long `static` tier via `get(key, 'static')` /
+reference data through the long `static` tier via
 `fetchThrough(key, load, 'static')`, and pair the TTLs with `readTtlMsEnv`.
 Writes are never cached.
 

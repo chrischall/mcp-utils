@@ -166,3 +166,34 @@ describe('CookieSessionManager onReplayLoginError', () => {
     expect(calls).toBe(0);
   });
 });
+
+describe('CookieSessionManager seed() vs a cached permanent error (PR #69 follow-up)', () => {
+  it('a seeded session is served even when a permanent login error is cached', async () => {
+    const mgr = new CookieSessionManager<Sess>({
+      login: async () => {
+        throw new Error('SETLIST_USERNAME is not set');
+      },
+      isPermanentError: () => true,
+    });
+    await expect(mgr.ensure()).rejects.toThrow('is not set');
+    mgr.seed({ cookieHeader: 'seeded' });
+    expect((await mgr.ensure()).cookieHeader).toBe('seeded'); // seed bypasses the cache
+  });
+
+  it('once the seed goes stale, the cached permanent error is rethrown (login is still misconfigured)', async () => {
+    const c = clock();
+    const mgr = new CookieSessionManager<Sess>({
+      login: async () => {
+        throw new Error('no creds');
+      },
+      isPermanentError: () => true,
+      maxAgeMs: 1000,
+      now: c.now,
+    });
+    await expect(mgr.ensure()).rejects.toThrow('no creds');
+    mgr.seed({ cookieHeader: 'seeded' });
+    await mgr.ensure();
+    c.advance(2000); // seed stale → falls through to the cached permanent error
+    await expect(mgr.ensure()).rejects.toThrow('no creds');
+  });
+});

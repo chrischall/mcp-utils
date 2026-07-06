@@ -31,8 +31,12 @@ export interface ResponseCacheOptions {
 
 /** The cache returned by {@link createResponseCache}. */
 export interface ResponseCache<V = unknown> {
-  /** The cached value for `key` under `tier`'s TTL, or `undefined` on miss/expiry. */
-  get(key: string, tier?: string): V | undefined;
+  /**
+   * The cached value for `key`, or `undefined` on miss/expiry. Tiers matter at
+   * WRITE time only — the TTL is baked into the entry by {@link set} /
+   * {@link fetchThrough} — so lookups take no tier.
+   */
+  get(key: string): V | undefined;
   /** Store `value` for `key` under `tier`'s TTL (no-op when that TTL is 0). */
   set(key: string, value: V, tier?: string): void;
   /** Cache-through read: return the cached value or run `load` and cache it. */
@@ -71,7 +75,7 @@ export function createResponseCache<V = unknown>(opts: ResponseCacheOptions): Re
     }
   }
 
-  function get(key: string, _tier?: string): V | undefined {
+  function get(key: string): V | undefined {
     const entry = store.get(key);
     if (!entry) return undefined;
     if (entry.expiresAt <= now()) {
