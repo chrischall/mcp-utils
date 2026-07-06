@@ -26,7 +26,7 @@ describe('createResponseCache', () => {
     cache.set('/ref', 'r', 'static');
     c.advance(5000);
     expect(cache.get('/dyn')).toBeUndefined();
-    expect(cache.get('/ref', 'static')).toBe('r');
+    expect(cache.get('/ref')).toBe('r');
   });
 
   it('a TTL of 0 disables storing for that tier', () => {
@@ -34,7 +34,7 @@ describe('createResponseCache', () => {
     cache.set('/a', 'x');
     expect(cache.get('/a')).toBeUndefined();
     cache.set('/b', 'y', 'static');
-    expect(cache.get('/b', 'static')).toBe('y');
+    expect(cache.get('/b')).toBe('y');
   });
 
   it('evicts expired entries first when full, then the oldest insertion', () => {

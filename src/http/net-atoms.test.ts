@@ -85,3 +85,12 @@ describe('parseContentDispositionFilename', () => {
     expect(parseContentDispositionFilename('inline')).toBeUndefined();
   });
 });
+
+describe('parseRetryAfterMs fallback contract (PR #66 follow-up)', () => {
+  it('the fallback delayMs is NOT capped — capMs bounds only header-derived delays', () => {
+    // An upstream with no Retry-After header must get the caller's configured
+    // fallback verbatim, even when it exceeds the header cap.
+    expect(parseRetryAfterMs(null, { defaultMs: 60_000, capMs: 5000 })).toBe(60_000);
+    expect(parseRetryAfterMs('junk', { defaultMs: 60_000, capMs: 5000 })).toBe(60_000);
+  });
+});

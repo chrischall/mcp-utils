@@ -17,9 +17,10 @@ export interface ParseRetryAfterOptions {
 /**
  * Parse an RFC 9110 `Retry-After` header (the delta-seconds form) into a
  * bounded delay in milliseconds. Missing / non-numeric / negative values fall
- * back to `defaultMs`; the result never exceeds `capMs` — an upstream asking
- * for a 10-minute wait shouldn't pin a tool call open that long. The HTTP-date
- * form is not parsed (no donor upstream uses it) and falls back to the default.
+ * back to `defaultMs` **verbatim** — `capMs` bounds only header-derived delays
+ * (an upstream asking for a 10-minute wait shouldn't pin a tool call open, but
+ * the caller's own configured fallback is trusted as-is). The HTTP-date form
+ * is not parsed (no donor upstream uses it) and falls back to the default.
  */
 export function parseRetryAfterMs(
   header: string | null | undefined,
@@ -27,9 +28,9 @@ export function parseRetryAfterMs(
 ): number {
   const defaultMs = opts.defaultMs ?? 2000;
   const capMs = opts.capMs ?? 30_000;
-  if (header == null) return Math.min(defaultMs, capMs);
+  if (header == null) return defaultMs;
   const trimmed = header.trim();
-  if (!/^\d+$/.test(trimmed)) return Math.min(defaultMs, capMs);
+  if (!/^\d+$/.test(trimmed)) return defaultMs;
   return Math.min(Number(trimmed) * 1000, capMs);
 }
 
