@@ -31,7 +31,7 @@ import light:
 
 | Import | Contents |
 | --- | --- |
-| `@chrischall/mcp-utils` | core barrel: `server` + `response` + `errors` + `config` + `fs` + `http` + `zod` + `auth` |
+| `@chrischall/mcp-utils` | core barrel: `server` + `response` + `errors` + `config` + `fs` + `http` + `concurrency` + `dates` + `zod` + `auth` + `scrape` |
 | `@chrischall/mcp-utils/session` | session registry, session store, token manager, cookie-session manager |
 | `@chrischall/mcp-utils/fetchproxy` | fetchproxy transport adapter, bot-wall / retry / concurrency helpers |
 | `@chrischall/mcp-utils/html` | opt-in HTML scraping helpers (needs `node-html-parser`) |
@@ -69,7 +69,13 @@ the server instance without connecting a transport.
 ### `response` — tool-result formatting
 
 `textResult` / `jsonResult` (alias), `rawTextResult`, `imageResult`,
-`errorResult`, `flattenJsonApi`, `deepMapStringField`.
+`errorResult`, `flattenJsonApi`, `deepMapStringField`, `pruneUndefined`,
+`toArray`.
+
+`pruneUndefined(obj)` shallow-copies an object dropping `undefined`-valued keys
+(the compact-projection idiom: skylight's `compact`, viator/alltrails' `prune`);
+`toArray(v)` coerces `T | T[] | null | undefined` to `T[]` (the XML→JSON
+single-item guard from canvas-parent / infinitecampus).
 
 ```ts
 import { textResult, errorResult, flattenJsonApi, deepMapStringField } from '@chrischall/mcp-utils';
@@ -87,7 +93,10 @@ deepMapStringField(payload, 'eventDate', dmyToIso);
 `McpToolError` and its subclasses (`SessionNotAuthenticatedError`,
 `BotWallError`, `RateLimitError`, `UnreachableError`, `ModeMismatchError`),
 plus `createHelpfulError`, `wrapToolError`, `truncateErrorMessage`,
-`redactSecrets`, and `messageOf`. `redactSecrets` scrubs `Bearer`/`Basic` auth
+`redactSecrets`, `maskSecret`, and `messageOf`. `BotWallError` takes an optional
+`{ vendor }` (e.g. `'DataDome'`) woven into the message and exposed as a field;
+`maskSecret(value)` renders a `first8…last4` fingerprint for set-credential
+confirmations (short values are fully hidden). `redactSecrets` scrubs `Bearer`/`Basic` auth
 headers, `Cookie`/`Set-Cookie` values (cookie names stay visible), JWTs,
 well-known API-key shapes (`sk-…`, `ghp_…`, `xox?-…`, `AIza…`, `AKIA…`,
 `whsec_…`), and secret-bearing URL query params; `truncateErrorMessage` applies
@@ -113,8 +122,13 @@ tool surface can show the user.
 
 ### `config` — hardened env/config
 
-`readEnvVar`, `requireEnvVar`, `parseBoolEnv`, `readPortEnv`, `expandPath`,
-`loadDotenvSafely`, `createCachedJsonArrayLoader`.
+`readEnvVar`, `requireEnvVar`, `parseBoolEnv`, `readPortEnv`, `readIntEnv`,
+`readTtlMsEnv`, `expandPath`, `loadDotenvSafely`, `createCachedJsonArrayLoader`.
+
+`readIntEnv` is the general hardened integer reader (strict parse + optional
+`min`/`max`); `readTtlMsEnv(key, defaultMs)` reads a TTL in **seconds** and
+returns **milliseconds**, honoring an explicit `0` as "disabled" — the
+`<SVC>_CACHE_TTL` reader shared by the response-cache consumers.
 
 ```ts
 import { requireEnvVar, parseBoolEnv, readPortEnv, expandPath } from '@chrischall/mcp-utils';
@@ -153,9 +167,17 @@ A successful parse is cached; a missing/unreadable file, invalid JSON, or a
 non-string-array logs one stderr warning and negative-caches (returns defaults
 without re-reading). Pass `readFile` to inject a reader in tests.
 
-### `fs` — streaming file helpers (uploads)
+### `fs` — streaming file helpers (uploads) & binary output
 
-`fileBlob`, `readFileHead`.
+`fileBlob`, `readFileHead`, `resolveOutputDir`, `uniquePath`,
+`writeBinaryOutput`, `sniffMimeBytes`.
+
+The binary-output kit (hoisted from gemini + flightaware) is the fleet
+convention for tools that generate bytes: `resolveOutputDir(perCall,
+'<SVC>_OUTPUT_DIR')` resolves arg → env → cwd (creating the dir),
+`writeBinaryOutput({ dir, baseName, base64, mimeType })` writes to a
+**non-overwriting** path (`name.png`, `name-2.png`, …) and returns it, and
+`sniffMimeBytes` magic-byte-detects PNG/JPEG/WebP/GIF.
 
 ```ts
 import { fileBlob, readFileHead } from '@chrischall/mcp-utils';
@@ -177,9 +199,11 @@ constant memory instead of a 20 MB Buffer.
 
 `createApiClient` plus building blocks: `buildQueryString`, `buildOptionalBody`,
 `formatApiError`, `parseLinkHeader`, `parseCookieJar`, `parseCookieHeader`,
-`runBoundedBatch`, JWT helpers (`decodeJwtExp`, `decodeJwtSessionId`,
-`decodeJwtClaim`, `validateJwtExpiry`), and the `ApiError` / `UpstreamHttpError` /
-`UnauthorizedError` / `RateLimitedError` / `RequestTimeoutError` classes.
+`runBoundedBatch`, `createThrottle`, `createResponseCache`, `parseRetryAfterMs`,
+`splitHost`, `buildUserAgent`, `parseContentDispositionFilename`, JWT helpers
+(`decodeJwtExp`, `decodeJwtSessionId`, `decodeJwtClaim`, `validateJwtExpiry`),
+and the `ApiError` / `UpstreamHttpError` / `UnauthorizedError` /
+`RateLimitedError` / `RequestTimeoutError` classes.
 
 `decodeJwtClaim(token, claim)` is the generic single-claim reader — returns the
 raw claim value (`unknown`) or `undefined` for an undecodable token / absent
@@ -202,6 +226,23 @@ const data = await api.get('/v1/things', { query: { page: 2 } });
 `timeout` (ms) bounds each attempt with an `AbortController`; on expiry it throws
 `RequestTimeoutError` instead of hanging the tool call. A 429 retry gets a fresh
 timeout. Omit it to keep the previous unbounded behavior.
+
+`retry` also accepts `statuses` (e.g. `[429, 503]`), `honorRetryAfter: true`
+(sleep the response's `Retry-After` instead of the fixed `delayMs`, bounded by
+`maxRetryAfterMs`, default 30 s — hoisted from getyourguide / musicbrainz /
+viator / tripadvisor), and the standalone `parseRetryAfterMs(header)` for custom
+clients.
+
+`api.fetchRaw(method, path)` is the binary path `fetchJson` can't express —
+returns `{ status, contentType, headers, bytes }` with the same 401/429/error
+mapping (gzip sales reports, PNG maps, attachment downloads).
+
+`createResponseCache({ ttlMs: { dynamic, static }, maxEntries })` is the bounded
+tiered-TTL response cache for billed / rate-limited reads (flightaware / viator
+/ tripadvisor): key on the request path (and body for POST-reads), route
+reference data through the long `static` tier via `get(key, 'static')` /
+`fetchThrough(key, load, 'static')`, and pair the TTLs with `readTtlMsEnv`.
+Writes are never cached.
 
 `parseCookieHeader(header)` parses an inbound *request* `Cookie:` header
 (`name=value; name2=value2`) into a `Record<string, string>` (first `=` splits,
@@ -234,10 +275,18 @@ a single hung row can't wedge the call. It always returns a full-length,
 input-ordered array. `setTimer`/`clearTimer` are injectable for tests. This
 hoists zillow's bulk-tool deadline + `pending`-backfill primitive.
 
-### `concurrency` — bounded async map
+### `concurrency` — bounded async map & single-flight
 
-`mapWithConcurrency` — a zero-dependency bounded-fan-out map that preserves
-**input order**.
+`mapWithConcurrency`, `singleFlight`, `memoizeAsync` — zero-dependency async
+primitives.
+
+`singleFlight(fn)` shares ONE in-flight invocation across concurrent callers
+(cleared on settle; a rejection doesn't poison the next call) — the
+login/refresh/bridge-ready guard hand-rolled in honeybook / infinitecampus /
+onehome / vibo / alltrails / tripadvisor / artsonia. `memoizeAsync(loader)` is
+the keyed variant: a promise cache that coalesces concurrent loads per key and
+evicts rejected loads so the next `get` retries (redfin's `LocalityPoolCache`),
+with `delete`/`clear` for invalidation and test hooks.
 
 ```ts
 import { mapWithConcurrency } from '@chrischall/mcp-utils';
@@ -256,7 +305,8 @@ plus per-item backfill rather than a plain all-or-nothing map.
 
 ### `dates` — date-format converters
 
-`isoToDmy`, `dmyToIso`, `isoToCompactTimestamp`. For upstreams that don't speak
+`isoToDmy`, `dmyToIso`, `isoToCompactTimestamp`, `todayIso`, `toIsoDateUtc`,
+`shiftIsoDate`, `ensureSeconds`. For upstreams that don't speak
 ISO 8601, so a server can keep its surface ISO (`yyyy-MM-dd`) and translate at
 the API boundary. Pair with `deepMapStringField` to normalize a date field
 across a whole response.
@@ -268,13 +318,56 @@ const apiDate = isoToDmy('2025-08-28');                 // '28-08-2025' (request
 deepMapStringField(payload, 'eventDate', dmyToIso);     // '28-08-2025' → '2025-08-28' (response)
 ```
 
+### `scrape` — SSR JSON-store & page extraction (zero-dep)
+
+`decodeHtmlEntities`, `stripHtml`, `sanitizeJsLiterals`, `matchBalanced`,
+`extractJsonAfterMarker`, `extractJsonLdBlocks`, `findJsonLdEntity`,
+`ogContent`, `findArrayByShape`, `deepCollectArrays`, `deepFindObject`,
+`isCloudflareChallenge`, `stripJsonGuard`.
+
+Pure string/JSON primitives for server-rendered pages — no `node-html-parser`
+(DOM-level scraping stays in the [`/html`](#html) subpath). Consolidates the SSR
+JSON-store stack re-implemented across musescore / tock / zillow / opentable /
+tripadvisor / etix:
+
+```ts
+import {
+  extractJsonAfterMarker, findJsonLdEntity, ogContent,
+  findArrayByShape, isCloudflareChallenge, stripJsonGuard,
+} from '@chrischall/mcp-utils';
+
+// A redux/__NEXT_DATA__-style store (JS literals repaired via sanitize):
+const store = extractJsonAfterMarker(html, ['window.$REDUX_STATE', '"appState"'], { sanitize: true });
+
+// schema.org / OpenGraph readers:
+const event = findJsonLdEntity(html, 'Event');      // checks blocks, @graph, mainEntity
+const title = ogContent(html, 'og:title');
+
+// Drift-tolerant array location + anti-XSSI guard stripping:
+const homes = findArrayByShape(pageProps, ['savedHomesList'], (f) => !!f && typeof f === 'object');
+const data = JSON.parse(stripJsonGuard(body));      // )]}'  while(1);  for(;;);  {}&&
+```
+
+`isCloudflareChallenge` matches the DEFINITIVE interstitial markers only
+(`_cf_chl_opt`, `<title>Just a moment`) — never `cdn-cgi/challenge-platform`,
+which Cloudflare inlines on cleared pages too. `decodeHtmlEntities` decodes
+`&amp;` LAST so attribute-escaped JSON survives one level; `matchBalanced` is
+the string/escape-aware bracket walker regex can't replace.
+
 ### `zod` — schema atoms
 
 Reusable schemas (`PositiveInt`, `NonNegInt`, `NonEmptyString`, `IsoDate`,
 `IsoTime`, `NumericIdString`, `SafePathSegment`, `schemaOrigin`,
 `schemaConfirm`), pagination helpers
 (`paginationSchema`, `pageSchema`, `calculateOffset`), tool-annotation builders
-(`toolAnnotations`), and time normalizers (`extractTime`, `normalizeTime`).
+(`toolAnnotations`), time normalizers (`extractTime`, `normalizeTime`), and the
+lenient response validator `parseLenient`.
+
+`parseLenient(schema, raw, { label, context, mode? })` is the degrade-never-break
+validator for reverse-engineered APIs (alltrails' `parseAllTrails`, ofw's
+`parseOFW`, getyourguide's `parseGYG`): on success it returns the parsed data;
+on drift it warns to **stderr** with the precise issue paths and returns the
+RAW response (or throws an `McpToolError` in `mode: 'strict'` for write paths).
 
 ```ts
 import { paginationSchema, calculateOffset, toolAnnotations } from '@chrischall/mcp-utils';
@@ -292,8 +385,15 @@ injection.
 ### `auth` — auth resolver skeletons
 
 `createAuthResolver`, `resolveAuthPattern`, `sessionLoginFlow`,
-`createOAuth2Refresher`, and the supporting `FetchproxySession` /
-`AuthPattern` types.
+`createOAuth2Refresher`, `createCachedTokenSource`, `signEs256Jwt`, and the
+supporting `FetchproxySession` / `AuthPattern` types.
+
+`createCachedTokenSource({ mint, bufferMs })` caches any minted token until
+shortly before expiry with a single-flight mint and an `invalidate()` hook for
+401-replay — wrap it around `createOAuth2Refresher` (musicbrainz), an ES256
+self-mint (app-store-connect), or a login exchange (zola). `signEs256Jwt(pem,
+payload, { header: { kid } })` is the P-256/`ieee-p1363` JWS signer those
+self-minted-JWT APIs need (the decode counterparts live in `http`).
 
 ```ts
 import { createAuthResolver, createOAuth2Refresher } from '@chrischall/mcp-utils';
@@ -461,6 +561,12 @@ registerBridgeHealthcheckTool({
   probeFn: (path) => client.fetchHtml(path),
 });
 ```
+
+Two optional hooks absorb the site-specific healthchecks workday / zillow /
+etix hand-rolled: `classifyThrown(err)` maps the probe's thrown error to a
+custom `{ kind, hint }` (e.g. an SSO bounce → `session_expired` with re-sign-in
+copy; its hint wins the result hint), and `hints` overrides the default copy
+per ladder arm (`{ timeout: 'DataDome may be challenging the tab — …' }`).
 
 ### `html` — scraping helpers *(subpath, optional peer)*
 

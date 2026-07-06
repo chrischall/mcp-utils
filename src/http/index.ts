@@ -20,6 +20,10 @@
 import { truncateErrorMessage } from '../errors/index.js';
 
 export * from './throttle.js';
+export * from './response-cache.js';
+export * from './net-atoms.js';
+
+import { parseRetryAfterMs } from './net-atoms.js';
 
 // ---------------------------------------------------------------------------
 // createApiClient
@@ -38,6 +42,19 @@ export interface RetryPolicy {
    * surfaces through the normal non-2xx path (an {@link ApiError}).
    */
   statuses?: number[];
+  /**
+   * Honor the response's `Retry-After` header for the retry delay (bounded by
+   * {@link maxRetryAfterMs}), falling back to {@link delayMs} when the header
+   * is absent or unparseable. Off by default — the historical fixed-delay
+   * behavior. Consolidates the hand-rolled Retry-After handling in
+   * getyourguide / musicbrainz / viator / tripadvisor.
+   */
+  honorRetryAfter?: boolean;
+  /**
+   * Cap on an honored `Retry-After` delay, in ms. Defaults to 30 000 — an
+   * upstream demanding a 10-minute wait shouldn't pin a tool call open.
+   */
+  maxRetryAfterMs?: number;
 }
 
 /** Options for {@link createApiClient}. */
@@ -144,6 +161,27 @@ export interface ApiClient {
   fetchJson: <T = unknown>(method: string, path: string, opts?: RequestOptions) => Promise<T>;
   /** Authenticated request returning the raw response body as text (e.g. HTML scrapes). */
   fetchHtml: (method: string, path: string, opts?: RequestOptions) => Promise<string>;
+  /**
+   * Authenticated request returning the raw bytes plus status/headers — the
+   * binary path `fetchJson` can't express (gzip reports, PNG maps, file
+   * downloads). Same 401/429/non-2xx mapping as `fetchJson`; the error body of
+   * a failure is decoded as text and redacted. Consolidates the hand-rolled
+   * `requestRaw` / `write()` / `requestBinary` / `requestMobileBinary` in
+   * app-store-connect / flightaware / ofw / zola.
+   */
+  fetchRaw: (method: string, path: string, opts?: RequestOptions) => Promise<RawApiResponse>;
+}
+
+/** Result of {@link ApiClient.fetchRaw}. */
+export interface RawApiResponse {
+  /** The 2xx status of the response. */
+  status: number;
+  /** The `Content-Type` header, when present. */
+  contentType: string | null;
+  /** The full response headers (e.g. for `Content-Disposition` / `Location`). */
+  headers: Headers;
+  /** The response body bytes. */
+  bytes: Uint8Array;
 }
 
 const DEFAULT_RETRY: RetryPolicy = { count: 1, delayMs: 2000 };
@@ -312,7 +350,13 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
 
       if (retryStatuses.includes(res.status) && attempt < retry.count) {
         attempt += 1;
-        await sleep(retry.delayMs);
+        const delay = retry.honorRetryAfter
+          ? parseRetryAfterMs(res.headers.get('retry-after'), {
+              defaultMs: retry.delayMs,
+              capMs: retry.maxRetryAfterMs ?? 30_000,
+            })
+          : retry.delayMs;
+        await sleep(delay);
         continue;
       }
       return res;
@@ -348,7 +392,27 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     return text;
   }
 
-  return { fetchJson, fetchHtml };
+  async function fetchRaw(method: string, path: string, opt: RequestOptions = {}): Promise<RawApiResponse> {
+    const headers = { Accept: '*/*', ...opt.headers };
+    const res = await send(method, path, { ...opt, headers });
+
+    if (res.status === 401) throw unauthorized();
+    if (res.status === 429) throw rateLimited();
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new ApiError(res.status, formatApiError(res.status, method, path, text, { service }));
+    }
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    return {
+      status: res.status,
+      contentType: res.headers.get('content-type'),
+      headers: res.headers,
+      bytes,
+    };
+  }
+
+  return { fetchJson, fetchHtml, fetchRaw };
 }
 
 // ---------------------------------------------------------------------------

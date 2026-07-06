@@ -87,3 +87,31 @@ export function deepMapStringField<T>(value: T, field: string, map: (v: string) 
   }
   return value;
 }
+
+/**
+ * Shallow-copy an object, dropping every `undefined`-valued key. `null` and
+ * falsy values survive — only `undefined` means "not provided".
+ *
+ * Consolidates the byte-identical `compact()` (skylight) / `prune()` (viator /
+ * alltrails) helpers the compact-projection tools call dozens of times per repo.
+ */
+export function pruneUndefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
+  const out: Partial<T> = {};
+  for (const key of Object.keys(obj) as Array<keyof T>) {
+    if (obj[key] !== undefined) out[key] = obj[key];
+  }
+  return out;
+}
+
+/**
+ * Coerce a maybe-array to an array: an array passes through (same reference), a
+ * bare value is wrapped, and `null`/`undefined` become `[]`.
+ *
+ * Consolidates the `toArray` twins in canvas-parent / infinitecampus — both
+ * guard XML→JSON serializers where a single item arrives as a bare object
+ * rather than a 1-element array.
+ */
+export function toArray<T>(value: T | T[] | null | undefined): T[] {
+  if (value === null || value === undefined) return [];
+  return Array.isArray(value) ? value : [value];
+}
