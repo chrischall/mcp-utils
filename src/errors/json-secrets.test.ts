@@ -36,3 +36,23 @@ describe('redactSecrets — JSON-valued secret keys', () => {
     expect(out).toContain('[REDACTED]');
   });
 });
+
+describe('redactSecrets — AWS SigV4 presigned-URL params', () => {
+  it('redacts X-Amz-Security-Token / X-Amz-Signature / X-Amz-Credential in a presigned URL', () => {
+    const url =
+      'https://b.s3.amazonaws.com/k?X-Amz-Credential=AKIAEXAMPLE/20260706/us-east-1/s3/aws4_request' +
+      '&X-Amz-Signature=abc123def456deadbeef&X-Amz-Security-Token=FwoGZXIvYXdzEEEsecrettoken';
+    const out = redactSecrets(url);
+    expect(out).not.toContain('FwoGZXIvYXdzEEEsecrettoken');
+    expect(out).not.toContain('abc123def456deadbeef');
+    expect(out).toContain('X-Amz-Security-Token=[REDACTED]');
+    expect(out).toContain('X-Amz-Signature=[REDACTED]');
+    expect(out).toContain('X-Amz-Credential=[REDACTED]');
+  });
+
+  it('leaves non-credential X-Amz params (X-Amz-Date, X-Amz-Expires) visible', () => {
+    const out = redactSecrets('?X-Amz-Date=20260706T000000Z&X-Amz-Expires=900');
+    expect(out).toContain('X-Amz-Date=20260706T000000Z');
+    expect(out).toContain('X-Amz-Expires=900');
+  });
+});
