@@ -289,9 +289,10 @@ function stripElementContent(html: string, tag: string): string {
       return out;
     }
     // Require a tag-name boundary (`<script>` / `<script ` / `<script\n`), so
-    // `<scriptish>` isn't treated as a <script>.
+    // `<scriptish>` isn't treated as a <script>. The whitespace set matches the
+    // scrape module's `nextTagOpen` (HTML5 ASCII whitespace incl. `\f`).
     const after = lower[start + open.length];
-    if (after !== undefined && after !== '>' && after !== ' ' && after !== '\t' && after !== '\n' && after !== '\r' && after !== '/') {
+    if (after !== undefined && after !== '>' && after !== ' ' && after !== '\t' && after !== '\n' && after !== '\r' && after !== '\f' && after !== '/') {
       out += html.slice(i, start + open.length);
       i = start + open.length;
       continue;
@@ -304,9 +305,10 @@ function stripElementContent(html: string, tag: string): string {
 }
 
 /**
- * `String.fromCodePoint` guarded against a `RangeError` on an out-of-range or
- * surrogate code point from a scraped numeric entity — returns the raw entity
- * text unchanged instead of throwing.
+ * `String.fromCodePoint` guarded against a `RangeError` on an out-of-range
+ * (negative or > 0x10FFFF) code point from a scraped numeric entity — returns
+ * the raw entity text unchanged instead of throwing. (Lone surrogates do NOT
+ * throw and pass the guard, yielding a lone-surrogate string; harmless here.)
  */
 function codePointOr(code: number, raw: string): string {
   if (!Number.isInteger(code) || code < 0 || code > 0x10ffff) return raw;

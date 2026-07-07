@@ -661,10 +661,13 @@ export interface RegisterBridgeHealthcheckToolArgs {
    */
   probeFn: (path: string) => Promise<string>;
   /**
-   * Map the error the probe THREW to a site-specific `{ kind, hint? }` —
+   * Map the error the probe THREW to a site-specific `{ kind, hint?, detail? }` —
    * e.g. workday classifies its `SessionNotAuthenticatedError` as
    * `session_expired` with SSO re-sign-in copy. Return `undefined` to keep the
-   * default classification. A returned `hint` wins the whole result hint.
+   * default classification. A returned `hint` wins the whole result hint; a
+   * returned `detail` object is merged into the result's `error.detail` (the
+   * hook zillow/etix use to re-attach the structured diagnostics —
+   * `elapsed_ms_at_timeout` etc. — the shared envelope has no fixed slots for).
    * Absorbs the error-kind special cases that kept workday / zillow / etix on
    * hand-rolled healthchecks.
    */
