@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/chrischall/mcp-utils/compare/v0.11.0...v0.12.0) (2026-07-07)
+
+
+### Features
+
+* **fetchproxy:** classifyThrown detail hook; add ./scrape subpath export ([#78](https://github.com/chrischall/mcp-utils/issues/78)) ([d9d1bc9](https://github.com/chrischall/mcp-utils/commit/d9d1bc93e9a9148d72eabc92cdca419cd8f9b700))
+
 ## [0.11.0](https://github.com/chrischall/mcp-utils/compare/v0.10.5...v0.11.0) (2026-07-06)
 
 
