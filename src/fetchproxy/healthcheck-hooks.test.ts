@@ -144,3 +144,51 @@ describe('registerBridgeHealthcheckTool custom hooks', () => {
     await harness.close();
   });
 });
+
+describe('registerBridgeHealthcheckTool classifyThrown detail', () => {
+  it('merges a classifyThrown-supplied detail object into the error', async () => {
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'zillow',
+        probePath: '/robots.txt',
+        hostLabel: 'www.zillow.com',
+        transport: fakeTransport(failedProbe('timeout')),
+        probeFn: async () => {
+          throw new Error('timed out');
+        },
+        classifyThrown: () => ({
+          kind: 'timeout',
+          detail: { elapsed_ms_at_timeout: 30000, retry_attempted: true, role_at_failure: 'host' },
+        }),
+      }),
+    );
+    const res = parseToolResult<{
+      error?: { kind: string; detail?: { elapsed_ms_at_timeout?: number; retry_attempted?: boolean } };
+    }>(await harness.callTool('zillow_healthcheck'));
+    expect(res.error?.kind).toBe('timeout');
+    expect(res.error?.detail?.elapsed_ms_at_timeout).toBe(30000);
+    expect(res.error?.detail?.retry_attempted).toBe(true);
+    await harness.close();
+  });
+
+  it('omits detail when classifyThrown does not supply one', async () => {
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'etix',
+        probePath: '/robots.txt',
+        hostLabel: 'www.etix.com',
+        transport: fakeTransport(failedProbe('timeout')),
+        probeFn: async () => {
+          throw new Error('timed out');
+        },
+      }),
+    );
+    const res = parseToolResult<{ error?: { kind: string; detail?: unknown } }>(
+      await harness.callTool('etix_healthcheck'),
+    );
+    expect(res.error?.detail).toBeUndefined();
+    await harness.close();
+  });
+});

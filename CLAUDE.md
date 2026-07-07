@@ -28,7 +28,10 @@ The package exports a light **core barrel** plus heavier **subpath entries** so 
 | `@chrischall/mcp-utils/session` | `session` | session registry / disk store / `TokenManager` / `CookieSessionManager` |
 | `@chrischall/mcp-utils/fetchproxy` | `fetchproxy` | transport adapter; needs optional peer `@fetchproxy/server` |
 | `@chrischall/mcp-utils/html` | `html` | HTML scraping helpers; needs optional peer `node-html-parser` |
+| `@chrischall/mcp-utils/scrape` | `scrape` | convenience alias; `scrape` is zero-dep and also in the core barrel |
 | `@chrischall/mcp-utils/test` | `test` | in-memory vitest harness; devtime-only, never imported by runtime code |
+
+`scrape` is the one module reachable **both** ways: it's zero-dep so it stays in the core barrel (root import), and it *also* has a `/scrape` subpath for parity with `/html` — a convenience, not a load-bearing split. (The `/session`, `/fetchproxy`, `/html`, `/test` subpaths ARE load-bearing — they isolate optional peer deps.)
 
 The subpath split is **load-bearing, not cosmetic**: `@fetchproxy/server`, `node-html-parser`, and `vitest` are *optional* peer deps. The core barrel (`src/index.ts`) must never transitively import any of them, or every consumer would have to install fetchproxy. Keep fetchproxy-typed errors and the bridge classifier in `src/fetchproxy/` (the core `errors` module duck-types `FetchproxyBridgeDownError` rather than importing it). When adding a module, decide core-vs-subpath by its dependency footprint and add the export to both `package.json#exports` and the README table.
 
