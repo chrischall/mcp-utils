@@ -178,6 +178,13 @@ describe('ogContent', () => {
   it('returns undefined when absent', () => {
     expect(ogContent('<meta property="og:title" content="x">', 'og:image')).toBeUndefined();
   });
+
+  it('reads a name=-keyed tag (some sites use name instead of property for OG)', () => {
+    expect(ogContent('<meta name="og:title" content="Named"/>', 'og:title')).toBe('Named');
+    expect(ogContent('<meta content="Twitter" name="twitter:card">', 'twitter:card')).toBe(
+      'Twitter',
+    );
+  });
 });
 
 describe('findArrayByShape', () => {
