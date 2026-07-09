@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/chrischall/mcp-utils/compare/v0.12.0...v0.13.0) (2026-07-09)
+
+
+### Features
+
+* **fetchproxy:** pass domSelectors through for read_dom ([#82](https://github.com/chrischall/mcp-utils/issues/82)) ([ae00877](https://github.com/chrischall/mcp-utils/commit/ae008779c0ac5504d70b55908966d3f6a814c229))
+
 ## [0.12.0](https://github.com/chrischall/mcp-utils/compare/v0.11.0...v0.12.0) (2026-07-07)
 
 

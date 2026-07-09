@@ -1,6 +1,6 @@
 {
   "name": "@chrischall/mcp-utils",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Shared scaffolding for the chrischall MCP fleet — server bootstrap, tool-result formatting, helpful errors, hardened env/config, a bearer API-client kit, zod atoms, session registries, a fetchproxy transport adapter, auth resolver skeletons, an in-memory test harness, and opt-in HTML helpers. The generic MCP glue hoisted out of ~19 sibling servers.",
   "type": "module",
   "license": "MIT",
