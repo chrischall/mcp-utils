@@ -401,12 +401,14 @@ export type {
   Capability,
   CaptureHeaderDecl,
   IndexedDbScopeDecl,
+  DomSelectorDecl,
   StoragePointerDecl,
 } from '@fetchproxy/protocol';
 
 import type {
   CaptureHeaderDecl,
   IndexedDbScopeDecl,
+  DomSelectorDecl,
   StoragePointerDecl,
 } from '@fetchproxy/protocol';
 
@@ -431,6 +433,8 @@ export interface BootstrapDecls {
   captureHeaders?: CaptureHeaderDecl[];
   /** `read_indexed_db`: declared IndexedDB scopes. */
   indexedDbScopes?: IndexedDbScopeDecl[];
+  /** `read_dom`: declared CSS-selector DOM reads (e.g. a Turnstile token input). */
+  domSelectors?: DomSelectorDecl[];
 }
 
 /** Options for {@link createBootstrapOpts}. */
@@ -487,6 +491,7 @@ export function createBootstrapOpts(
   | 'sessionStoragePointers'
   | 'captureHeaders'
   | 'indexedDbScopes'
+  | 'domSelectors'
 > {
   const domains = Array.isArray(args.domains) ? args.domains : [args.domains];
   if (domains.length === 0 || domains.some((d) => !d || d.trim().length === 0)) {
@@ -515,6 +520,7 @@ export function createBootstrapOpts(
   }
   if (nonEmpty(b.captureHeaders)) capabilities.add('capture_request_header');
   if (nonEmpty(b.indexedDbScopes)) capabilities.add('read_indexed_db');
+  if (nonEmpty(b.domSelectors)) capabilities.add('read_dom');
 
   return {
     domains,
@@ -526,6 +532,7 @@ export function createBootstrapOpts(
     ...(nonEmpty(b.sessionStoragePointers) ? { sessionStoragePointers: b.sessionStoragePointers } : {}),
     ...(nonEmpty(b.captureHeaders) ? { captureHeaders: b.captureHeaders } : {}),
     ...(nonEmpty(b.indexedDbScopes) ? { indexedDbScopes: b.indexedDbScopes } : {}),
+    ...(nonEmpty(b.domSelectors) ? { domSelectors: b.domSelectors } : {}),
   };
 }
 

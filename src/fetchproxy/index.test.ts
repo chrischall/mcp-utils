@@ -351,6 +351,27 @@ describe('createBootstrapOpts', () => {
     expect(opts.cookieKeys).toEqual(['session']);
   });
 
+  it('derives read_dom + passes domSelectors through', () => {
+    const opts = createBootstrapOpts({
+      domains: ['easytable.com'],
+      bootstrap: {
+        domSelectors: [
+          { name: 'turnstileToken', selector: 'input[name="cf-turnstile-response"]' },
+        ],
+      },
+    });
+    expect(opts.capabilities).toEqual(expect.arrayContaining(['read_dom']));
+    expect(opts.domSelectors).toEqual([
+      { name: 'turnstileToken', selector: 'input[name="cf-turnstile-response"]' },
+    ]);
+  });
+
+  it('omits domSelectors + read_dom when none are declared', () => {
+    const opts = createBootstrapOpts({ domains: ['easytable.com'] });
+    expect(opts.domSelectors).toBeUndefined();
+    expect(opts.capabilities ?? []).not.toContain('read_dom');
+  });
+
   it('does not duplicate a capability when multiple decls of the same kind exist', () => {
     const opts = createBootstrapOpts({
       domains: ['resy.com'],

@@ -69,7 +69,7 @@
     }
   },
   "devDependencies": {
-    "@fetchproxy/server": "^1.0.0",
+    "@fetchproxy/server": "^1.4.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^24.0.0",
     "@vitest/coverage-v8": "^4.1.0",
