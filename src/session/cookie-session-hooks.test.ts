@@ -167,7 +167,7 @@ describe('CookieSessionManager onReplayLoginError', () => {
   });
 });
 
-describe('CookieSessionManager seed() vs a cached permanent error (PR #69 follow-up)', () => {
+describe('CookieSessionManager seed() vs a cached permanent error', () => {
   it('a seeded session is served even when a permanent login error is cached', async () => {
     const mgr = new CookieSessionManager<Sess>({
       login: async () => {

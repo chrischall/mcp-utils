@@ -249,18 +249,18 @@ const NAMED_ENTITIES: Record<string, string> = {
  */
 export function extractPlainTextFromHtml(html: string): string {
   if (!html) return '';
-  let text = html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ');
+  // Strip <script>/<style> element CONTENT via a LINEAR indexOf scan. The former
+  // `/<script[\s\S]*?<\/script>/gi` lazy regexes backtracked quadratically on a
+  // flood of unterminated `<script` tags (a ReDoS on untrusted message bodies);
+  // a single forward pass is O(n) and preserves the load-bearing safety property
+  // (inline JS/CSS text never reaches the output).
+  let text = stripElementContent(stripElementContent(html, 'script'), 'style');
   // Drop all remaining tags.
   text = text.replace(/<[^>]+>/g, ' ');
-  // Decode numeric (decimal + hex) character references.
-  text = text.replace(/&#(\d+);/g, (_, d: string) =>
-    String.fromCodePoint(Number(d)),
-  );
-  text = text.replace(/&#x([0-9a-fA-F]+);/g, (_, h: string) =>
-    String.fromCodePoint(parseInt(h, 16)),
-  );
+  // Decode numeric (decimal + hex) references, guarding out-of-range code points
+  // (`&#999999999999;`) that would otherwise throw RangeError on hostile input.
+  text = text.replace(/&#(\d+);/g, (whole, d: string) => codePointOr(Number(d), whole));
+  text = text.replace(/&#x([0-9a-fA-F]+);/g, (whole, h: string) => codePointOr(parseInt(h, 16), whole));
   // Decode the common named entities.
   text = text.replace(/&([a-zA-Z]+);/g, (whole, name: string) => {
     const decoded = NAMED_ENTITIES[name.toLowerCase()];
@@ -268,6 +268,55 @@ export function extractPlainTextFromHtml(html: string): string {
   });
   // Collapse whitespace runs and trim.
   return text.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Remove every `<tag …>…</tag>` element (opening tag, content, and close) in a
+ * single linear forward pass. An unterminated opener drops the remainder — the
+ * safe choice for the script/style strip (never leak the tail). Case-insensitive
+ * on the tag name.
+ */
+function stripElementContent(html: string, tag: string): string {
+  const lower = html.toLowerCase();
+  const open = `<${tag}`;
+  const close = `</${tag}>`;
+  let out = '';
+  let i = 0;
+  for (;;) {
+    const start = lower.indexOf(open, i);
+    if (start < 0) {
+      out += html.slice(i);
+      return out;
+    }
+    // Require a tag-name boundary (`<script>` / `<script ` / `<script\n`), so
+    // `<scriptish>` isn't treated as a <script>. The whitespace set matches the
+    // scrape module's `nextTagOpen` (HTML5 ASCII whitespace incl. `\f`).
+    const after = lower[start + open.length];
+    if (after !== undefined && after !== '>' && after !== ' ' && after !== '\t' && after !== '\n' && after !== '\r' && after !== '\f' && after !== '/') {
+      out += html.slice(i, start + open.length);
+      i = start + open.length;
+      continue;
+    }
+    out += html.slice(i, start) + ' ';
+    const closeAt = lower.indexOf(close, start + open.length);
+    if (closeAt < 0) return out; // unterminated: drop the rest
+    i = closeAt + close.length;
+  }
+}
+
+/**
+ * `String.fromCodePoint` guarded against a `RangeError` on an out-of-range
+ * (negative or > 0x10FFFF) code point from a scraped numeric entity — returns
+ * the raw entity text unchanged instead of throwing. (Lone surrogates do NOT
+ * throw and pass the guard, yielding a lone-surrogate string; harmless here.)
+ */
+function codePointOr(code: number, raw: string): string {
+  if (!Number.isInteger(code) || code < 0 || code > 0x10ffff) return raw;
+  try {
+    return String.fromCodePoint(code);
+  } catch {
+    return raw;
+  }
 }
 
 /**

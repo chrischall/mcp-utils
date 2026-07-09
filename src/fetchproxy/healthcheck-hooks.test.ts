@@ -144,3 +144,75 @@ describe('registerBridgeHealthcheckTool custom hooks', () => {
     await harness.close();
   });
 });
+
+describe('registerBridgeHealthcheckTool classifyThrown detail', () => {
+  it('merges a classifyThrown-supplied detail object into the error', async () => {
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'zillow',
+        probePath: '/robots.txt',
+        hostLabel: 'www.zillow.com',
+        transport: fakeTransport(failedProbe('timeout')),
+        probeFn: async () => {
+          throw new Error('timed out');
+        },
+        classifyThrown: () => ({
+          kind: 'timeout',
+          detail: { elapsed_ms_at_timeout: 30000, retry_attempted: true, role_at_failure: 'host' },
+        }),
+      }),
+    );
+    const res = parseToolResult<{
+      error?: { kind: string; detail?: { elapsed_ms_at_timeout?: number; retry_attempted?: boolean } };
+    }>(await harness.callTool('zillow_healthcheck'));
+    expect(res.error?.kind).toBe('timeout');
+    expect(res.error?.detail?.elapsed_ms_at_timeout).toBe(30000);
+    expect(res.error?.detail?.retry_attempted).toBe(true);
+    await harness.close();
+  });
+
+  it('omits detail when no classifyThrown is supplied at all', async () => {
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'etix',
+        probePath: '/robots.txt',
+        hostLabel: 'www.etix.com',
+        transport: fakeTransport(failedProbe('timeout')),
+        probeFn: async () => {
+          throw new Error('timed out');
+        },
+      }),
+    );
+    const res = parseToolResult<{ error?: { kind: string; detail?: unknown } }>(
+      await harness.callTool('etix_healthcheck'),
+    );
+    expect(res.error?.detail).toBeUndefined();
+    await harness.close();
+  });
+
+  it('omits detail when classifyThrown IS supplied but returns no detail', async () => {
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'etix',
+        probePath: '/robots.txt',
+        hostLabel: 'www.etix.com',
+        transport: fakeTransport(failedProbe('timeout')),
+        probeFn: async () => {
+          throw new Error('timed out');
+        },
+        // Re-kinds + supplies a hint, but no detail — error.detail must stay absent.
+        classifyThrown: () => ({ kind: 'bot_wall', hint: 'DataDome may be challenging the tab.' }),
+      }),
+    );
+    const res = parseToolResult<{ error?: { kind: string; detail?: unknown }; hint: string }>(
+      await harness.callTool('etix_healthcheck'),
+    );
+    expect(res.error?.kind).toBe('bot_wall');
+    expect(res.error?.detail).toBeUndefined();
+    expect(res.hint).toContain('DataDome');
+    await harness.close();
+  });
+});

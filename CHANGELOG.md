@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.12.0](https://github.com/chrischall/mcp-utils/compare/v0.11.0...v0.12.0) (2026-07-07)
+
+
+### Features
+
+* **fetchproxy:** classifyThrown detail hook; add ./scrape subpath export ([#78](https://github.com/chrischall/mcp-utils/issues/78)) ([d9d1bc9](https://github.com/chrischall/mcp-utils/commit/d9d1bc93e9a9148d72eabc92cdca419cd8f9b700))
+
+## [0.11.0](https://github.com/chrischall/mcp-utils/compare/v0.10.5...v0.11.0) (2026-07-06)
+
+
+### Features
+
+* **session:** CookieSessionManager maxAgeMs, seed(), and onReplayLoginError hooks ([#69](https://github.com/chrischall/mcp-utils/issues/69)) ([453e1c6](https://github.com/chrischall/mcp-utils/commit/453e1c6c78c3009b16924bdaad9cfc64313757b6))
+* wave-2 shared helpers — response cache, scrape module, Retry-After, binary output, cached tokens ([#66](https://github.com/chrischall/mcp-utils/issues/66)) ([7ddcedc](https://github.com/chrischall/mcp-utils/commit/7ddcedc1e60a0118bd22e6a9b0f4520a05926f58))
+
+
+### Bug Fixes
+
+* address wave-2 + session-hooks review follow-ups (Retry-After fallback cap, cache.get tier param, seed() tests) ([#71](https://github.com/chrischall/mcp-utils/issues/71)) ([b6d4f78](https://github.com/chrischall/mcp-utils/commit/b6d4f784c013baa0cc6eac88bffe04af3a2502d3))
+* **errors,fs:** redact JSON-body secrets and guard writeBinaryOutput baseName traversal ([#76](https://github.com/chrischall/mcp-utils/issues/76)) ([e36652a](https://github.com/chrischall/mcp-utils/commit/e36652a87678d87996d9322e2f6c777833c7eeb5))
+* **scrape,html:** eliminate ReDoS in JSON-LD/OpenGraph/plain-text extractors ([#74](https://github.com/chrischall/mcp-utils/issues/74)) ([32a7a76](https://github.com/chrischall/mcp-utils/commit/32a7a762f4ea6f211a12cc4a4ab870a1a6cfa559))
+
 ## [0.10.5](https://github.com/chrischall/mcp-utils/compare/v0.10.4...v0.10.5) (2026-07-02)
 
 

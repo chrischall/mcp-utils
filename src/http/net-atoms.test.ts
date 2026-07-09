@@ -86,7 +86,7 @@ describe('parseContentDispositionFilename', () => {
   });
 });
 
-describe('parseRetryAfterMs fallback contract (PR #66 follow-up)', () => {
+describe('parseRetryAfterMs fallback contract', () => {
   it('the fallback delayMs is NOT capped — capMs bounds only header-derived delays', () => {
     // An upstream with no Retry-After header must get the caller's configured
     // fallback verbatim, even when it exceeds the header cap.

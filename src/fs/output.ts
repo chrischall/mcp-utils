@@ -34,15 +34,33 @@ export function resolveOutputDir(
 }
 
 /**
+ * Reduce a caller-supplied filename stem to a single safe path component:
+ * strip directory separators and any `..`, so the stem can never escape the
+ * output directory (defense-in-depth — `SafePathSegment` does the same for
+ * request-path atoms). A stem that sanitizes away entirely falls back to
+ * `'file'`.
+ */
+function sanitizeBaseName(base: string): string {
+  const safe = base
+    .replace(/[/\\]+/g, '_') // kill path separators
+    .replace(/\.\.+/g, '_') // neutralize .. (and longer dot runs)
+    .replace(/^\.+/, '') // no leading dots (hidden-file / current-dir)
+    .trim();
+  return safe.length > 0 ? safe : 'file';
+}
+
+/**
  * A non-overwriting path for `base.ext` in `dir`: the bare name when free,
  * else `base-2.ext`, `base-3.ext`, … (gemini's numbering). `ext` is passed
- * without the dot.
+ * without the dot. `base` is sanitized to a single path component
+ * ({@link sanitizeBaseName}) so a `../…` stem can't write outside `dir`.
  */
 export function uniquePath(dir: string, base: string, ext: string): string {
-  const first = join(dir, `${base}.${ext}`);
+  const safe = sanitizeBaseName(base);
+  const first = join(dir, `${safe}.${ext}`);
   if (!existsSync(first)) return first;
   for (let n = 2; ; n++) {
-    const candidate = join(dir, `${base}-${n}.${ext}`);
+    const candidate = join(dir, `${safe}-${n}.${ext}`);
     if (!existsSync(candidate)) return candidate;
   }
 }

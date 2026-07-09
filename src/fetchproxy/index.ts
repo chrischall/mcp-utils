@@ -625,6 +625,15 @@ export interface BridgeHealthcheckResult {
     message: string;
     /** Server-authored next-step hint (`FetchproxyBridgeDownError.hint`), when present. */
     bridge_hint?: string;
+    /**
+     * Extra structured diagnostics supplied by
+     * {@link RegisterBridgeHealthcheckToolArgs.classifyThrown} (e.g. a repo's
+     * `elapsed_ms_at_timeout` / `retry_attempted` / `role_at_failure`). The
+     * shared envelope carries no fixed slots for these, so a consumer that wants
+     * the richer detail its hand-rolled healthcheck used to return injects it
+     * here. Omitted when the classifier supplies none.
+     */
+    detail?: Record<string, unknown>;
   };
   /** Plain-English next-step suggestion derived from the result. */
   hint: string;
@@ -659,14 +668,17 @@ export interface RegisterBridgeHealthcheckToolArgs {
    */
   probeFn: (path: string) => Promise<string>;
   /**
-   * Map the error the probe THREW to a site-specific `{ kind, hint? }` —
+   * Map the error the probe THREW to a site-specific `{ kind, hint?, detail? }` —
    * e.g. workday classifies its `SessionNotAuthenticatedError` as
    * `session_expired` with SSO re-sign-in copy. Return `undefined` to keep the
-   * default classification. A returned `hint` wins the whole result hint.
+   * default classification. A returned `hint` wins the whole result hint; a
+   * returned `detail` object is merged into the result's `error.detail` (the
+   * hook zillow/etix use to re-attach the structured diagnostics —
+   * `elapsed_ms_at_timeout` etc. — the shared envelope has no fixed slots for).
    * Absorbs the error-kind special cases that kept workday / zillow / etix on
    * hand-rolled healthchecks.
    */
-  classifyThrown?: (err: unknown) => { kind: string; hint?: string } | undefined;
+  classifyThrown?: (err: unknown) => { kind: string; hint?: string; detail?: Record<string, unknown> } | undefined;
   /**
    * Per-arm overrides for the default hint copy (e.g. etix replacing the
    * generic timeout hint with DataDome-specific guidance). A
@@ -777,6 +789,7 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
       let error: BridgeHealthcheckResult['error'];
       let bridgeHint: string | undefined;
       let customHint: string | undefined;
+      let customDetail: Record<string, unknown> | undefined;
       if (probeResult.error) {
         // `runProbe` already classified the throw into `probeResult.error.kind`
         // (fetchproxy's raw vocabulary). Trust that as the discriminator —
@@ -795,12 +808,14 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
           if (custom) {
             kind = custom.kind;
             customHint = custom.hint;
+            customDetail = custom.detail;
           }
         }
         error = {
           kind,
           message: probeResult.error.message,
           ...(bridgeHint !== undefined ? { bridge_hint: bridgeHint } : {}),
+          ...(customDetail !== undefined ? { detail: customDetail } : {}),
         };
       }
 
