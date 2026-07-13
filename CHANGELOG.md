@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.13.1](https://github.com/chrischall/mcp-utils/compare/v0.13.0...v0.13.1) (2026-07-13)
+
+
+### Documentation
+
+* **fleet-builder:** curl-vs-fpx by reachability; claude.ai reach as the MCP trigger ([#87](https://github.com/chrischall/mcp-utils/issues/87)) ([9577f66](https://github.com/chrischall/mcp-utils/commit/9577f661d5793a8f9306350a6d61a116138a2f97))
+* **fleet-builder:** fpx-skill authoring gotchas from the 25-skill build ([#88](https://github.com/chrischall/mcp-utils/issues/88)) ([eec0e10](https://github.com/chrischall/mcp-utils/commit/eec0e10e589305e3276a42397ee56033688c7c26))
+* **fleet-builder:** lead with fpx-skill-first, full MCP only on request ([#84](https://github.com/chrischall/mcp-utils/issues/84)) ([1e513ee](https://github.com/chrischall/mcp-utils/commit/1e513eefa8bc8fba91af6402a38823ee527eb212))
+
 ## [0.13.0](https://github.com/chrischall/mcp-utils/compare/v0.12.0...v0.13.0) (2026-07-09)
 
 
