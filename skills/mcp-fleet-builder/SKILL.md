@@ -1,6 +1,6 @@
 ---
 name: mcp-fleet-builder
-description: "Build or modify a chrischall MCP server (the ~19 *-mcp repos under ~/git) on @chrischall/mcp-utils — skeleton, bearer / cookie-session / fetchproxy / rate-limited-public-API+OAuth-writes archetypes, bootstrap, and release/CI gotchas."
+description: "Build or modify a chrischall service integration — by default a lean fpx (@fetchproxy/cli) skill, and a full chrischall MCP server (the ~19 *-mcp repos under ~/git on @chrischall/mcp-utils) only when the user wants one. Covers the fpx-skill-first decision, the skeleton, bearer / cookie-session / fetchproxy / rate-limited-public-API+OAuth-writes archetypes, bootstrap, and release/CI gotchas."
 ---
 
 # Building a chrischall fleet MCP
@@ -8,6 +8,24 @@ description: "Build or modify a chrischall MCP server (the ~19 *-mcp repos under
 The fleet is ~19 sibling MCP servers under `~/git/*-mcp`, all on the same skeleton and sharing `@chrischall/mcp-utils` (generic scaffolding), `@fetchproxy/server` (browser-bridge HTTP for sites without an API), and `@chrischall/realty-core` (realty math). Build new ones the same way; don't reinvent the glue.
 
 Canonical examples to copy from: **splitwise-mcp** (bearer/direct-API archetype), **artsonia-mcp** (cookie-session / username+password archetype), **redfin-mcp** / **zillow-mcp** (fetchproxy archetype), **musicbrainz-mcp** (rate-limited public API — no-auth reads + OAuth-grant writes).
+
+## Deliverable: fpx skill first, full MCP only on request
+
+**Default to an fpx skill, not a full MCP. The fpx skill is the MINIMUM deliverable — always produce it, even when a full MCP is also requested.** `@fetchproxy/cli` (binary `fpx`) wraps the same browser bridge the fetchproxy archetype uses as a standalone one-shot CLI: point it at a URL or GraphQL endpoint and it fetches through the user's signed-in tab, no MCP process to run. For most "give me access to `<site>`'s data" asks, a skill that shells out to `fpx` is the whole job — and it applies beyond the fetchproxy archetype: a bearer/public-API service can be an `fpx get` skill too, with no bridge needed at all.
+
+Decide this BEFORE touching the skeleton or picking an archetype:
+
+- **Not dictated** (user said "add `<site>`" / "I want `<site>` data" / "integrate `<site>`"): build the fpx skill, then **ASK** whether they also want a full MCP — say it's a much larger build (typed tools, normalization, tests, packaging, registry/plugin/CI) and most asks don't need it. Don't start the MCP until they say yes.
+- **Full MCP dictated** ("build me a `<site>`-mcp", "make the MCP server"): **CONFIRM** before the full build — "that's the full server (~a day of build + release wiring); the fpx skill alone may be enough — want both, or just the skill?" — and **still ship the fpx skill too**, so they get both. The fpx skill is never skipped.
+- **fpx skill dictated / "just a skill" / "without the MCP"**: do only the skill.
+
+A full MCP earns its keep only when at least one of these is true — otherwise stop at the fpx skill: typed/validated tools an agent calls without shelling out; normalized records + a library surface (e.g. realty-meta consumers); confirm-gated writes; a first-class healthcheck; distribution through the MCP registry / plugin marketplace. If none apply, the fpx skill is the finished deliverable.
+
+### Authoring the fpx skill
+
+`@fetchproxy/cli` — install `npm i -g @fetchproxy/cli`; the user also needs the **Transporter** extension (same one the fleet's bridge uses). Model: one **profile** per service (`fpx profile add <name> --domain <apex>`), its own identity `fpx-<name>`, paired once (`fpx pair -p <name>` → approve the 6-digit code in Transporter; the trust persists across invocations). Verbs: `get` / `post-json` / `request` (fetch), `cookies` / `local-storage` / `session-storage` / `indexeddb` / `session` (reads), plus `health` / `pair`. `fpx profile declare <name> --cookie k --capture-header name@host` widens scope and forces a re-pair. **Output contract: stdout = data only** (pipe to `jq`), stderr = pair codes / status; fetch-verb exit codes `2` bridge down, `3` bot wall, `4` upstream non-2xx.
+
+Author it with the `skill-creator` skill: a lean `SKILL.md` (one-time profile-add + pair; the core call pattern; any resolve-first rule; the exit codes) plus a `references/` file of ready-to-run request bodies with `jq` recipes. **Verify every request shape live before baking it in** (same rule as coding an MCP endpoint — capture the real request, don't guess). Ship it where the service's skills live: `<repo>/skills/<name>-fpx/` in a fleet repo (auto-discovered via `plugin.json` `"skills": "./skills/"`, and already covered by the package `files`), or a standalone skill dir otherwise. **Canonical example: `hemnet-mcp/skills/hemnet-fpx`** — anonymous GraphQL through the bridge, its `references/graphql-queries.md` carrying the live-verified query bodies.
 
 ## Skeleton
 
@@ -173,9 +191,10 @@ A new fleet repo isn't done until ALL of this exists. Each line below was a real
 
 ## New MCP — fast path
 
-0. **Lock the name before creating anything.** `npm view <name> version` for each candidate (and watch the similarity trap — see Gotchas); if contested, publish under `@chrischall/<name>`. Settle repo name + npm name together, THEN `gh repo create` — renaming later cascades across the repo, local dir, and every manifest.
-1. Copy a same-archetype sibling's skeleton (splitwise for bearer, redfin for fetchproxy) — packaging, tsconfig, vitest from a local clone is fine, but **pull `.github/workflows/*.yml` from a freshly-updated sibling's `origin/main`, not the local tree** (see Workflows above — a stale local clone hands you the old self-contained workflows). Then do the full **Repo bootstrap** (workflows, labels incl. `release-ready`, rulesets with the `ci / ci` check, secrets + **Claude GitHub App install**, release-please extra-files, publish scaffold, `.mcpbignore`) — it's the part that's easy to half-do. Expect the genesis push to `main` to be direct (it puts the workflows on the default branch so PRs can run); creating the **public** repo triggers an explicit auth confirmation from the user — ask before `gh repo create --public`.
-2. Add `"@chrischall/mcp-utils"` (published `^x` once available; `file:../mcp-utils/<tarball>` pre-publish).
-3. Write `client.ts` (deferred-config-error + one central `write()`), `tools/*.ts` (`registerTool` + `textResult`, **`confirm`-gated** writes with a dry-run `preview()`), wire `index.ts` with `runMcp`. TDD; verify endpoints from a capture before coding writes.
-4. Tests with `createTestHarness` + `versionSyncTest`; mock the network. Keep them green.
-5. `npm run build && npm test`. Branch + PR; let auto-merge ship it (never merge it yourself).
+0. **First: is a full MCP even wanted?** Default to shipping the fpx skill only (see *Deliverable: fpx skill first* above) — ASK if it wasn't dictated, CONFIRM if it was, and ship the fpx skill either way. Only continue this fast path once a full MCP is agreed.
+1. **Lock the name before creating anything.** `npm view <name> version` for each candidate (and watch the similarity trap — see Gotchas); if contested, publish under `@chrischall/<name>`. Settle repo name + npm name together, THEN `gh repo create` — renaming later cascades across the repo, local dir, and every manifest.
+2. Copy a same-archetype sibling's skeleton (splitwise for bearer, redfin for fetchproxy) — packaging, tsconfig, vitest from a local clone is fine, but **pull `.github/workflows/*.yml` from a freshly-updated sibling's `origin/main`, not the local tree** (see Workflows above — a stale local clone hands you the old self-contained workflows). Then do the full **Repo bootstrap** (workflows, labels incl. `release-ready`, rulesets with the `ci / ci` check, secrets + **Claude GitHub App install**, release-please extra-files, publish scaffold, `.mcpbignore`) — it's the part that's easy to half-do. Expect the genesis push to `main` to be direct (it puts the workflows on the default branch so PRs can run); creating the **public** repo triggers an explicit auth confirmation from the user — ask before `gh repo create --public`.
+3. Add `"@chrischall/mcp-utils"` (published `^x` once available; `file:../mcp-utils/<tarball>` pre-publish).
+4. Write `client.ts` (deferred-config-error + one central `write()`), `tools/*.ts` (`registerTool` + `textResult`, **`confirm`-gated** writes with a dry-run `preview()`), wire `index.ts` with `runMcp`. TDD; verify endpoints from a capture before coding writes.
+5. Tests with `createTestHarness` + `versionSyncTest`; mock the network. Keep them green.
+6. `npm run build && npm test`. Branch + PR; let auto-merge ship it (never merge it yourself). Ship the **fpx skill** alongside (it's the minimum deliverable — never skipped, even for a full MCP).
