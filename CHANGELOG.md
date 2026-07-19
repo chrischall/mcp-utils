@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.3](https://github.com/chrischall/mcp-utils/compare/v0.13.2...v0.13.3) (2026-07-19)
+
+
+### Documentation
+
+* **mcp-fleet-builder:** correct the CI gate, ruleset script and first-release version ([#94](https://github.com/chrischall/mcp-utils/issues/94)) ([c6fcb6f](https://github.com/chrischall/mcp-utils/commit/c6fcb6f3b7ef874876a5ba902bcf0e3275ada694))
+
 ## [0.13.2](https://github.com/chrischall/mcp-utils/compare/v0.13.1...v0.13.2) (2026-07-19)
 
 
