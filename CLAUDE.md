@@ -71,27 +71,22 @@ This package handles bearer tokens, cookies, and JWTs on behalf of the whole fle
 - Changelog sections are configured in `release-please-config.json` (`feat`→Features, `fix`→Bug Fixes, `perf`→Performance, `revert`→Reverts, `refactor`→Refactor, `docs`→Documentation; `test`/`build`/`ci`/`chore` are hidden).
 - Merging the release PR tags `v<VERSION>` and the `publish` job ships to npm with provenance (OIDC). Publish is idempotent (skips a version already on the registry).
 
-## How PRs merge (automated — don't run `gh pr merge`)
+<!-- pr-workflow:v3 -->
+## Pull requests & release notes
 
-Default workflow is **branch + PR**, even for solo work. The `chrischall/workflows` pipeline (thin stubs in `.github/workflows/{pr-auto-review,auto-merge}.yml`) handles merging:
+Fleet policy — Conventional-Commit PR titles, labels, the auto-review /
+auto-merge ladder, auto-review follow-up issues, PR timing, and release PRs —
+lives in `~/.claude/CLAUDE.md`. Don't restate it here; the copies drifted.
 
-1. `pr-auto-review.yml` runs a Claude review on each PR. A `pass` **or** `warn` verdict arms `ready-to-merge`; only a `fail` blocks. (`warn` = nits only — it still auto-merges; see the follow-up convention below.)
-2. `auto-merge.yml` arms `gh pr merge --auto --squash` on the `ready-to-merge` label (and on dependabot PRs). CI (`ci.yml`) is gated to run only once `ready-to-merge` is present (or `release-ready` on a release PR), so review findings get fixed before CI burns a run; bot PRs run CI unconditionally.
+Shared technical conventions live in
+[`chrischall/workflows`](https://github.com/chrischall/workflows):
+`docs/fleet-conventions.md`, plus `README.md` for the CI pipeline contract.
 
-For an ordinary PR, opening with `gh pr create` (and an appropriate label) is the whole job — don't open it until the change is genuinely done, since it can auto-merge as soon as review passes. If a verdict is `warn`/`fail` and you've decided to ship anyway, surface the findings and confirm before adding `ready-to-merge` yourself.
-
-### Auto-review follow-up issues
-
-When a PR's auto-review verdict is `warn` or `fail`, the `chrischall/workflows` pipeline opens or updates a single `auto-review-followup` issue ("Auto-review follow-ups for PR #N") whose checklist captures every finding, and links it from the PR's `<!-- auto-review-verdict -->` comment (`📋 Tracking follow-ups: #N`). `warn` (nits only) still auto-merges — the issue carries the nits forward, so most nits are fixed in a *later* PR; `fail` blocks until the important findings are addressed on the PR itself.
-
-When asked to address the auto-review comments / review findings on a PR:
-
-1. Read the verdict comment, open the linked `auto-review-followup` issue, and treat its checklist as the work list (alongside any inline review comments).
-2. Resolve each item, checking off only what you've **verified** is genuinely fixed.
-3. If every item is resolved on the current PR, add `Closes #<issue>` to that PR's body so the merge closes it; if some are deferred, check off only the resolved ones and leave the issue open.
-4. For nits whose `warn` PR already auto-merged, address them in a follow-up PR that references `Closes #<issue>`.
-
-(Mirrors the fleet-wide convention in `~/.claude/CLAUDE.md`.)
+Repo-specific: **CI here is gated on the arming label.** `ci.yml` runs only
+once `ready-to-merge` is present (or `release-ready` on a release PR), so
+review findings get fixed before CI burns a run; bot PRs run CI
+unconditionally. If CI looks like it "isn't running" on an open PR, that's
+why.
 
 ## Related
 
