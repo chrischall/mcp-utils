@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.4](https://github.com/chrischall/mcp-utils/compare/v0.13.3...v0.13.4) (2026-07-19)
+
+
+### Documentation
+
+* **mcp-fleet-builder:** add the detached-fetch connector trap ([#96](https://github.com/chrischall/mcp-utils/issues/96)) ([c12bc67](https://github.com/chrischall/mcp-utils/commit/c12bc67dc424f0dc431fc7371dea3d441b96a148))
+
 ## [0.13.3](https://github.com/chrischall/mcp-utils/compare/v0.13.2...v0.13.3) (2026-07-19)
 
 
