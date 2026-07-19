@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.13.2](https://github.com/chrischall/mcp-utils/compare/v0.13.1...v0.13.2) (2026-07-19)
+
+
+### Documentation
+
+* replace duplicated fleet policy with a pointer ([#93](https://github.com/chrischall/mcp-utils/issues/93)) ([a7a7bca](https://github.com/chrischall/mcp-utils/commit/a7a7bca68a577c42cfc5848ea896dbe35d20f473))
+* **skill:** add hosted Cloudflare Worker connector to mcp-fleet-builder ([#89](https://github.com/chrischall/mcp-utils/issues/89)) ([1228d13](https://github.com/chrischall/mcp-utils/commit/1228d13c8faaa0f6dd343ac0f0069252f303b8bf))
+* **skill:** add the global-scope-constructor Worker-startup gotcha ([#91](https://github.com/chrischall/mcp-utils/issues/91)) ([e056cad](https://github.com/chrischall/mcp-utils/commit/e056cad24ce64fc4f165e81471466d632d2f0cec))
+* **skill:** add the per-session inline-IO Worker gotchas ([#92](https://github.com/chrischall/mcp-utils/issues/92)) ([ab5f9a6](https://github.com/chrischall/mcp-utils/commit/ab5f9a6a4025805991cf8b7e1384d3cb28d1a6f9))
+
 ## [0.13.1](https://github.com/chrischall/mcp-utils/compare/v0.13.0...v0.13.1) (2026-07-13)
 
 
