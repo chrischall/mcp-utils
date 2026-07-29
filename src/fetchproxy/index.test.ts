@@ -7,6 +7,7 @@ import {
   createFetchproxyTransport,
   createBootstrapOpts,
   // re-exports from @fetchproxy/server
+  FetchproxyServer,
   mapWithConcurrency,
   withDeadline,
   TokenBucket,
@@ -299,6 +300,38 @@ describe('createFetchproxyTransport', () => {
     expect(forwarded.serverName).toBe('musescore-mcp');
     expect(forwarded).not.toHaveProperty('createServer');
     expect(forwarded).not.toHaveProperty('logListening');
+  });
+
+  // --- @fetchproxy/server 1.7.0: graphql capability -------------------------
+  it("forwards 'graphql' capability + graphqlOps to the constructor verbatim, and exposes graphqlQuery on .server", () => {
+    // createFetchproxyTransport does no per-field mapping — the full
+    // FetchproxyServerOpts (including this 1.7.0+ addition) is forwarded as
+    // `...serverOpts`. This pins that the graphql capability rides through
+    // exactly like every other opt, with no code change needed here beyond
+    // the @fetchproxy/server version bump.
+    const ctorOptsMock = vi.fn();
+    const t = createFetchproxyTransport({
+      serverName: 'opentable-mcp',
+      version: '0.0.0-test',
+      domains: ['opentable.com'],
+      identityDir,
+      capabilities: ['fetch', 'graphql'],
+      graphqlOps: [{ name: 'availability', operationName: 'RestaurantsAvailability' }],
+      createServer: (opts) => {
+        ctorOptsMock(opts);
+        return new FetchproxyServer(opts);
+      },
+    });
+    const forwarded = ctorOptsMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(forwarded.capabilities).toEqual(['fetch', 'graphql']);
+    expect(forwarded.graphqlOps).toEqual([
+      { name: 'availability', operationName: 'RestaurantsAvailability' },
+    ]);
+    // The real FetchproxyServer instance built from those opts exposes the
+    // new verb — confirms the bumped @fetchproxy/server's type surface
+    // (not just its runtime shape) is visible through this package's
+    // re-exported FetchproxyServer class.
+    expect(typeof t.server.graphqlQuery).toBe('function');
   });
 });
 
