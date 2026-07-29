@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/chrischall/mcp-utils/compare/v0.13.5...v0.14.0) (2026-07-29)
+
+
+### Features
+
+* **fetchproxy:** bump @fetchproxy/server to ^1.7.0 for the graphql capability ([#106](https://github.com/chrischall/mcp-utils/issues/106)) ([9aeb1dd](https://github.com/chrischall/mcp-utils/commit/9aeb1ddf844716573eb391107448ebc83f47f7cf))
+
 ## [0.13.5](https://github.com/chrischall/mcp-utils/compare/v0.13.4...v0.13.5) (2026-07-28)
 
 
