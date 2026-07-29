@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.13.5](https://github.com/chrischall/mcp-utils/compare/v0.13.4...v0.13.5) (2026-07-28)
+
+
+### Documentation
+
+* **skill:** CLOUDFLARE_ACCOUNT_ID is optional; don't paste wrangler's KV binding ([#105](https://github.com/chrischall/mcp-utils/issues/105)) ([fe52a99](https://github.com/chrischall/mcp-utils/commit/fe52a99002558d6b43356a6b8d66e8d73e5ccd40))
+* **skill:** fold the kiaaccess-mcp lessons into mcp-fleet-builder ([#102](https://github.com/chrischall/mcp-utils/issues/102)) ([89bcabf](https://github.com/chrischall/mcp-utils/commit/89bcabf40aac6f176b92d490c8292367ab0b6559))
+* **skill:** shape-based redactors miss passwords; assert outcomes not mechanisms ([#104](https://github.com/chrischall/mcp-utils/issues/104)) ([91788b2](https://github.com/chrischall/mcp-utils/commit/91788b2c2523491939dcbc1fceb80840e25741b5))
+
 ## [0.13.4](https://github.com/chrischall/mcp-utils/compare/v0.13.3...v0.13.4) (2026-07-25)
 
 
