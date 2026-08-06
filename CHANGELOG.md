@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/chrischall/mcp-utils/compare/v0.14.0...v0.14.1) (2026-08-06)
+
+
+### Documentation
+
+* **skills:** two fpx lessons from the eventbrite build ([#111](https://github.com/chrischall/mcp-utils/issues/111)) ([06cf4fe](https://github.com/chrischall/mcp-utils/commit/06cf4feee98093bded956dbbdd394e43ea82538e))
+
 ## [0.14.0](https://github.com/chrischall/mcp-utils/compare/v0.13.5...v0.14.0) (2026-07-29)
 
 
