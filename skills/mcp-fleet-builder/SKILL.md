@@ -1,6 +1,6 @@
 ---
 name: mcp-fleet-builder
-description: "Build or modify a chrischall service integration — by default a lean fpx (@fetchproxy/cli) skill, and a full chrischall MCP server (the ~19 *-mcp repos under ~/git on @chrischall/mcp-utils) only when the user wants one. Covers the fpx-skill-first decision, the skeleton, bearer / cookie-session / fetchproxy / rate-limited-public-API+OAuth-writes archetypes, hosting on mcp-host (claude.ai remote MCP — a registration, not a per-repo Worker; serverless-safe auth only), bootstrap, and release/CI gotchas."
+description: "Build or modify a chrischall service integration — by default a lean fpx (@fetchproxy/cli) skill, and a full chrischall MCP server (the ~19 *-mcp repos under ~/git on @chrischall/mcp-utils) only when the user wants one. Covers the fpx-skill-first decision, the skeleton, bearer / cookie-session / fetchproxy / rate-limited-public-API+OAuth-writes archetypes, hosting on mcp-host (claude.ai remote MCP — a registration, not a per-repo Worker; browser-bridge repos included since fetchproxy 2.1.0), bootstrap, and release/CI gotchas."
 ---
 
 # Building a chrischall fleet MCP
