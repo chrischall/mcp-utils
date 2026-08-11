@@ -5,7 +5,7 @@ description: "Build or modify a chrischall service integration — by default a 
 
 # Building a chrischall fleet MCP
 
-The fleet is ~19 sibling MCP servers under `~/git/*-mcp`, all on the same skeleton and sharing `@chrischall/mcp-utils` (generic scaffolding), `@fetchproxy/server` (browser-bridge HTTP for sites without an API), and `@chrischall/realty-core` (realty math). Build new ones the same way; don't reinvent the glue.
+The fleet is ~50 sibling MCP servers under `~/git/*-mcp`, all on the same skeleton and sharing `@chrischall/mcp-utils` (generic scaffolding), `@fetchproxy/server` (browser-bridge HTTP for sites without an API), and `@chrischall/realty-core` (realty math). Build new ones the same way; don't reinvent the glue.
 
 Canonical examples to copy from: **splitwise-mcp** (bearer/direct-API archetype), **artsonia-mcp** (cookie-session / username+password archetype), **redfin-mcp** / **zillow-mcp** (fetchproxy archetype), **musicbrainz-mcp** (rate-limited public API — no-auth reads + OAuth-grant writes).
 
