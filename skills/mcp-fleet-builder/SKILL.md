@@ -1,6 +1,6 @@
 ---
 name: mcp-fleet-builder
-description: "Build or modify a chrischall service integration — by default a lean fpx (@fetchproxy/cli) skill, and a full chrischall MCP server (the ~19 *-mcp repos under ~/git on @chrischall/mcp-utils) only when the user wants one. Covers the fpx-skill-first decision, the skeleton, bearer / cookie-session / fetchproxy / rate-limited-public-API+OAuth-writes archetypes, hosting on mcp-host (claude.ai remote MCP — a registration, not a per-repo Worker; browser-bridge repos included since fetchproxy 2.1.0), bootstrap, and release/CI gotchas."
+description: "Build or modify a chrischall service integration — by default a lean fpx (@fetchproxy/cli) skill, and a full chrischall MCP server (the ~50 *-mcp repos under ~/git on @chrischall/mcp-utils) only when the user wants one. Covers the fpx-skill-first decision, the skeleton, bearer / cookie-session / fetchproxy / rate-limited-public-API+OAuth-writes archetypes, hosting on mcp-host (claude.ai remote MCP — a registration, not a per-repo Worker; browser-bridge repos included since fetchproxy 2.1.0), bootstrap, and release/CI gotchas."
 ---
 
 # Building a chrischall fleet MCP
@@ -199,6 +199,8 @@ Then in claude.ai: Settings → Connectors → Add custom connector → paste th
 ### Is this MCP hostable? — check the repo, don't recite this list
 
 **Read `~/git/mcp-host/docs/BROWSER-BRIDGE.md` before answering "can this be hosted".** This section asserted "browser-bridge: not implemented" for months after it stopped being true, and an agent repeated that to the user while sixteen bridged registrations were live. The auth question below is still the right question; its answers move.
+
+**Why that keeps happening, mechanically: the copy of this skill in your context is a snapshot, and the file is a symlink into a live worktree.** `~/.claude/skills/mcp-fleet-builder/SKILL.md` symlinks to this file, so a merge — or another session editing it — changes the skill *underneath a running session*, while the version loaded into context stays frozen at session start. Diffing the two locations will NOT reveal this: they are the same inode. It happened again during the thumbtack-mcp build — the context copy still said bridges could not be hosted, and that was repeated to the user three times before anyone opened the file. So for any claim about **capability** (what can be hosted, which fpx verbs exist, which mcp-utils helpers are available) — `cat` the section, or interrogate the artifact itself (`fpx` with no args, `mcp-host` with no args, the package's `.d.ts`) — before asserting it. Treat this document as a pointer to the truth, not the truth.
 
 - ✅ **bearer / API-key** (splitwise, setlist, musicbrainz, flightaware) — the simplest case.
 - ✅ **username/password with a real server-side login** (ofw). Store the credentials as secrets so the child can re-login when its token expires.
