@@ -5,7 +5,7 @@
 [![license](https://img.shields.io/npm/l/@chrischall/mcp-utils)](LICENSE)
 
 Shared scaffolding for the **chrischall MCP fleet** — the generic MCP glue
-hoisted out of ~19 sibling servers so each one no longer reimplements server
+hoisted out of ~50 sibling servers so each one no longer reimplements server
 bootstrap, tool-result formatting, helpful errors, hardened env/config, a bearer
 API-client kit, zod atoms, session registries, a fetchproxy transport adapter,
 auth resolver skeletons, an in-memory test harness, and opt-in HTML helpers.

@@ -1,6 +1,6 @@
 # @chrischall/mcp-utils
 
-Shared scaffolding for the **chrischall MCP fleet** — the generic MCP glue hoisted out of ~19 sibling `*-mcp` servers (under `~/git/*-mcp`) so none of them reimplements server bootstrap, tool-result formatting, errors, env/config hardening, a bearer API-client kit, zod atoms, session management, the fetchproxy transport adapter, auth resolver skeletons, the test harness, or HTML helpers. This is a **library**, not an MCP server — it has no `bin`, registers no tools of its own, and is consumed via npm by the fleet.
+Shared scaffolding for the **chrischall MCP fleet** — the generic MCP glue hoisted out of ~50 sibling `*-mcp` servers (under `~/git/*-mcp`) so none of them reimplements server bootstrap, tool-result formatting, errors, env/config hardening, a bearer API-client kit, zod atoms, session management, the fetchproxy transport adapter, auth resolver skeletons, the test harness, or HTML helpers. This is a **library**, not an MCP server — it has no `bin`, registers no tools of its own, and is consumed via npm by the fleet.
 
 ## Commands
 
