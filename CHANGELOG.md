@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.14.2](https://github.com/chrischall/mcp-utils/compare/v0.14.1...v0.14.2) (2026-08-11)
+
+
+### Documentation
+
+* correct the stale fleet size in CLAUDE.md and README ([#124](https://github.com/chrischall/mcp-utils/issues/124)) ([8cdc7a3](https://github.com/chrischall/mcp-utils/commit/8cdc7a35f1d044d951c3a0ca990025fea5ea48c2)), closes [#123](https://github.com/chrischall/mcp-utils/issues/123)
+* **fleet:** correct the hosting claim in the skill description ([#119](https://github.com/chrischall/mcp-utils/issues/119)) ([e5a1cb9](https://github.com/chrischall/mcp-utils/commit/e5a1cb9b615101fc40c5a04cae8c591c70418355))
+* **fleet:** correct the stale fleet size in mcp-fleet-builder ([#122](https://github.com/chrischall/mcp-utils/issues/122)) ([397c3ca](https://github.com/chrischall/mcp-utils/commit/397c3ca65358632628de59150d6b58268e3a2b78)), closes [#121](https://github.com/chrischall/mcp-utils/issues/121)
+* **fleet:** explain why stale capability claims keep getting repeated ([#120](https://github.com/chrischall/mcp-utils/issues/120)) ([052dcbd](https://github.com/chrischall/mcp-utils/commit/052dcbd081ffc78b9be5b56bae26b3633fae9862))
+* **fleet:** record the fetchproxy scope-grant and auth-hardening lessons ([#117](https://github.com/chrischall/mcp-utils/issues/117)) ([d829b52](https://github.com/chrischall/mcp-utils/commit/d829b5217470cdc00148de3dd4510d724f16b29e))
+* **fleet:** record the thumbtack-mcp build's corrections and new traps ([#118](https://github.com/chrischall/mcp-utils/issues/118)) ([db4368f](https://github.com/chrischall/mcp-utils/commit/db4368f77287dca53626cdfe807b6efb18cb419a))
+* host on mcp-host instead of a per-repo Cloudflare Worker ([#114](https://github.com/chrischall/mcp-utils/issues/114)) ([d144ca3](https://github.com/chrischall/mcp-utils/commit/d144ca392b0e8d8c6d5977af4027824d62d27d19))
+
 ## [0.14.1](https://github.com/chrischall/mcp-utils/compare/v0.14.0...v0.14.1) (2026-08-06)
 
 
