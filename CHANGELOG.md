@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/chrischall/mcp-utils/compare/v0.14.2...v0.15.0) (2026-08-16)
+
+
+### Features
+
+* **server:** render a tool error's hint into the text callers see ([#126](https://github.com/chrischall/mcp-utils/issues/126)) ([563490f](https://github.com/chrischall/mcp-utils/commit/563490f7d79fcdd896b04527bab271ed7535d949))
+
 ## [0.14.2](https://github.com/chrischall/mcp-utils/compare/v0.14.1...v0.14.2) (2026-08-11)
 
 
