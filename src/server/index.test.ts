@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 import { createMcpServer, withGracefulShutdown, runMcp } from './index.js';
+import { McpToolError } from '../errors/index.js';
 import type { ToolRegistrar } from './index.js';
 
 /** A sp-able stub Transport that records start/close. */
@@ -251,5 +252,130 @@ describe('runMcp', () => {
     const arg = connectSpy.mock.calls[0]![0] as Transport;
     expect(typeof arg.start).toBe('function');
     await server.close();
+  });
+});
+
+describe('tool error hints', () => {
+  /** Connect a server built by createMcpServer to an in-memory client. */
+  async function harness(register: ToolRegistrar<undefined>, surfaceHints?: boolean) {
+    const server = await createMcpServer<undefined>({
+      name: 't',
+      version: '0',
+      tools: [register],
+      ...(surfaceHints === undefined ? {} : { surfaceHints }),
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'c', version: '0' });
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+    return { client, close: () => Promise.all([client.close(), server.close()]) };
+  }
+
+  const textOf = (result: unknown) =>
+    ((result as { content: { text: string }[] }).content[0]?.text ?? '');
+
+  it('appends the hint of an McpToolError rejected asynchronously', async () => {
+    const { client, close } = await harness((s) =>
+      s.registerTool('t', { inputSchema: { a: z.string() } }, async () => {
+        throw new McpToolError('no such option 999', { hint: 'Available: 1 (Bus), 2 (Walker)' });
+      }),
+    );
+    const result = await client.callTool({ name: 't', arguments: { a: 'x' } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toBe('no such option 999\n\nHint: Available: 1 (Bus), 2 (Walker)');
+    await close();
+  });
+
+  it('appends the hint of an McpToolError thrown synchronously', async () => {
+    const { client, close } = await harness((s) =>
+      s.registerTool('t', {}, (() => {
+        throw new McpToolError('bad', { hint: 'do the thing' });
+      }) as never),
+    );
+    expect(textOf(await client.callTool({ name: 't' }))).toBe('bad\n\nHint: do the thing');
+    await close();
+  });
+
+  // A tool with no inputSchema is called back as `(extra)` rather than
+  // `(args, extra)`; the wrapper forwards whatever arrived, so both work.
+  it('leaves a zero-argument tool callable', async () => {
+    const { client, close } = await harness((s) =>
+      s.registerTool('t', {}, async () => ({ content: [{ type: 'text' as const, text: 'ok' }] })),
+    );
+    expect(textOf(await client.callTool({ name: 't' }))).toBe('ok');
+    await close();
+  });
+
+  it('passes a tool with an inputSchema its arguments unchanged', async () => {
+    const seen: unknown[] = [];
+    const { client, close } = await harness((s) =>
+      s.registerTool('t', { inputSchema: { a: z.string() } }, async (args) => {
+        seen.push(args);
+        return { content: [{ type: 'text' as const, text: 'ok' }] };
+      }),
+    );
+    await client.callTool({ name: 't', arguments: { a: 'hello' } });
+    expect(seen).toEqual([{ a: 'hello' }]);
+    await close();
+  });
+
+  it('leaves an McpToolError with no hint as the bare message', async () => {
+    const { client, close } = await harness((s) =>
+      s.registerTool('t', {}, async () => {
+        throw new McpToolError('just this');
+      }),
+    );
+    expect(textOf(await client.callTool({ name: 't' }))).not.toContain('Hint:');
+    await close();
+  });
+
+  // An unexpected error must keep propagating, so a genuine bug still reads as
+  // one rather than being flattened into advice.
+  it('leaves a non-McpToolError untouched', async () => {
+    const { client, close } = await harness((s) =>
+      s.registerTool('t', {}, async () => {
+        throw new TypeError('undefined is not a function');
+      }),
+    );
+    const result = await client.callTool({ name: 't' });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('undefined is not a function');
+    expect(textOf(result)).not.toContain('Hint:');
+    await close();
+  });
+
+  it('can be opted out of', async () => {
+    const { client, close } = await harness(
+      (s) =>
+        s.registerTool('t', {}, async () => {
+          throw new McpToolError('bad', { hint: 'do the thing' });
+        }),
+      false,
+    );
+    expect(textOf(await client.callTool({ name: 't' }))).not.toContain('Hint:');
+    await close();
+  });
+
+  it('is on by default through runMcp too', async () => {
+    // runMcp connects the transport itself, so hand it the server half of the
+    // pair rather than connecting a second one afterwards.
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'c', version: '0' });
+    const [server] = await Promise.all([
+      runMcp<undefined>({
+        name: 't',
+        version: '0',
+        transport: serverTransport,
+        shutdown: false,
+        tools: [
+          (s) =>
+            s.registerTool('t', {}, async () => {
+              throw new McpToolError('bad', { hint: 'do the thing' });
+            }),
+        ],
+      }),
+      client.connect(clientTransport),
+    ]);
+    expect(textOf(await client.callTool({ name: 't' }))).toContain('Hint: do the thing');
+    await Promise.all([client.close(), server.close()]);
   });
 });

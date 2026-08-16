@@ -22,6 +22,9 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { McpToolError } from '../errors/index.js';
+import { errorResult } from '../response/index.js';
 
 /**
  * Registers one or more tools onto a fresh {@link McpServer}. `deps` is whatever
@@ -62,6 +65,71 @@ export interface CreateMcpServerOptions<TDeps = unknown> {
    * `'stdio'`.
    */
   transport?: TransportSpec;
+  /**
+   * Append an {@link McpToolError}'s `hint` to the text a failing tool returns.
+   * Default `true`. Set `false` only for a server that deliberately wants the
+   * bare message.
+   */
+  surfaceHints?: boolean;
+}
+
+/**
+ * Turn a thrown value into a tool result carrying its remediation `hint`, or
+ * rethrow it untouched.
+ *
+ * Only {@link McpToolError} with a `hint` is converted. Anything else keeps
+ * propagating so a genuine bug still reads as one instead of being flattened
+ * into advice.
+ */
+function hintResultOrRethrow(err: unknown): CallToolResult {
+  if (err instanceof McpToolError && err.hint) {
+    return errorResult(`${err.message}\n\nHint: ${err.hint}`);
+  }
+  throw err;
+}
+
+/**
+ * Wrap `server.registerTool` so every tool handler surfaces its error `hint`.
+ *
+ * Why this lives here rather than in each repo: the MCP tool boundary renders
+ * only a thrown error's `message`. `McpToolError` has carried a `hint` — the
+ * actionable half ("the available options are …", "set FOO_API_KEY") — since
+ * the beginning, and {@link wrapToolError} is careful to preserve it, but
+ * nothing ever rendered it, so every hint thrown from a tool handler was
+ * invisible to the caller. Two repos had independently grown the same
+ * hand-rolled wrapper before this landed.
+ *
+ * Handlers are invoked variadically because the SDK passes `(args, extra)` for
+ * a tool with an `inputSchema` and `(extra)` for one without; forwarding
+ * whatever arrived keeps both shapes intact. Both a synchronous throw and a
+ * rejected promise are handled, since a handler may fail either way.
+ *
+ * Exported so `createTestHarness` can apply the same wrapper: a harness that
+ * built a bare `McpServer` would show tests a different error surface than
+ * production, which is the one thing a harness must never do.
+ */
+export function surfaceToolHints(server: McpServer): void {
+  const register = server.registerTool.bind(server) as (
+    ...args: unknown[]
+  ) => unknown;
+
+  // The SDK's `registerTool` is heavily generic over the input/output schemas.
+  // Re-expressing those generics here would buy nothing — the wrapper is
+  // transparent — so the seam is cast once, here, and nowhere else.
+  (server as unknown as { registerTool: unknown }).registerTool = (
+    name: unknown,
+    config: unknown,
+    cb: (...args: unknown[]) => CallToolResult | Promise<CallToolResult>,
+  ): unknown =>
+    register(name, config, (...args: unknown[]) => {
+      let result: CallToolResult | Promise<CallToolResult>;
+      try {
+        result = cb(...args);
+      } catch (err) {
+        return hintResultOrRethrow(err);
+      }
+      return result instanceof Promise ? result.catch(hintResultOrRethrow) : result;
+    });
 }
 
 /**
@@ -74,6 +142,9 @@ export async function createMcpServer<TDeps = unknown>(
   opts: CreateMcpServerOptions<TDeps>,
 ): Promise<McpServer> {
   const server = new McpServer({ name: opts.name, version: opts.version });
+
+  // Before the registrars run, so every tool they register is wrapped.
+  if (opts.surfaceHints !== false) surfaceToolHints(server);
 
   if (opts.banner !== undefined) {
     // stderr only: stdout carries the JSON-RPC frames over stdio transport.
