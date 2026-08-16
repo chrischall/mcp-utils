@@ -19,6 +19,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { Mock } from 'vitest';
+import { surfaceToolHints } from '../server/index.js';
 
 /** A function that registers one or more tools onto a fresh `McpServer`. */
 export type RegisterFn = (server: McpServer) => void | Promise<void>;
@@ -42,9 +43,13 @@ export interface TestHarness {
  * `InMemoryTransport`. The byte-identical helper every MCP's `tests/helpers.ts`
  * defines — register your tools, then drive them through the real client RPC
  * path (schema validation, content envelopes, isError, and all).
+ *
+ * Applies the same error-hint surfacing `createMcpServer` does, so a tool's
+ * failure text under test is the text production returns.
  */
 export async function createTestHarness(registerFn: RegisterFn): Promise<TestHarness> {
   const server = new McpServer({ name: 'test', version: '0.0.0' });
+  surfaceToolHints(server);
   await registerFn(server);
 
   const client = new Client({ name: 'test-client', version: '0.0.0' });

@@ -48,7 +48,7 @@ import { createFetchproxyTransport } from '@chrischall/mcp-utils/fetchproxy';
 
 ### `server` — bootstrap & lifecycle
 
-`createMcpServer`, `runMcp`, `withGracefulShutdown`.
+`createMcpServer`, `runMcp`, `withGracefulShutdown`, `surfaceToolHints`.
 
 ```ts
 import { runMcp, textResult } from '@chrischall/mcp-utils';
@@ -66,6 +66,21 @@ await runMcp({
 `runMcp` wires the server to a stdio transport and installs `SIGINT`/`SIGTERM`
 handlers via `withGracefulShutdown`. Use `createMcpServer` directly if you need
 the server instance without connecting a transport.
+
+Both render a thrown `McpToolError`'s `hint` into the failing tool's text:
+
+```
+no such option 999
+
+Hint: Available: 1 (Bus), 2 (Walker)
+```
+
+The MCP tool boundary itself surfaces only `message`, so a `hint` — the
+actionable half — used to be dropped even though `wrapToolError` preserved it.
+Anything that is not an `McpToolError`, or has no `hint`, propagates untouched,
+so a genuine bug still reads as one. Opt out with `surfaceHints: false`.
+`createTestHarness` applies the same wrapper, so a tool's failure text under
+test is the text production returns.
 
 ### `response` — tool-result formatting
 

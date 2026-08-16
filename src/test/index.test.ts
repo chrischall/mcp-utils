@@ -249,3 +249,22 @@ describe('setupClientMocks', () => {
     expect(mocks.request).toHaveBeenCalledWith('/y');
   });
 });
+
+describe('createTestHarness error hints', () => {
+  // The harness must show tests the same failure text production returns —
+  // otherwise a repo's tests assert a surface its users never see.
+  it('surfaces an McpToolError hint exactly as createMcpServer does', async () => {
+    const { McpToolError } = await import('../errors/index.js');
+    const h = await createTestHarness((server) =>
+      server.registerTool('t', {}, async () => {
+        throw new McpToolError('no such option 999', { hint: 'Available: 1 (Bus)' });
+      }),
+    );
+    const result = await h.callTool('t');
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as { text: string }).text).toBe(
+      'no such option 999\n\nHint: Available: 1 (Bus)',
+    );
+    await h.close();
+  });
+});
