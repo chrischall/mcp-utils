@@ -233,8 +233,26 @@ That is a complete file. Add only what is true of this MCP:
 - `dependencies:` — a binary the server shells out to, as a GitHub release asset (`repo`, `tag`, `asset` glob, `bin: [name]`), or extra npm packages. This is the gogcli case.
 - `state: { dataDir: true, reason: <why> }` — **the reason is required**: it is what an owner judges. Say what is kept and what breaks without it ("keeps its device id under `$HOME`; without it every cold start re-enrols").
 - `identity: { perUserChild: true }` + `auth: { fields | flow }` — only for an MCP that authenticates as its CALLER. `auth` requires `perUserChild`.
-- `egress: { allow: [host, …] }` — enforced only on the isolated tier, a proposal everywhere.
+- `egress: { allow: [host, …] }` — enforced only on the isolated tier, a proposal everywhere. **Deriving this correctly is the hard part — see below.**
 - `tools: { enable: [...] }`, `build:`, `subdir:`.
+
+**There is NO `bridge` / `bridgePortEnv` / `runtime` field.** Those are *registration* fields, set over the control API (§*Browser-bridge MCPs CAN be hosted*) — the manifest schema has no column for them, so a bridge repo cannot declare itself bridged. State the requirement in a **comment** and declare `state.dataDir: true` (which the API requires for `bridge`) with its reason. Do NOT put it in `summary`: that is user-facing wizard text, and folding an internal hosting note into it fails review.
+
+**Egress: a URL-literal grep is both noisy AND incomplete.** Across a fleet-wide rollout this was the single biggest source of failed reviews, in *both* directions — an over-grant widens the sandbox for nothing, an under-grant makes every tool report "could not reach the API" on the isolated tier. Rules, each paid for by a real failure:
+
+- **Strip comments first.** A host in a doc link or a prose note is not egress (booli's `challenges.cloudflare.com`, app-store-connect's `developer.apple.com`).
+- **Also scan bare-domain literals** — a hostname allowlist lives in a constant (`ALLOWED_APEX = 'accessoticketing.com'`), and a URL-only scrape missed that repo's *only* host.
+- **A `domains: [...]` fetchproxy declaration is AUTHORITATIVE** — that is the repo stating what it reaches, and the apex covers subdomains. It is what separates redfin's `domains:['redfin.com']` (real) from a validation list (not).
+- **Not egress:** a host only inside ``return `https://host…` `` (a link handed to the user — `pay.google.com`, `ssl.cdn-redfin.com`, `matterport.com`); a URL inside a prose/error string (`partner.getyourguide.com`) — *unless* the host also appears as a bare `https://host/…` base literal, or you will drop a real base (musicbrainz's `WS_BASE`); an `xmlns="http://host/…"` XML **namespace** (`topografix.com`, and skylight's `s3.amazonaws.com`); an `origin:`/`referer:` request **header** value (housecallpro's `client.housecallpro.com`); a bot-wall vendor named only inside a detection check (`body.includes('awswaf.com')`).
+- **Validation lists cut both ways.** A bare host in an accepted-hostname array is usually *not* egress when the fetch then targets a pinned base (maxpreps parses a user URL, then fetches `www.maxpreps.com`) — but IS egress when the server fetches the user-supplied URL itself (accessoticketing). Mechanical classification cannot settle this: surface bare-only hosts for a human read rather than auto-granting them.
+- **Runtime hosts appear nowhere as literals** — a signed `upload_url` returned by the API, a Firebase `databaseURL` from a config blob, `${bucket}.s3.${region}.amazonaws.com`. Grep for `databaseURL`/`upload_url`/`presigned` and say so in a comment (or allow the apex) rather than silently under-granting.
+- **A tenant/district service gets NO `egress` block at all.** When the host is per-deployment (`WORKDAY_HOST`/`WORKDAY_TENANT`, a district's Infinite Campus host, an iOffice tenant) any fixed allowlist is wrong by construction — write a comment naming the variable to derive it from.
+
+**Two more, both cheap and both cost a review round:** copy `env` help **verbatim from the repo's own `server.json` / `manifest.json` descriptions** (most repos already have them) or derive it by reading the code — never invent it, and never invent a URL (a `/apps` that should have been `/apps/register` failed a PR). And do **not** filter out timeouts/TTLs/dirs as "internal": they are user-settable knobs, and omitting one fails review too.
+
+**One repo is not always one server — check the shape before generating anything.** `<name>-mcp` does not mean "an MCP server lives at this root":
+- A **workspace monorepo** whose root is `private` publishes nothing from the root, so a root manifest is never read. Each **published package** needs its own, because an `--npm` registration reads *that package's* tarball (gogcli-mcp: root private, nine published packages, so nine manifests — each with its own `command.bin`).
+- A repo can be a **library wearing an `-mcp` name**: `realty-mcp` holds only `@chrischall/realty-core`, with no bin, no `main`, no `src/`, no `runMcp`. It is not hostable and correctly has no manifest. Tell it apart by looking for a bin + a `runMcp` entrypoint before writing a file that would say nothing.
 
 Two rules to keep in mind while writing one:
 
