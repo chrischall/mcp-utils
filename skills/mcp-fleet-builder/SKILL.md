@@ -51,6 +51,7 @@ src/
 tests/            # vitest; no real network (mock fetch / the bridge)
   version-sync.test.ts   # versionSyncTest from @chrischall/mcp-utils/test
 SKILL.md, manifest.json, server.json, .mcp.json, .claude-plugin/  # packaging
+mint.yaml         # how this MCP wants to be HOSTED (mcp-host reads it; see below)
 .github/workflows/   # ci, release-please / tag-and-bump, pr-auto-review, auto-merge
 ```
 
@@ -211,6 +212,38 @@ mcp-host register --slug splitwise --npm splitwise-mcp \
 
 Then in claude.ai: Settings → Connectors → Add custom connector → paste the `connectUrl`, sign in on the authorize page, press Connect. Each hosted MCP is its own connector with its own grant; revoking one never touches another.
 
+### Ship a `mint.yaml` — the registration writes itself
+
+**Every full MCP gets one, at the repo root.** It is how the server tells mcp-host what it needs; without it, whoever registers is guessing from the README, and every guess wrong is a connector that registers cleanly and fails later. mcp-host reads it at the exact pin and fills the register wizard in from it (`docs/MINT-MANIFEST.md` in that repo).
+
+```yaml
+version: 1
+name: Splitwise
+slug: splitwise
+env:
+  - name: SPLITWISE_API_KEY
+    secret: true              # propose a secret REFERENCE, never a literal
+    required: true
+    help: From splitwise.com/apps
+```
+
+That is a complete file. Add only what is true of this MCP:
+
+- `command: { bin: <name> }` — **required when package.json declares more than one bin**, or the install refuses (canvas-parent-mcp shipped broken on exactly this).
+- `dependencies:` — a binary the server shells out to, as a GitHub release asset (`repo`, `tag`, `asset` glob, `bin: [name]`), or extra npm packages. This is the gogcli case.
+- `state: { dataDir: true, reason: <why> }` — **the reason is required**: it is what an owner judges. Say what is kept and what breaks without it ("keeps its device id under `$HOME`; without it every cold start re-enrols").
+- `identity: { perUserChild: true }` + `auth: { fields | flow }` — only for an MCP that authenticates as its CALLER. `auth` requires `perUserChild`.
+- `egress: { allow: [host, …] }` — enforced only on the isolated tier, a proposal everywhere.
+- `tools: { enable: [...] }`, `build:`, `subdir:`.
+
+Two rules to keep in mind while writing one:
+
+1. **It proposes; it never applies.** The file is not covered by the tarball's integrity check, so nothing in it reaches a child until an owner reviews and saves. Do not treat it as configuration you control — treat it as the accurate answer to "what does this need?".
+2. **Never put a secret VALUE in it**, including as a `default`. A `default` on a field marked `secret`, or on a secret-shaped NAME, is refused — a credential in a file in a public repo is a leak, not a default.
+3. **It MUST be in `package.json` `files`, or an npm registration reads a blank wizard.** For an `--npm`-sourced registration the "exact pin" mcp-host reads is the published TARBALL, not the GitHub tree — so a `mint.yaml` omitted from `files` is simply absent, and the register wizard comes up empty (no egress, no env, no state) with no error. Same silent-omission class as `"skills"` under §*Authoring the fpx skill*, and it hid a whole build: alphaportal-mcp declared `egress: [api.alpharoute.app]` but `files` listed only `dist`/`.claude-plugin`/`skills`/`.mcp.json`/`server.json`, so the isolated-tier registration got no egress and every tool reported "could not reach the API". Add `mint.yaml` to `files`, add it to `.mcpbignore` (it belongs in the npm tarball, not the `.mcpb`), and assert `pkg.files` includes it in `tests/packaging.test.ts`. A `--github` registration reads the tree and is unaffected — which is exactly why this hides from anyone who tested hosting that way.
+
+**Keep it true as the MCP changes.** mcp-host's nightly check reads the manifest at each registration's newest version and alerts its owner when a published version asks for something the registration does not supply. A stale `mint.yaml` therefore either cries wolf or stays silent when it should not — updating it is part of shipping a change that needs a new variable, a new dependency, or persistence.
+
 ### Is this MCP hostable? — check the repo, don't recite this list
 
 **Read `~/git/mcp-host/docs/BROWSER-BRIDGE.md` before answering "can this be hosted".** This section asserted "browser-bridge: not implemented" for months after it stopped being true, and an agent repeated that to the user while sixteen bridged registrations were live. The auth question below is still the right question; its answers move.
@@ -322,6 +355,7 @@ A new fleet repo isn't done until ALL of this exists. Each line below was a real
 ## Gotchas (hard-won)
 
 - **ESM + NodeNext**: every relative import ends in `.js`, even from `.ts`.
+- **An injectable `fetchImpl` default must be a receiver-safe WRAPPER, not the bare global `fetch`.** Storing `this.fetchImpl = opts.fetchImpl ?? fetch` and later calling `this.fetchImpl(...)` invokes `fetch` with `this` bound to your client instance; **older undici (Node 18–20, which several MCP hosts — Claude Desktop included — still bundle) throws `TypeError: Illegal invocation` for any receiver that isn't `globalThis`**, and Node 26 tolerates it — so this is invisible in local dev and only bites a user on an older host. The throw lands in whatever `catch` wraps the call and masquerades as something else: alphaportal-mcp reported "token refresh could not reach the API" (a network-failure message) for what was actually a mis-bound fetch. Default to `opts.fetchImpl ?? ((input, init) => fetch(input, init))`, and pass that same wrapper to `createApiClient({ fetchImpl })`. (Distinct from the *workerd* `globalThis.fetch` binding trap under §*What actually differs from the Worker era*, which really is gone on Node — this is a live Node-side variant.) While you're there, surface `err.cause?.code` + the endpoint in reach-failure messages, so a genuine DNS/TLS/egress block is diagnosable instead of opaque.
 - **`"types": ["node"]`**: NodeNext repos need this in `tsconfig.compilerOptions` once they import a scoped pkg like `@chrischall/mcp-utils`, or `tsc` fails with `Cannot find name 'path'/'url'`. Add `types`, not `typeRoots`.
 - **`tsconfig rootDir: "src"`** (not `"."`): with `rootDir:"."` + `include:["src"]`, `tsc` emits `dist/src/index.js` while `package.json` `bin` points at `dist/index.js`, so `npx <svc>` (and any host launching the bin) can't find its entry. Copying a sibling's tsconfig avoids this; a fresh scaffold gets it wrong.
 - **The `.mcpb` bundle ships NO `node_modules` — an eager import of an esbuild-`--external` dep crashes it at LOAD.** A top-level `import { X } from 'pkg'` of an externalized/optional dep (e.g. `@fetchproxy/server` in `transport-fetchproxy.ts`) throws `ERR_MODULE_NOT_FOUND` the moment the host spawns the bundled server — before it answers `initialize` (the host logs "Server transport closed unexpectedly", not a useful error). Make optional/externalized deps **lazy**: `import type { X } from 'pkg'` (type-only, erased) + `const { X } = await import('pkg')` inside the method that needs it, so the default path never touches it. `loadDotenvSafely`'s guarded import already does this for `dotenv`; do the same for `@fetchproxy/server` in any cookie-session/bearer repo that keeps fetchproxy as an optional fallback.
