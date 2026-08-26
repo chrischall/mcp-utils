@@ -48,6 +48,7 @@ import { randomBytes } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { textResult } from '../response/index.js';
 import { readEnvVar } from '../config/index.js';
+import { ApiError, RateLimitedError, RequestTimeoutError } from '../http/index.js';
 
 // ===========================================================================
 // 1. In-memory SessionRegistry + MCP tools
@@ -569,9 +570,12 @@ export interface FileStatePersistenceOptions<T> {
 }
 
 /**
- * File-backed {@link StatePersistence} with the same permission hardening
- * {@link SessionStore} applies (`0600` file, `0700` directory, both re-asserted
- * after the write, because `mode` only applies on creation).
+ * File-backed {@link StatePersistence}. The file is `0600`, re-asserted after
+ * the write because `mode` only applies on creation. A directory is created
+ * `0700` and re-asserted the same way — but ONLY one this call creates: a bare
+ * {@link resolveStateDir} is `$HOME`, and on `mcp-host` the data dir exists
+ * before the child starts, so re-permissioning a pre-existing directory would
+ * be an invasive side effect of writing one token file rather than hardening.
  *
  * Two differences from {@link SessionStore}, which is why this is its own
  * implementation rather than a wrapper over it. It holds ONE record rather than
@@ -738,8 +742,41 @@ export interface TokenManagerOptions {
    * behaviour. See {@link StatePersistence}.
    */
   persistence?: StatePersistence<BearerTokens>;
+  /**
+   * Decide whether a {@link TokenManagerOptions.refresh} rejection means the
+   * credential itself is dead (re-mint via the bootstrap) or the endpoint was
+   * merely unreachable (surface it, keep the token).
+   *
+   * The distinction matters in both directions. Treating a transient failure as
+   * revocation deletes a still-VALID refresh token and burns a login against an
+   * endpoint that may rate-limit or escalate to a captcha — the exact cost this
+   * whole feature exists to avoid. Treating a real revocation as transient
+   * leaves the server broken until someone deletes the stored file by hand.
+   *
+   * The default resolves that by only excusing failures that are transient *by
+   * construction* — a {@link RateLimitedError}, a {@link RequestTimeoutError},
+   * or an {@link ApiError} with a 5xx status. Anything else is assumed to be a
+   * dead credential, which keeps the recover-from-revocation guarantee. Override
+   * it for a service that signals revocation some other way (or, conversely, one
+   * that answers a live token with a 5xx). Mirrors the permanent-vs-transient
+   * split {@link CookieSessionManagerOptions.isPermanentError} already makes.
+   */
+  isRefreshRevoked?: (err: unknown) => boolean;
   /** Injectable clock (defaults to `Date.now`) — for tests. */
   now?: () => number;
+}
+
+/**
+ * The default {@link TokenManagerOptions.isRefreshRevoked}: everything except
+ * the failures mcp-utils itself can prove are transient. Deliberately
+ * conservative — an unrecognised error is treated as a dead credential, because
+ * a needless re-login costs one request and an unrecoverable one costs the
+ * server until a human intervenes.
+ */
+function defaultIsRefreshRevoked(err: unknown): boolean {
+  if (err instanceof RateLimitedError || err instanceof RequestTimeoutError) return false;
+  if (err instanceof ApiError && err.status >= 500) return false;
+  return true;
 }
 
 /** Whether a parsed record has the shape of {@link BearerTokens}. */
@@ -777,6 +814,7 @@ export class TokenManager {
   private readonly skewMs: number;
   private readonly persistence: StatePersistence<BearerTokens> | undefined;
   private readonly now: () => number;
+  private readonly isRefreshRevokedFn: (err: unknown) => boolean;
   private inFlight: Promise<void> | undefined;
   private bootstrapInFlight: Promise<BearerTokens> | undefined;
   /**
@@ -798,6 +836,7 @@ export class TokenManager {
     this.skewMs = opts.skewMs ?? TOKEN_REFRESH_SKEW_MS;
     this.persistence = opts.persistence;
     this.now = opts.now ?? Date.now;
+    this.isRefreshRevokedFn = opts.isRefreshRevoked ?? defaultIsRefreshRevoked;
   }
 
   /** Whether the token is within the skew window of (or past) expiry. */
@@ -914,6 +953,9 @@ export class TokenManager {
    */
   private async reBootstrap(err: unknown): Promise<BearerTokens> {
     if (this.bootstrapFn === undefined) throw err;
+    // Only a credential we believe is DEAD is worth destroying. A 5xx or a
+    // timeout leaves a perfectly good refresh token that the next call can use.
+    if (!this.isRefreshRevokedFn(err)) throw err;
     this.tokens = undefined;
     await this.clearPersisted();
     return this.ensureTokens();
@@ -1205,6 +1247,9 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
     this.session = session;
     this.sessionAt = this.now();
     this.inFlight = undefined; // detach any in-flight login (it won't re-stamp)
+    // The caller has installed a session, so the stored one is superseded and
+    // must never be restored over it (or over a later invalidate()).
+    this.persistenceRead = true;
     // Fire-and-forget: seed() is synchronous by contract, and a persistence
     // failure must not change what the caller just installed.
     void this.persist(session, this.sessionAt);
@@ -1279,7 +1324,13 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
     if (this.persistence === undefined || this.persistenceRead) return null;
     this.persistenceRead = true;
     try {
-      const raw = await this.persistence.load();
+      // Through the chain, not around it: `invalidate()` queues its `clear()`,
+      // and a read that jumped that queue would restore the very session the
+      // clear is about to remove.
+      let raw: unknown = null;
+      await this.enqueuePersist(async () => {
+        raw = await this.persistence?.load();
+      });
       if (!isPersistedCookieSession<S>(raw)) return null;
       // Honour the proactive TTL against the ORIGINAL login time.
       if (this.maxAgeMs !== undefined && this.now() - raw.sessionAt >= this.maxAgeMs) return null;
