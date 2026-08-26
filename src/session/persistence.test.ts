@@ -11,6 +11,7 @@ import {
   type BearerTokens,
   type StatePersistence,
 } from './index.js';
+import { ApiError, RateLimitedError, RequestTimeoutError } from '../http/index.js';
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -780,5 +781,161 @@ describe('resolveStateDir — env hardening', () => {
 
   it('trims surrounding whitespace like readEnvVar does', () => {
     expect(resolveStateDir({ env: { MCP_DATA_DIR: '  /data  ' } })).toBe('/data');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-2 review follow-ups (#138)
+// ---------------------------------------------------------------------------
+
+describe('TokenManager — transient vs revoked refresh failures', () => {
+  /** A store whose record survives unless clear() is called. */
+  function diskLike(seed: BearerTokens | null): StatePersistence<BearerTokens> & {
+    value: BearerTokens | null;
+  } {
+    const api = {
+      value: seed,
+      load: () => api.value,
+      save: (t: BearerTokens) => {
+        api.value = t;
+      },
+      clear: () => {
+        api.value = null;
+      },
+    };
+    return api;
+  }
+
+  const transientCases: Array<[string, unknown]> = [
+    ['a 5xx from the token endpoint', new ApiError(503, 'Service Unavailable')],
+    ['a rate limit', new RateLimitedError('auth')],
+    ['a timeout', new RequestTimeoutError('auth', 5000)],
+  ];
+
+  for (const [label, err] of transientCases) {
+    it(`surfaces ${label} instead of destroying a valid refresh token`, async () => {
+      const c = clock();
+      let logins = 0;
+      const store = diskLike({ accessToken: 'a1', refreshToken: 'good', expiresAt: c.now() - 1 });
+      const mgr = new TokenManager({
+        initial: async () => {
+          logins += 1;
+          return { accessToken: 'fresh', expiresAt: c.now() + 3_600_000 };
+        },
+        refresh: async () => {
+          throw err;
+        },
+        persistence: store,
+        now: c.now,
+      });
+      await expect(mgr.getAccessToken()).rejects.toThrow();
+      // The whole premise of this feature: a transient outage must not burn a
+      // login against an endpoint that rate-limits or escalates to a captcha.
+      expect(logins).toBe(0);
+      expect(store.value?.refreshToken).toBe('good');
+    });
+  }
+
+  it('still re-mints on an unambiguous rejection', async () => {
+    const c = clock();
+    let logins = 0;
+    const store = diskLike({ accessToken: 'a1', refreshToken: 'revoked', expiresAt: c.now() - 1 });
+    const mgr = new TokenManager({
+      initial: async () => {
+        logins += 1;
+        return { accessToken: 'fresh', expiresAt: c.now() + 3_600_000 };
+      },
+      refresh: async () => {
+        throw new ApiError(400, 'invalid_grant');
+      },
+      persistence: store,
+      now: c.now,
+    });
+    expect(await mgr.getAccessToken()).toBe('fresh');
+    expect(logins).toBe(1);
+    expect(store.value?.accessToken).toBe('fresh');
+  });
+
+  it('honours a caller-supplied isRefreshRevoked', async () => {
+    const c = clock();
+    let logins = 0;
+    const mgr = new TokenManager({
+      initial: async () => {
+        logins += 1;
+        return { accessToken: `a${logins}`, refreshToken: 'r', expiresAt: c.now() - 1 };
+      },
+      refresh: async () => {
+        throw new ApiError(503, 'Service Unavailable');
+      },
+      // This service answers a revoked token with a 503. Opt out of the default.
+      isRefreshRevoked: () => true,
+      now: c.now,
+    });
+    expect(await mgr.getAccessToken()).toBe('a2');
+    expect(logins).toBe(2);
+  });
+
+  it('a transient failure on withAuth surfaces rather than re-minting', async () => {
+    const c = clock();
+    let logins = 0;
+    const mgr = new TokenManager({
+      initial: async () => {
+        logins += 1;
+        return { accessToken: 'a1', refreshToken: 'good', expiresAt: c.now() + 3_600_000 };
+      },
+      refresh: async () => {
+        throw new RateLimitedError('auth');
+      },
+      now: c.now,
+    });
+    await expect(
+      mgr.withAuth(async () => new Response(null, { status: 401 })),
+    ).rejects.toThrow(/Rate limited/);
+    expect(logins).toBe(1);
+  });
+});
+
+describe('CookieSessionManager — persistence read ordering', () => {
+  it('does not restore an invalidated session queued for clearing', async () => {
+    const c = clock();
+    let logins = 0;
+    const ops: string[] = [];
+    let stored: { session: Sess; sessionAt: number } | null = {
+      session: { cookieHeader: 'on-disk' },
+      sessionAt: c.now(),
+    };
+    const mgr = new CookieSessionManager<Sess>({
+      login: async () => {
+        logins += 1;
+        return { cookieHeader: `s${logins}` };
+      },
+      persistence: {
+        load: () => {
+          ops.push('load');
+          return stored;
+        },
+        save: async (v) => {
+          await new Promise((r) => setTimeout(r, 5));
+          ops.push('save');
+          stored = v;
+        },
+        clear: async () => {
+          ops.push('clear');
+          stored = null;
+        },
+      },
+      now: c.now,
+    });
+
+    // seed() then invalidate() in one tick: the clear is queued behind the
+    // seed's save, and the ensure() below must not read ahead of either.
+    mgr.seed({ cookieHeader: 'seeded' });
+    mgr.invalidate();
+    const got = await mgr.ensure();
+
+    expect(got.cookieHeader).toBe('s1'); // a fresh login, not the stale disk copy
+    expect(logins).toBe(1);
+    expect(ops.indexOf('clear')).toBeLessThan(ops.lastIndexOf('load') === -1 ? Infinity : ops.length);
+    expect(stored).toEqual({ session: { cookieHeader: 's1' }, sessionAt: c.now() });
   });
 });

@@ -517,12 +517,18 @@ valid costs **nothing**; a stored token that has expired but carries a refresh
 token costs **one refresh** instead of a login; only an empty or unusable store
 runs `initial`. A refresh token revoked between runs is not terminal — the
 stored copy is discarded and the login re-runs, so a stale file cannot brick the
-server.
+server. A *transient* refresh failure is treated differently: a `RateLimitedError`,
+a `RequestTimeoutError` or a 5xx `ApiError` surfaces to the caller with the
+refresh token left intact, because destroying a valid credential and burning a
+login on a passing outage is the cost this feature exists to avoid. Override
+`isRefreshRevoked` for a service that signals revocation some other way.
 
-`createFileStatePersistence` writes atomically (temp file + rename) with the
-same `0600`/`0700` hardening as `SessionStore`, and never throws: a read-only or
-full disk degrades to in-memory operation, costing a login rather than a failed
-request. `resolveStateDir` prefers `MCP_DATA_DIR` — the variable `mcp-host`
+`createFileStatePersistence` writes atomically (temp file + rename), leaves the
+file `0600`, and creates any missing directory `0700` — but does **not**
+re-permission a directory that already exists, since a bare `resolveStateDir()`
+is `$HOME` and `mcp-host` creates the data dir before the child starts. It never
+throws: a read-only or full disk degrades to in-memory operation, costing a
+login rather than a failed request. `resolveStateDir` prefers `MCP_DATA_DIR` — the variable `mcp-host`
 injects for a registration with `state.dataDir: true` — then `HOME`, then the OS
 home directory. It reads both through `readEnvVar`, so blank values, the
 `'null'` / `'undefined'` sentinels and unexpanded `${...}` placeholders are all
