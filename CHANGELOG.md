@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.1](https://github.com/chrischall/mcp-utils/compare/v0.17.0...v0.17.1) (2026-08-26)
+
+
+### Refactor
+
+* **session:** advertise the file stores' synchronous return type ([#145](https://github.com/chrischall/mcp-utils/issues/145)) ([23e4168](https://github.com/chrischall/mcp-utils/commit/23e416877827775ccfae8f398e8f3a09484bd205))
+
 ## [0.17.0](https://github.com/chrischall/mcp-utils/compare/v0.16.0...v0.17.0) (2026-08-26)
 
 
