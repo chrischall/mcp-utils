@@ -557,3 +557,31 @@ describe('resolveStateFile absolute-path guarantee', () => {
     ).toBe('/tmp/exact.json');
   });
 });
+
+describe('the file-backed stores are synchronous', () => {
+  // The declared SyncStatePersistence return type is enforced by tsc on
+  // src/session/index.ts — but NOT here: tsconfig excludes *.test.ts and vitest
+  // transpiles with esbuild, so a type-only assertion in this file would be
+  // invisible. These check the runtime property the type advertises.
+  const isThenable = (v: unknown): boolean =>
+    typeof (v as { then?: unknown } | null)?.then === 'function';
+
+  it('createFileStatePersistence load/save/clear never return a promise', () => {
+    const file = join(dir, 'tokens.json');
+    const p = createFileStatePersistence<BearerTokens>({ filePath: file });
+    expect(isThenable(p.load())).toBe(false);
+    expect(isThenable(p.save({ accessToken: 'AT', expiresAt: 1 }))).toBe(false);
+    expect(isThenable(p.load())).toBe(false);
+    expect(isThenable(p.clear())).toBe(false);
+  });
+
+  it('a keyed view is synchronous too', () => {
+    const store = createKeyedFileStatePersistence<BearerTokens>({
+      filePath: join(dir, 'sessions.json'),
+    });
+    const view = store.forKey('a');
+    expect(isThenable(view.load())).toBe(false);
+    expect(isThenable(view.save({ accessToken: 'A', expiresAt: 1 }))).toBe(false);
+    expect(isThenable(view.clear())).toBe(false);
+  });
+});

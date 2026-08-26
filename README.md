@@ -588,6 +588,11 @@ Records are written in a small envelope (`{ v: 1, boundTo?, state }`). A bare
 record written by an earlier version is still read, so nothing already on disk
 is lost.
 
+The file-backed stores return `SyncStatePersistence<T>` — the same contract with
+the promise arm dropped, since they read one small file and cannot suspend.
+Composing one (wrapping `load` to add a legacy fallback, say) therefore needs no
+narrowing cast, and the value is still accepted anywhere `StatePersistence` is.
+
 Persistence is **opt-in throughout**: a manager constructed without it behaves
 exactly as before, and no credential reaches a disk because a dependency was
 upgraded. The interface is two methods (`load` / `save`, plus an optional

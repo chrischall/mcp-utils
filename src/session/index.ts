@@ -561,6 +561,30 @@ export interface StatePersistence<T> {
 }
 
 /**
+ * A {@link StatePersistence} that is synchronous by construction — what the
+ * file-backed stores in this module return.
+ *
+ * The base interface allows a promise so a network-backed store can implement
+ * it, which means `load()` on the concrete file store was typed
+ * `T | null | Promise<T | null>` even though it reads one small file and cannot
+ * suspend. Every consumer composing a store — wrapping `load` to add a legacy
+ * fallback, say — then needed a narrowing cast at the call site for a value that
+ * was never going to be a promise. Advertising the narrower type removes the
+ * cast without changing what is returned.
+ *
+ * Assignable to {@link StatePersistence} in the ordinary way, so anything that
+ * takes the general interface still takes one of these.
+ */
+export interface SyncStatePersistence<T> {
+  /** Read the stored state; `null` when absent, unparseable, or unusable. */
+  load(): T | null;
+  /** Write state, replacing whatever was there. Throws if the write fails. */
+  save(state: T): void;
+  /** Discard the stored state. */
+  clear(): void;
+}
+
+/**
  * The on-disk envelope. Written for every save so a record can carry metadata
  * (currently the credential binding) without polluting `T`'s own shape. A file
  * written before the envelope existed is a bare `T`, and `load` still accepts
@@ -677,7 +701,7 @@ export interface FileStatePersistenceOptions<T> {
  */
 export function createFileStatePersistence<T>(
   opts: FileStatePersistenceOptions<T>,
-): Required<StatePersistence<T>> {
+): SyncStatePersistence<T> {
   const { filePath, validate } = opts;
   const secret = opts.boundTo;
 
@@ -784,7 +808,7 @@ export interface KeyedStatePersistence<T> {
    * managers take — so a multi-account server gives each account its own
    * {@link TokenManager} over one shared file.
    */
-  forKey(key: string): Required<StatePersistence<T>>;
+  forKey(key: string): SyncStatePersistence<T>;
   /** The normalized keys currently held. */
   keys(): string[];
 }
@@ -851,7 +875,7 @@ export function createKeyedFileStatePersistence<T>(
   };
 
   return {
-    forKey(key: string): Required<StatePersistence<T>> {
+    forKey(key: string): SyncStatePersistence<T> {
       const k = normalize(key);
       return {
         load(): T | null {
