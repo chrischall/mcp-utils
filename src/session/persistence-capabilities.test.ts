@@ -531,3 +531,29 @@ describe('resolveStateFile ~ expansion honours the injected env', () => {
     ).toBe('/home/injected/state/t.json');
   });
 });
+
+describe('resolveStateFile absolute-path guarantee', () => {
+  it('resolves a relative env override to an absolute path', () => {
+    // FileStatePersistenceOptions.filePath documents "Absolute path"; a
+    // cwd-relative override would move the store with the process's cwd.
+    const got = resolveStateFile({
+      envVar: 'X_FILE',
+      subdir: '.x',
+      fileName: 't.json',
+      env: { X_FILE: 'state/t.json', HOME: '/home/u' },
+    });
+    expect(got.startsWith('/')).toBe(true);
+    expect(got.endsWith('/state/t.json')).toBe(true);
+  });
+
+  it('leaves an already-absolute override alone', () => {
+    expect(
+      resolveStateFile({
+        envVar: 'X_FILE',
+        subdir: '.x',
+        fileName: 't.json',
+        env: { X_FILE: '/tmp/exact.json' },
+      }),
+    ).toBe('/tmp/exact.json');
+  });
+});

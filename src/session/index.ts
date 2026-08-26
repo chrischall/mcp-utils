@@ -42,7 +42,7 @@ import {
   renameSync,
   unlinkSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes, createHmac } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -878,6 +878,16 @@ export function createKeyedFileStatePersistence<T>(
   };
 }
 
+/**
+ * The home directory a state resolver should use: an injected `HOME` when the
+ * caller supplied an env, else the OS home. Shared by both branches below so
+ * they cannot drift — an override expanding `~` against a different home than
+ * the fallback resolves to is exactly the bug this centralises away.
+ */
+function homeOf(env: Record<string, string | undefined> | undefined): string {
+  return readEnvVar('HOME', { env }) ?? homedir();
+}
+
 /** Options for {@link resolveStateDir}. */
 export interface ResolveStateDirOptions {
   /** Environment to read (defaults to `process.env`) — injectable for tests. */
@@ -900,11 +910,6 @@ export interface ResolveStateDirOptions {
  * rather than used as a literal directory name — the same hardening
  * {@link readEnvVar} applies.
  */
-/** The home directory this resolver should use: injected `HOME`, else the OS one. */
-function homeOf(env: Record<string, string | undefined> | undefined): string {
-  return readEnvVar('HOME', { env }) ?? homedir();
-}
-
 export function resolveStateDir(opts: ResolveStateDirOptions = {}): string {
   // Delegated rather than re-implemented: readEnvVar is the fleet's one place
   // that suppresses blank, `'null'`, `'undefined'` AND `${...}` placeholders.
@@ -912,9 +917,7 @@ export function resolveStateDir(opts: ResolveStateDirOptions = {}): string {
   // is a RELATIVE `./null` directory, so the credential would be written under
   // the process cwd and silently stop surviving restarts.
   const env = opts.env;
-  const base =
-    readEnvVar('MCP_DATA_DIR', { env }) ?? readEnvVar('HOME', { env }) ?? homedir();
-  return opts.subdir !== undefined ? join(base, opts.subdir) : base;
+  return join(readEnvVar('MCP_DATA_DIR', { env }) ?? homeOf(env), opts.subdir ?? '');
 }
 
 /** Options for {@link resolveStateFile}. */
@@ -938,17 +941,23 @@ export interface ResolveStateFileOptions extends ResolveStateDirOptions {
  * The override goes through the same hardened {@link readEnvVar} as the base, so
  * a host forwarding an unexpanded `${...}` — or the literal `null` — falls back
  * rather than creating a relative directory of that name under the process cwd.
+ * The result is always absolute: `~` expands against the same home the fallback
+ * uses, and anything relative is resolved, because
+ * {@link FileStatePersistenceOptions.filePath} is documented as absolute and a
+ * cwd-relative store would move with the process.
  */
 export function resolveStateFile(opts: ResolveStateFileOptions): string {
   const override =
     opts.envVar !== undefined ? readEnvVar(opts.envVar, { env: opts.env }) : undefined;
   if (override !== undefined) {
-    // `~` expanded against the SAME home the fallback branch uses. `expandPath`
-    // resolves against os.homedir() and would ignore an injected `opts.env.HOME`,
-    // making the two branches disagree in exactly the setups tests rely on.
+    // `~` expanded against the SAME home the fallback branch uses — `expandPath`
+    // would resolve it against os.homedir() and ignore an injected
+    // `opts.env.HOME`, making the two branches disagree. `resolve` then keeps
+    // the documented "absolute path" guarantee: a relative override would
+    // otherwise follow the process's cwd around.
     if (override === '~') return homeOf(opts.env);
     if (override.startsWith('~/')) return join(homeOf(opts.env), override.slice(2));
-    return override;
+    return resolve(override);
   }
   const dirOpts: ResolveStateDirOptions = { env: opts.env };
   if (opts.subdir !== undefined) dirOpts.subdir = opts.subdir;
@@ -1418,12 +1427,17 @@ export interface CookieSessionManagerOptions<S, R = Response> {
    * Swallowed by default — the in-memory session is still usable.
    *
    * Where a throwing hook goes depends on which write failed. The login path
-   * awaits its write, so the error reaches the `ensure()` caller — but it is
-   * deliberately NOT offered to {@link CookieSessionManagerOptions.isPermanentError}
-   * first, because caching a disk error as a permanent config failure would brick
-   * every later `ensure()`. The `seed()` and `invalidate()` writes are
-   * fire-and-forget onto the ordering chain, whose tail swallows, so a throw
-   * there is dropped.
+   * awaits its write, so the error reaches a direct {@link CookieSessionManager.ensure}
+   * caller — but it is deliberately NOT offered to
+   * {@link CookieSessionManagerOptions.isPermanentError} first, because caching a
+   * disk error as a permanent config failure would brick every later `ensure()`.
+   *
+   * Two places it does NOT reach the caller. {@link CookieSessionManager.withSession}'s
+   * expiry replay catches `ensure()` and returns the stale response by design, so
+   * a "fatal" write there is dropped unless
+   * {@link CookieSessionManagerOptions.onReplayLoginError} rethrows too. And the
+   * `seed()`/`invalidate()` writes are fire-and-forget onto the ordering chain,
+   * whose retained tail swallows.
    */
   onPersistError?: (err: unknown) => void;
 }
@@ -1667,7 +1681,13 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
     }
   }
 
-  /** Append a persistence op to the chain, preserving call order. Never throws. */
+  /**
+   * Append a persistence op to the chain, preserving call order.
+   *
+   * The RETURNED promise can reject — that is the whole `StatePersistenceError`
+   * path, and the awaited login write depends on it. Only the retained chain is
+   * swallowed, so one failed write cannot poison every later one.
+   */
   private enqueuePersist(op: () => Promise<void>): Promise<void> {
     const next = this.persistChain.then(op);
     this.persistChain = next.catch(() => undefined);
