@@ -1,5 +1,5 @@
 /**
- * Session scaffolding for the MCP fleet — four related-but-distinct surfaces
+ * Session scaffolding for the MCP fleet — five related-but-distinct surfaces
  * consolidated behind one subpath (`@chrischall/mcp-utils/session`):
  *
  *  1. {@link SessionRegistry} — an *ephemeral, in-memory* registry of signed-in
@@ -12,12 +12,18 @@
  *     (0600 file / 0700 dir), normalized keys, and a most-recently-used "active"
  *     pointer. Used by ofw/creditkarma/honeybook.
  *
- *  3. {@link TokenManager} — a bearer-token lifecycle manager: proactive refresh
- *     inside a 5-minute skew window, reactive 401-replay, and a single-flight
- *     semaphore so concurrent callers coalesce into ONE refresh. Used by
- *     skylight/canvas/creditkarma/honeybook/zola.
+ *  3. {@link StatePersistence} — the opt-in seam that lets the two managers
+ *     below survive a process restart, with {@link createFileStatePersistence}
+ *     (atomic, 0600) and {@link resolveStateDir} (`MCP_DATA_DIR` → `HOME`) as
+ *     the disk-backed default. Without it a scale-to-zero host re-runs a full
+ *     login on every cold start, against endpoints that often rate-limit it.
  *
- *  4. {@link CookieSessionManager} — the cookie-session analog of TokenManager:
+ *  4. {@link TokenManager} — a bearer-token lifecycle manager: a lazily
+ *     bootstrapped login, proactive refresh inside a 5-minute skew window,
+ *     reactive 401-replay, and a single-flight semaphore so concurrent callers
+ *     coalesce into ONE exchange. Used by skylight/canvas/creditkarma/honeybook/zola.
+ *
+ *  5. {@link CookieSessionManager} — the cookie-session analog of TokenManager:
  *     a single-flight login + reactive expiry-replay (with heuristic, not just
  *     status-code, expiry detection) + clear-on-settle so a rejected login never
  *     sticks. Used by artsonia/canvas/evite/signupgenius/skylight.
@@ -34,11 +40,14 @@ import {
   mkdirSync,
   chmodSync,
   renameSync,
+  unlinkSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { textResult } from '../response/index.js';
+import { readEnvVar } from '../config/index.js';
 
 // ===========================================================================
 // 1. In-memory SessionRegistry + MCP tools
@@ -507,7 +516,172 @@ export class SessionStore<T extends Record<string, unknown>> {
 }
 
 // ===========================================================================
-// 3. TokenManager — bearer lifecycle (skew, proactive + reactive, race-safe)
+// 3. StatePersistence — surviving a process restart
+// ===========================================================================
+
+/**
+ * A place to keep a credential between processes.
+ *
+ * Why this exists: {@link TokenManager} and {@link CookieSessionManager} own a
+ * credential's lifecycle *within* a process, and every fleet server used to
+ * throw that credential away on exit — so a cold start re-ran the full login
+ * even when a valid refresh token had been minted seconds earlier. On
+ * `mcp-host` that is the normal case, not the exception: children idle out
+ * after ten minutes and the machine scales to zero behind them. Several
+ * services rate-limit the login endpoint, and at least one (per the kiaaccess
+ * notes) escalates repeated attempts to a captcha that breaks server-side auth
+ * for the account permanently. Re-login is not always a free retry.
+ *
+ * Deliberately opt-in: a manager given no `persistence` behaves exactly as it
+ * did before, and no credential reaches a disk because a package was upgraded.
+ *
+ * Both methods may be sync or async. The fleet's own implementation
+ * ({@link createFileStatePersistence}) is sync — it writes one small file — but
+ * the async signature leaves room for a backend that has to go over a wire.
+ *
+ * **Implementations must not throw.** The managers guard every call anyway, but
+ * the contract is that a persistence failure degrades to in-memory operation:
+ * a read-only or full disk must cost a re-login, never a failed request.
+ */
+export interface StatePersistence<T> {
+  /** Read the stored state; `null` when absent, unparseable, or unusable. */
+  load(): T | null | Promise<T | null>;
+  /** Write state, replacing whatever was there. */
+  save(state: T): void | Promise<void>;
+  /**
+   * Discard the stored state. Optional, but a manager that detects its stored
+   * credential is no good calls this — without it, an expired session is read
+   * straight back off disk and the expiry loops.
+   */
+  clear?(): void | Promise<void>;
+}
+
+/** Options for {@link createFileStatePersistence}. */
+export interface FileStatePersistenceOptions<T> {
+  /** Absolute path to the JSON file. Parent directories are created as needed. */
+  filePath: string;
+  /**
+   * Narrow the parsed JSON to `T`, returning `null` to reject it. Without this
+   * any well-formed JSON is handed back and the caller must check the shape —
+   * the managers do, but a custom consumer should pass a guard.
+   */
+  validate?: (raw: unknown) => T | null;
+}
+
+/**
+ * File-backed {@link StatePersistence} with the same permission hardening
+ * {@link SessionStore} applies (`0600` file, `0700` directory, both re-asserted
+ * after the write, because `mode` only applies on creation).
+ *
+ * Two differences from {@link SessionStore}, which is why this is its own
+ * implementation rather than a wrapper over it. It holds ONE record rather than
+ * a keyed collection; and it replaces the file **atomically** — written to a
+ * temp file beside it, then renamed over the target — because two children of
+ * the same registration can share a data directory, and a half-written token
+ * file that parses as valid JSON is worse than none.
+ *
+ * Nothing here throws. A load failure (absent, corrupt, rejected by `validate`)
+ * returns `null`; a save failure is swallowed and leaves the previous file
+ * intact. On `mcp-host` this belongs under {@link resolveStateDir}, which needs
+ * the registration to declare `state.dataDir: true` — the runner's
+ * unpersisted-state detector will report the omission rather than let the
+ * writes silently vanish on the next idle-stop.
+ */
+export function createFileStatePersistence<T>(
+  opts: FileStatePersistenceOptions<T>,
+): Required<StatePersistence<T>> {
+  const { filePath, validate } = opts;
+
+  return {
+    load(): T | null {
+      if (!existsSync(filePath)) return null;
+      try {
+        const raw: unknown = JSON.parse(readFileSync(filePath, 'utf8'));
+        if (validate !== undefined) return validate(raw);
+        return raw as T;
+      } catch {
+        // Corrupt or unreadable: the caller re-authenticates. Unlike
+        // SessionStore this does NOT preserve a `.corrupt` copy — the file
+        // holds one refreshable credential, not an irreplaceable capture.
+        return null;
+      }
+    },
+
+    save(state: T): void {
+      const dir = dirname(filePath);
+      // A unique temp name so two writers cannot share (and tear) one temp file.
+      const tmp = `${filePath}.tmp-${randomBytes(6).toString('hex')}`;
+      // Only a directory THIS call creates gets tightened. `resolveStateDir()`
+      // without a `subdir` is `$HOME`, and chmodding a user's home directory to
+      // 0700 is not an acceptable side effect of writing one token file.
+      const dirExisted = existsSync(dir);
+      try {
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        // mkdir's mode is subject to the umask, so re-assert it on what we made.
+        if (!dirExisted) chmodSync(dir, 0o700);
+        writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
+        // Tighten BEFORE the rename: the window where fresh secrets sit in a
+        // possibly-loose file should not exist at all.
+        chmodSync(tmp, 0o600);
+        renameSync(tmp, filePath);
+        chmodSync(filePath, 0o600);
+      } catch {
+        // Degrade to in-memory. Best-effort cleanup of the temp file so a
+        // failed write does not litter the data dir.
+        try {
+          if (existsSync(tmp)) unlinkSync(tmp);
+        } catch {
+          /* best-effort */
+        }
+      }
+    },
+
+    clear(): void {
+      try {
+        if (existsSync(filePath)) unlinkSync(filePath);
+      } catch {
+        /* best-effort */
+      }
+    },
+  };
+}
+
+/** Options for {@link resolveStateDir}. */
+export interface ResolveStateDirOptions {
+  /** Environment to read (defaults to `process.env`) — injectable for tests. */
+  env?: Record<string, string | undefined>;
+  /** Optional service-scoped subdirectory to join onto the base. */
+  subdir?: string;
+}
+
+/**
+ * Where a server should keep state that must survive a restart.
+ *
+ * `MCP_DATA_DIR` first — that is the variable `mcp-host` injects for a
+ * registration with `state.dataDir: true`, pointing at a path on the Fly volume
+ * keyed by the registration itself (a slot `$HOME` is handed out by arrival
+ * order and moves between boots, which is why the data dir is the fix and a
+ * bigger rootfs is not). Then `HOME`, then the OS home directory.
+ *
+ * Blank and unexpanded-placeholder values (`${MCP_DATA_DIR}`, the shape a host
+ * config leaves behind when a variable was never substituted) are ignored
+ * rather than used as a literal directory name — the same hardening
+ * {@link readEnvVar} applies.
+ */
+export function resolveStateDir(opts: ResolveStateDirOptions = {}): string {
+  // Delegated rather than re-implemented: readEnvVar is the fleet's one place
+  // that suppresses blank, `'null'`, `'undefined'` AND `${...}` placeholders.
+  // The sentinels matter as much as the placeholders here — `MCP_DATA_DIR=null`
+  // is a RELATIVE `./null` directory, so the credential would be written under
+  // the process cwd and silently stop surviving restarts.
+  const env = opts.env;
+  const base =
+    readEnvVar('MCP_DATA_DIR', { env }) ?? readEnvVar('HOME', { env }) ?? homedir();
+  return opts.subdir !== undefined ? join(base, opts.subdir) : base;
+}
+
+// ===========================================================================
+// 4. TokenManager — bearer lifecycle (skew, proactive + reactive, race-safe)
 // ===========================================================================
 
 /** Refresh proactively this many ms before the access token expires. */
@@ -532,8 +706,21 @@ export interface RefreshedTokens {
 
 /** Options for {@link TokenManager}. */
 export interface TokenManagerOptions {
-  /** Initial tokens (typically from env or a one-shot bootstrap). */
-  initial: BearerTokens;
+  /**
+   * The starting tokens — either the tokens themselves, or a **bootstrap
+   * function** that mints them (typically a full login).
+   *
+   * Pass the function form to get the persistence benefit: it is invoked only
+   * when {@link TokenManagerOptions.persistence} has nothing usable, so a
+   * restart that finds a stored token never logs in at all, and one that finds
+   * an expired token with a refresh token spends a refresh instead of a login.
+   * It is single-flighted like every other credential operation here, so a
+   * burst of first calls hits a rate-limited login endpoint exactly once.
+   *
+   * The eager object form is unchanged: the caller already paid for the login,
+   * so persistence is not consulted and the tokens are used as given.
+   */
+  initial: BearerTokens | (() => Promise<BearerTokens>);
   /**
    * Exchange the current refresh token for fresh tokens. Called at most once
    * per concurrent burst (the in-flight promise is shared).
@@ -544,38 +731,148 @@ export interface TokenManagerOptions {
    * refresh). Defaults to {@link TOKEN_REFRESH_SKEW_MS} (5 minutes).
    */
   skewMs?: number;
+  /**
+   * Keep tokens across process restarts. Read once on the bootstrap path
+   * (function-form `initial` only), written after every successful bootstrap
+   * and refresh, including rotation. Omit for the previous in-memory-only
+   * behaviour. See {@link StatePersistence}.
+   */
+  persistence?: StatePersistence<BearerTokens>;
+  /** Injectable clock (defaults to `Date.now`) — for tests. */
+  now?: () => number;
+}
+
+/** Whether a parsed record has the shape of {@link BearerTokens}. */
+function isBearerTokens(raw: unknown): raw is BearerTokens {
+  if (raw === null || typeof raw !== 'object') return false;
+  const t = raw as Partial<BearerTokens>;
+  if (typeof t.accessToken !== 'string' || t.accessToken === '') return false;
+  if (typeof t.expiresAt !== 'number' || !Number.isFinite(t.expiresAt)) return false;
+  return t.refreshToken === undefined || typeof t.refreshToken === 'string';
 }
 
 /**
  * Manages a bearer access token's lifecycle:
  *
+ * - **Lazy bootstrap:** with a function-form {@link TokenManagerOptions.initial}
+ *   the login runs on first use, and only if {@link TokenManagerOptions.persistence}
+ *   has no usable token — the difference between a cold start costing a login
+ *   and costing nothing.
  * - **Proactive:** {@link TokenManager.getAccessToken} refreshes when the token
  *   is within `skewMs` (default 5 min) of expiry, returning a still-valid token.
  * - **Reactive:** {@link TokenManager.withAuth} runs a request, and on a `401`
  *   refreshes once and replays exactly once (no infinite loop).
- * - **Race-safe:** concurrent refreshes coalesce onto a single in-flight promise
- *   (semaphore), so a burst of callers triggers exactly ONE token exchange. The
- *   in-flight promise is cleared on settle so a later refresh can run again.
+ * - **Race-safe:** concurrent refreshes (and concurrent bootstraps) coalesce
+ *   onto a single in-flight promise, so a burst of callers triggers exactly ONE
+ *   exchange. The in-flight promise is cleared on settle so a later attempt can
+ *   run again — a rejected bootstrap never sticks.
+ * - **Recoverable:** when a refresh fails and a bootstrap function is available,
+ *   the stored credential is discarded and the login re-runs. A refresh token
+ *   revoked between two runs of the process must not brick the server.
  */
 export class TokenManager {
-  private accessToken: string;
-  private refreshToken: string | undefined;
-  private expiresAt: number;
+  private tokens: BearerTokens | undefined;
+  private readonly bootstrapFn: (() => Promise<BearerTokens>) | undefined;
   private readonly refreshFn: (refreshToken: string) => Promise<RefreshedTokens>;
   private readonly skewMs: number;
+  private readonly persistence: StatePersistence<BearerTokens> | undefined;
+  private readonly now: () => number;
   private inFlight: Promise<void> | undefined;
+  private bootstrapInFlight: Promise<BearerTokens> | undefined;
+  /**
+   * Persistence is consulted at most once per process. Without this the
+   * revoked-token recovery below re-reads the SAME rejected record — `clear()`
+   * is optional on {@link StatePersistence} and its failures are swallowed, so
+   * recovery must not depend on it. After the first read the in-memory tokens
+   * (or their deliberate absence) are the truth.
+   */
+  private persistenceRead = false;
 
   constructor(opts: TokenManagerOptions) {
-    this.accessToken = opts.initial.accessToken;
-    this.refreshToken = opts.initial.refreshToken;
-    this.expiresAt = opts.initial.expiresAt;
+    if (typeof opts.initial === 'function') {
+      this.bootstrapFn = opts.initial;
+    } else {
+      this.tokens = { ...opts.initial };
+    }
     this.refreshFn = opts.refresh;
     this.skewMs = opts.skewMs ?? TOKEN_REFRESH_SKEW_MS;
+    this.persistence = opts.persistence;
+    this.now = opts.now ?? Date.now;
   }
 
   /** Whether the token is within the skew window of (or past) expiry. */
   private needsRefresh(): boolean {
-    return Date.now() >= this.expiresAt - this.skewMs;
+    if (this.tokens === undefined) return false;
+    return this.now() >= this.tokens.expiresAt - this.skewMs;
+  }
+
+  /**
+   * A stored token is worth using when it is still valid, OR when it carries a
+   * refresh token — an expired-but-refreshable token still saves the login,
+   * which is the expensive half.
+   */
+  private isUsable(t: BearerTokens): boolean {
+    return this.now() < t.expiresAt - this.skewMs || t.refreshToken !== undefined;
+  }
+
+  /** Read persisted tokens, guarding shape and usability. Never throws. */
+  private async loadPersisted(): Promise<BearerTokens | null> {
+    if (this.persistence === undefined || this.persistenceRead) return null;
+    this.persistenceRead = true;
+    try {
+      const raw = await this.persistence.load();
+      if (!isBearerTokens(raw) || !this.isUsable(raw)) return null;
+      return raw;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Write tokens. Never throws — a failed write costs a login, not a request. */
+  private async persist(t: BearerTokens): Promise<void> {
+    if (this.persistence === undefined) return;
+    try {
+      await this.persistence.save(t);
+    } catch {
+      /* in-memory tokens are still valid for this process */
+    }
+  }
+
+  /** Discard persisted tokens (a refresh they could not satisfy). Never throws. */
+  private async clearPersisted(): Promise<void> {
+    if (this.persistence?.clear === undefined) return;
+    try {
+      await this.persistence.clear();
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /** The current tokens, single-flighting the bootstrap if there are none. */
+  private ensureTokens(): Promise<BearerTokens> {
+    if (this.tokens !== undefined) return Promise.resolve(this.tokens);
+    if (this.bootstrapInFlight === undefined) {
+      this.bootstrapInFlight = this.runBootstrap().finally(() => {
+        this.bootstrapInFlight = undefined;
+      });
+    }
+    return this.bootstrapInFlight;
+  }
+
+  /** One bootstrap attempt: persisted tokens if usable, else the login. */
+  private async runBootstrap(): Promise<BearerTokens> {
+    const stored = await this.loadPersisted();
+    if (stored !== null) {
+      this.tokens = stored;
+      return stored;
+    }
+    if (this.bootstrapFn === undefined) {
+      throw new Error('TokenManager: no tokens and no bootstrap function to mint them.');
+    }
+    const fresh = await this.bootstrapFn();
+    this.tokens = fresh;
+    await this.persist(fresh);
+    return fresh;
   }
 
   /**
@@ -583,36 +880,65 @@ export class TokenManager {
    * cleared on settle (success or failure) so a subsequent refresh can proceed.
    */
   refreshNow(): Promise<void> {
-    if (!this.inFlight) {
-      const rt = this.refreshToken;
-      if (rt === undefined) {
-        return Promise.reject(
-          new Error('TokenManager: cannot refresh — no refresh token is available.'),
-        );
-      }
-      this.inFlight = (async () => {
-        const tok = await this.refreshFn(rt);
-        this.accessToken = tok.accessToken;
-        if (tok.refreshToken !== undefined && tok.refreshToken !== '') {
-          this.refreshToken = tok.refreshToken;
-        }
-        this.expiresAt = tok.expiresAt;
-      })().finally(() => {
+    if (this.inFlight === undefined) {
+      this.inFlight = this.runRefresh().finally(() => {
         this.inFlight = undefined;
       });
     }
     return this.inFlight;
   }
 
-  /** Get a valid access token, refreshing proactively inside the skew window. */
-  async getAccessToken(): Promise<string> {
-    if (this.needsRefresh()) await this.refreshNow();
-    return this.accessToken;
+  /** One refresh attempt against the current refresh token. */
+  private async runRefresh(): Promise<void> {
+    const current = this.tokens ?? (await this.ensureTokens());
+    const rt = current.refreshToken;
+    if (rt === undefined) {
+      throw new Error('TokenManager: cannot refresh — no refresh token is available.');
+    }
+    const tok = await this.refreshFn(rt);
+    this.tokens = {
+      accessToken: tok.accessToken,
+      // Rotation is optional: keep the current refresh token when none comes back.
+      refreshToken:
+        tok.refreshToken !== undefined && tok.refreshToken !== '' ? tok.refreshToken : rt,
+      expiresAt: tok.expiresAt,
+    };
+    await this.persist(this.tokens);
   }
 
-  /** Current absolute expiry (epoch ms). */
+  /**
+   * Recover from a refresh the current credential could not satisfy — commonly
+   * a refresh token restored from a previous process and revoked since. Without
+   * a bootstrap to fall back on this is terminal; with one, re-minting beats
+   * staying broken forever. Shared so the two entry points cannot diverge.
+   */
+  private async reBootstrap(err: unknown): Promise<BearerTokens> {
+    if (this.bootstrapFn === undefined) throw err;
+    this.tokens = undefined;
+    await this.clearPersisted();
+    return this.ensureTokens();
+  }
+
+  /** Get a valid access token, refreshing proactively inside the skew window. */
+  async getAccessToken(): Promise<string> {
+    // Not `await this.ensureTokens()` unconditionally: with tokens already in
+    // hand that await would defer the refresh below by a microtask, and callers
+    // rely on a concurrent burst reaching the single-flight in the SAME tick.
+    let tokens = this.tokens ?? (await this.ensureTokens());
+    if (this.needsRefresh()) {
+      try {
+        await this.refreshNow();
+      } catch (err) {
+        return (await this.reBootstrap(err)).accessToken;
+      }
+      tokens = this.tokens ?? tokens;
+    }
+    return tokens.accessToken;
+  }
+
+  /** Current absolute expiry (epoch ms), or `0` before the first bootstrap. */
   getExpiresAt(): number {
-    return this.expiresAt;
+    return this.tokens?.expiresAt ?? 0;
   }
 
   /**
@@ -631,15 +957,23 @@ export class TokenManager {
     const usedToken = await this.getAccessToken();
     let res = await call(usedToken);
     if (res.status === 401) {
-      if (this.accessToken === usedToken) await this.refreshNow();
-      res = await call(this.accessToken);
+      if (this.tokens?.accessToken === usedToken) {
+        // Same revoked-credential recovery getAccessToken has: a 401 replay must
+        // not be the one entry point that throws where the other re-mints.
+        try {
+          await this.refreshNow();
+        } catch (err) {
+          await this.reBootstrap(err);
+        }
+      }
+      res = await call(this.tokens?.accessToken ?? usedToken);
     }
     return res;
   }
 }
 
 // ===========================================================================
-// 4. CookieSessionManager — cookie-session lifecycle (single-flight, replay)
+// 5. CookieSessionManager — cookie-session lifecycle (single-flight, replay)
 // ===========================================================================
 
 /**
@@ -717,6 +1051,35 @@ export interface CookieSessionManagerOptions<S, R = Response> {
    * login failure to the caller instead of the stale response.
    */
   onReplayLoginError?: (err: unknown) => void;
+  /**
+   * Keep the session across process restarts. Read ONCE, on the first login
+   * path, and written after every successful login and {@link
+   * CookieSessionManager.seed}. {@link CookieSessionManager.invalidate} clears
+   * it — without that, a session detected as expired would be read straight
+   * back off disk and the expiry would loop.
+   *
+   * The stored envelope carries the login time alongside the session so
+   * {@link CookieSessionManagerOptions.maxAgeMs} keeps counting from the
+   * original login rather than restarting at the restore. Omit for the previous
+   * in-memory-only behaviour. See {@link StatePersistence}.
+   */
+  persistence?: StatePersistence<PersistedCookieSession<S>>;
+}
+
+/** What {@link CookieSessionManagerOptions.persistence} stores: a session plus its login time. */
+export interface PersistedCookieSession<S> {
+  session: S;
+  /** Epoch ms the session was minted or seeded — the `maxAgeMs` clock. */
+  sessionAt: number;
+}
+
+/** Whether a parsed record has the shape of {@link PersistedCookieSession}. */
+function isPersistedCookieSession<S>(raw: unknown): raw is PersistedCookieSession<S> {
+  if (raw === null || typeof raw !== 'object') return false;
+  const r = raw as Partial<PersistedCookieSession<S>>;
+  if (typeof r.sessionAt !== 'number' || !Number.isFinite(r.sessionAt)) return false;
+  // Field-by-field, like isBearerTokens: a primitive is not a session shape.
+  return typeof r.session === 'object' && r.session !== null;
 }
 
 /**
@@ -771,6 +1134,16 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
   private readonly maxAgeMs: number | undefined;
   private readonly now: () => number;
   private readonly onReplayLoginErrorFn: ((err: unknown) => void) | undefined;
+  private readonly persistence: StatePersistence<PersistedCookieSession<S>> | undefined;
+  /** Persistence is consulted once per process; a miss must not be re-read. */
+  private persistenceRead = false;
+  /**
+   * Serializes persistence writes. `seed()` and `invalidate()` are synchronous
+   * by contract and so fire-and-forget their save/clear; with an async backend a
+   * slow save could otherwise land AFTER the clear that followed it and leave an
+   * invalidated session on disk.
+   */
+  private persistChain: Promise<void> = Promise.resolve();
 
   constructor(opts: CookieSessionManagerOptions<S, R>) {
     this.loginFn = opts.login;
@@ -781,6 +1154,7 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
     this.maxAgeMs = opts.maxAgeMs;
     this.now = opts.now ?? Date.now;
     this.onReplayLoginErrorFn = opts.onReplayLoginError;
+    this.persistence = opts.persistence;
   }
 
   /** The current session, or `undefined` before the first successful login. */
@@ -831,6 +1205,9 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
     this.session = session;
     this.sessionAt = this.now();
     this.inFlight = undefined; // detach any in-flight login (it won't re-stamp)
+    // Fire-and-forget: seed() is synchronous by contract, and a persistence
+    // failure must not change what the caller just installed.
+    void this.persist(session, this.sessionAt);
   }
 
   /**
@@ -846,11 +1223,27 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
     const holder: { p?: Promise<S> } = {};
     holder.p = (async () => {
       try {
+        // A restored session is the whole point: skip the login entirely.
+        // Guarded rather than awaited unconditionally — with no persistence the
+        // await would defer loginFn() past the tick a concurrent burst needs.
+        const restored =
+          this.persistence !== undefined && !this.persistenceRead
+            ? await this.restoreFromPersistence()
+            : null;
+        if (restored !== null) {
+          if (this.inFlight === holder.p) {
+            this.session = restored.session;
+            this.sessionAt = restored.sessionAt;
+          }
+          return restored.session;
+        }
         const session = await this.loginFn();
+        const at = this.now();
         if (this.inFlight === holder.p) {
           this.session = session;
-          this.sessionAt = this.now();
+          this.sessionAt = at;
         }
+        await this.persist(session, at);
         return session;
       } catch (err) {
         if (this.isPermanentErrorFn(err)) this.permanentError = err;
@@ -871,6 +1264,60 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
   invalidate(): void {
     this.session = undefined;
     this.inFlight = undefined;
+    // Fire-and-forget, and unconditional: the stored copy is the same session
+    // that just proved unusable. Leaving it would have the next ensure() read
+    // it back and loop on the very expiry that caused this call.
+    void this.clearPersisted();
+  }
+
+  /**
+   * The persisted session, if there is one worth using. Read at most once per
+   * process — after that the in-memory session (or its absence) is the truth,
+   * so an invalidate() cannot be undone by a stale file.
+   */
+  private async restoreFromPersistence(): Promise<PersistedCookieSession<S> | null> {
+    if (this.persistence === undefined || this.persistenceRead) return null;
+    this.persistenceRead = true;
+    try {
+      const raw = await this.persistence.load();
+      if (!isPersistedCookieSession<S>(raw)) return null;
+      // Honour the proactive TTL against the ORIGINAL login time.
+      if (this.maxAgeMs !== undefined && this.now() - raw.sessionAt >= this.maxAgeMs) return null;
+      return raw;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Append a persistence op to the chain, preserving call order. Never throws. */
+  private enqueuePersist(op: () => Promise<void>): Promise<void> {
+    const next = this.persistChain.then(op);
+    this.persistChain = next.catch(() => undefined);
+    return next;
+  }
+
+  /** Write the session. Never throws — a failed write costs a login, not a request. */
+  private persist(session: S, sessionAt: number): Promise<void> {
+    return this.enqueuePersist(async () => {
+      if (this.persistence === undefined) return;
+      try {
+        await this.persistence.save({ session, sessionAt });
+      } catch {
+        /* the in-memory session is still usable for this process */
+      }
+    });
+  }
+
+  /** Discard the persisted session. Never throws. */
+  private clearPersisted(): Promise<void> {
+    return this.enqueuePersist(async () => {
+      if (this.persistence?.clear === undefined) return;
+      try {
+        await this.persistence.clear();
+      } catch {
+        /* best-effort */
+      }
+    });
   }
 
   /**
