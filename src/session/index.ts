@@ -47,7 +47,7 @@ import { homedir } from 'node:os';
 import { randomBytes, createHmac } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { textResult } from '../response/index.js';
-import { readEnvVar, expandPath } from '../config/index.js';
+import { readEnvVar } from '../config/index.js';
 import { ApiError, RateLimitedError, RequestTimeoutError } from '../http/index.js';
 
 // ===========================================================================
@@ -563,9 +563,9 @@ export interface StatePersistence<T> {
 /**
  * The on-disk envelope. Written for every save so a record can carry metadata
  * (currently the credential binding) without polluting `T`'s own shape. A file
- * written before the envelope existed is a bare `T`, and {@link readEnvelope}
- * still accepts one — that keeps vibo-mcp's "a stale pre-migration file degrades
- * gracefully" property and the files skylight-mcp already wrote.
+ * written before the envelope existed is a bare `T`, and `load` still accepts
+ * one — that keeps vibo-mcp's "a stale pre-migration file degrades gracefully"
+ * property and the files skylight-mcp already wrote.
  */
 interface StateEnvelope<T> {
   v: 1;
@@ -625,9 +625,11 @@ export interface FileStatePersistenceOptions<T> {
   /** Absolute path to the JSON file. Parent directories are created as needed. */
   filePath: string;
   /**
-   * Bind the record to the credential that minted it. Pass the credential whose
-   * change should invalidate the cache — the env-supplied refresh token, the
-   * password, an account id. Only a SHA-256 digest is written, never the value.
+   * Bind the record to the credential that minted it. Pass the value whose change
+   * should invalidate the cache — an env-supplied refresh token, an account id.
+   * Only a salted HMAC digest is written, never the value, and the salt is fresh
+   * per write. It is a change-detector rather than a password store, so prefer a
+   * non-secret discriminator where one exists.
    *
    * Without this a rotated credential is silently shadowed by a cache minted
    * from the old one: the operator re-bootstraps, and the server keeps using
@@ -898,6 +900,11 @@ export interface ResolveStateDirOptions {
  * rather than used as a literal directory name — the same hardening
  * {@link readEnvVar} applies.
  */
+/** The home directory this resolver should use: injected `HOME`, else the OS one. */
+function homeOf(env: Record<string, string | undefined> | undefined): string {
+  return readEnvVar('HOME', { env }) ?? homedir();
+}
+
 export function resolveStateDir(opts: ResolveStateDirOptions = {}): string {
   // Delegated rather than re-implemented: readEnvVar is the fleet's one place
   // that suppresses blank, `'null'`, `'undefined'` AND `${...}` placeholders.
@@ -935,9 +942,14 @@ export interface ResolveStateFileOptions extends ResolveStateDirOptions {
 export function resolveStateFile(opts: ResolveStateFileOptions): string {
   const override =
     opts.envVar !== undefined ? readEnvVar(opts.envVar, { env: opts.env }) : undefined;
-  // expandPath, so a `~/...` override is a home-relative path rather than a
-  // literal `./~` directory (the same treatment `fs/output.ts` gives its input).
-  if (override !== undefined) return expandPath(override);
+  if (override !== undefined) {
+    // `~` expanded against the SAME home the fallback branch uses. `expandPath`
+    // resolves against os.homedir() and would ignore an injected `opts.env.HOME`,
+    // making the two branches disagree in exactly the setups tests rely on.
+    if (override === '~') return homeOf(opts.env);
+    if (override.startsWith('~/')) return join(homeOf(opts.env), override.slice(2));
+    return override;
+  }
   const dirOpts: ResolveStateDirOptions = { env: opts.env };
   if (opts.subdir !== undefined) dirOpts.subdir = opts.subdir;
   return join(resolveStateDir(dirOpts), opts.fileName);
@@ -1194,7 +1206,14 @@ export class TokenManager {
     }
     const fresh = await this.bootstrapFn();
     this.tokens = fresh;
-    await this.persist(fresh);
+    // Unwrapped here: there is no recovery to protect on the bootstrap path (the
+    // credential was just minted), and the caller should see the hook's own
+    // error — repos throw an McpToolError whose `hint` a wrapper would strip.
+    try {
+      await this.persist(fresh);
+    } catch (err) {
+      throw err instanceof StatePersistenceError ? err.cause : err;
+    }
     return fresh;
   }
 
@@ -1396,11 +1415,15 @@ export interface CookieSessionManagerOptions<S, R = Response> {
   persistence?: StatePersistence<PersistedCookieSession<S>>;
   /**
    * Called when a {@link CookieSessionManagerOptions.persistence} write fails.
-   * Swallowed by default — the in-memory session is still usable. Throwing from
-   * the hook does NOT propagate: every write goes through the ordering chain,
-   * whose tail is `.catch(() => undefined)`, and `seed()`/`invalidate()` do not
-   * await it at all. Treat this as a reporting hook. (`TokenManager`'s version
-   * DOES surface, because its writes are awaited on the request path.)
+   * Swallowed by default — the in-memory session is still usable.
+   *
+   * Where a throwing hook goes depends on which write failed. The login path
+   * awaits its write, so the error reaches the `ensure()` caller — but it is
+   * deliberately NOT offered to {@link CookieSessionManagerOptions.isPermanentError}
+   * first, because caching a disk error as a permanent config failure would brick
+   * every later `ensure()`. The `seed()` and `invalidate()` writes are
+   * fire-and-forget onto the ordering chain, whose tail swallows, so a throw
+   * there is dropped.
    */
   onPersistError?: (err: unknown) => void;
 }
@@ -1590,6 +1613,11 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
         await this.persist(session, at);
         return session;
       } catch (err) {
+        // A failed WRITE is not a failed login: routing it through
+        // isPermanentError can cache a transient disk error as permanent, and
+        // then every ensure() after the next expiry throws forever without ever
+        // retrying. The session itself was minted fine.
+        if (err instanceof StatePersistenceError) throw err.cause;
         if (this.isPermanentErrorFn(err)) this.permanentError = err;
         throw err;
       } finally {
@@ -1653,8 +1681,15 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
       try {
         await this.persistence.save({ session, sessionAt });
       } catch (err) {
-        // The in-memory session is still usable for this process.
-        this.onPersistErrorFn?.(err);
+        // The in-memory session is still usable for this process. A hook that
+        // rethrows is wrapped so runLogin can tell a disk failure from a login
+        // failure — see the catch there.
+        if (this.onPersistErrorFn === undefined) return;
+        try {
+          this.onPersistErrorFn(err);
+        } catch (hookErr) {
+          throw new StatePersistenceError(hookErr);
+        }
       }
     });
   }

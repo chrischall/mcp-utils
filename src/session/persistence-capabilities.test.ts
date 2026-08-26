@@ -432,7 +432,102 @@ describe('resolveStateFile path expansion', () => {
       fileName: 't.json',
       env: { X_FILE: '~/state/t.json', HOME: '/home/u' },
     });
-    expect(got.startsWith('~')).toBe(false);
-    expect(got.endsWith('/state/t.json')).toBe(true);
+    // Asserted exactly: `endsWith` passed whether or not env.HOME was honoured,
+    // which is how the os.homedir() fallback went unnoticed.
+    expect(got).toBe('/home/u/state/t.json');
+  });
+});
+
+// ===========================================================================
+// Review round 2 on #142 — the same class, one level down
+// ===========================================================================
+
+describe('CookieSessionManager: a failed write is not a permanent config error', () => {
+  it('does not brick the manager after an ordinary expiry', async () => {
+    let logins = 0;
+    let writesFail = true;
+    const mgr = new CookieSessionManager<{ cookieHeader: string }>({
+      login: async () => {
+        logins += 1;
+        return { cookieHeader: `s${logins}` };
+      },
+      persistence: {
+        load: () => null,
+        // Transient: the disk recovers (space freed, mount returns). A cached
+        // "permanent" verdict would never find that out.
+        save: () => {
+          if (writesFail) throw new Error('EROFS');
+        },
+      },
+      onPersistError: (err) => {
+        throw new Error(`disk: ${(err as Error).message}`);
+      },
+      // A repo that caches broadly. The point is that a DISK error must never
+      // reach this predicate at all — it says nothing about the credentials.
+      isPermanentError: () => true,
+    });
+
+    await expect(mgr.ensure()).rejects.toThrow(/disk/);
+    // The first ensure leaves a session installed, so the damage only shows once
+    // something drops it — i.e. the next detected expiry, which is routine.
+    mgr.invalidate();
+    writesFail = false;
+    const again = await mgr.ensure();
+    expect(again.cookieHeader).toBe('s2');
+    expect(logins).toBe(2); // it RETRIED — a cached permanent error never would
+  });
+
+  it('still caches a genuine permanent config error', async () => {
+    // The mechanism this narrows must keep working for the case it was built for.
+    let logins = 0;
+    const mgr = new CookieSessionManager<{ cookieHeader: string }>({
+      login: async () => {
+        logins += 1;
+        throw new Error('NO_ENV_CONFIG');
+      },
+      isPermanentError: (err) => (err as Error).message.includes('NO_ENV_CONFIG'),
+    });
+    await expect(mgr.ensure()).rejects.toThrow(/NO_ENV_CONFIG/);
+    await expect(mgr.ensure()).rejects.toThrow(/NO_ENV_CONFIG/);
+    expect(logins).toBe(1); // cached, not retried
+  });
+});
+
+describe('the hook error reaches the caller intact', () => {
+  it('unwraps on the bootstrap path, not just the refresh path', async () => {
+    // Repos throw an McpToolError with a `hint` from the hook; a wrapper around
+    // it would strip the hint at the MCP boundary.
+    class Hinted extends Error {
+      readonly hint = 'fix the data dir and re-run the bootstrap';
+    }
+    const mgr = new TokenManager({
+      initial: async () => ({ accessToken: 'fresh', expiresAt: later() }),
+      refresh: async () => {
+        throw new Error('unused');
+      },
+      persistence: {
+        load: () => null,
+        save: () => {
+          throw new Error('EROFS');
+        },
+      },
+      onPersistError: () => {
+        throw new Hinted('could not persist');
+      },
+    });
+    await expect(mgr.getAccessToken()).rejects.toBeInstanceOf(Hinted);
+  });
+});
+
+describe('resolveStateFile ~ expansion honours the injected env', () => {
+  it('resolves ~ against opts.env.HOME, like the fallback branch does', () => {
+    expect(
+      resolveStateFile({
+        envVar: 'X_FILE',
+        subdir: '.x',
+        fileName: 't.json',
+        env: { X_FILE: '~/state/t.json', HOME: '/home/injected' },
+      }),
+    ).toBe('/home/injected/state/t.json');
   });
 });
