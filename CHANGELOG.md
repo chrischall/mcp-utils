@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.16.0](https://github.com/chrischall/mcp-utils/compare/v0.15.0...v0.16.0) (2026-08-26)
+
+
+### Features
+
+* **session:** persist tokens and cookie sessions across process restarts ([#137](https://github.com/chrischall/mcp-utils/issues/137)) ([c873afa](https://github.com/chrischall/mcp-utils/commit/c873afa34ec650433fd8bb16cf5ea7e9888ca781))
+
+
+### Bug Fixes
+
+* **session:** don't destroy a valid refresh token on a transient failure ([#139](https://github.com/chrischall/mcp-utils/issues/139)) ([6b49fac](https://github.com/chrischall/mcp-utils/commit/6b49fac71f4ad3ffc3f6da8fa699740ad0bd03d2)), closes [#138](https://github.com/chrischall/mcp-utils/issues/138)
+
+
+### Documentation
+
+* **mcp-fleet-builder:** correct two egress rules the rollout disproved ([#132](https://github.com/chrischall/mcp-utils/issues/132)) ([30439a8](https://github.com/chrischall/mcp-utils/commit/30439a830d00921a04d305fa2a49061867b238f6))
+* **mcp-fleet-builder:** don't fix a doc inaccuracy by inverting it ([#134](https://github.com/chrischall/mcp-utils/issues/134)) ([141b59a](https://github.com/chrischall/mcp-utils/commit/141b59ae186d70eb585c8e9b101e4f7c9e12d493))
+* **mcp-fleet-builder:** how to derive mint.yaml egress, and package shape ([#131](https://github.com/chrischall/mcp-utils/issues/131)) ([179a96a](https://github.com/chrischall/mcp-utils/commit/179a96ae26077bd60074856cd3425c17d005aaa1))
+* **mcp-fleet-builder:** mint.yaml must ship in npm files; receiver-safe fetch ([#128](https://github.com/chrischall/mcp-utils/issues/128)) ([5a7d650](https://github.com/chrischall/mcp-utils/commit/5a7d650dd7098b1c8bf5af768e2a32765c95b9a2))
+* **mcp-fleet-builder:** nit patterns from the mint.yaml follow-up sweep ([#133](https://github.com/chrischall/mcp-utils/issues/133)) ([3bfbf5d](https://github.com/chrischall/mcp-utils/commit/3bfbf5d18d4655c7cd44c289e70cee65d062d153))
+* **mcp-fleet-builder:** npm test is not the CI command everywhere ([#135](https://github.com/chrischall/mcp-utils/issues/135)) ([96ca600](https://github.com/chrischall/mcp-utils/commit/96ca600c81b2b56f3c22e2bfa6b668282b92ac6a))
+* **mcp-fleet-builder:** verify against origin/main, not a local clone ([#130](https://github.com/chrischall/mcp-utils/issues/130)) ([678434d](https://github.com/chrischall/mcp-utils/commit/678434d2ad541584bca89502c25253dc88246f6f))
+
 ## [0.15.0](https://github.com/chrischall/mcp-utils/compare/v0.14.2...v0.15.0) (2026-08-16)
 
 
