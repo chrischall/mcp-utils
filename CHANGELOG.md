@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/chrischall/mcp-utils/compare/v0.16.0...v0.17.0) (2026-08-26)
+
+
+### Features
+
+* **session:** fatal writes, credential binding, keyed records, and a path override ([#142](https://github.com/chrischall/mcp-utils/issues/142)) ([f5673cf](https://github.com/chrischall/mcp-utils/commit/f5673cf01a598be6e777483e9b11193bb6080db3))
+
 ## [0.16.0](https://github.com/chrischall/mcp-utils/compare/v0.15.0...v0.16.0) (2026-08-26)
 
 
