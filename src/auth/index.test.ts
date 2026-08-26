@@ -5,6 +5,7 @@ import {
   sessionLoginFlow,
   createOAuth2Refresher,
 } from './index.js';
+import { SessionNotAuthenticatedError } from '../errors/index.js';
 
 // ---------------------------------------------------------------------------
 // createAuthResolver — three-path (env → fetchproxy → helpful error)
@@ -558,5 +559,82 @@ describe('createOAuth2Refresher', () => {
     await expect(refresh()).rejects.toThrow(/first fails/);
     const result = await refresh();
     expect(result.accessToken).toBe('recovered');
+  });
+});
+
+/**
+ * Expiry alongside the credential.
+ *
+ * Every hand-rolled resolver this module was written to absorb — ofw, resy,
+ * evite, vibo, artsonia, signupgenius, infinitecampus, canvas — carries an
+ * expiry next to the token: the browser tab stores one (OFW keeps
+ * `localStorage["tokenExpiry"]`), and the 401-replay logic is smarter for
+ * having it. The shared result types carried only `{ credential, source }`, so
+ * adopting them meant dropping that value silently. None of those eight
+ * migrated. This closes the gap rather than asking them to lose information.
+ */
+describe('resolved expiry', () => {
+  const session = { cookies: {}, localStorage: { auth: 'TOK', tokenExpiry: '2030-01-01T00:00:00.000Z' } };
+  const bootstrap = async () => session;
+
+  it('carries an expiry that parseTokens supplies', async () => {
+    const resolve = createAuthResolver({
+      envVar: 'NOPE_TOKEN',
+      bootstrap,
+      bootstrapOptions: {},
+      parseTokens: (s) => ({
+        credential: s.localStorage!['auth']!,
+        expiresAt: new Date(s.localStorage!['tokenExpiry']!),
+      }),
+      env: {},
+    });
+    const r = await resolve();
+    expect(r.credential).toBe('TOK');
+    expect(r.source).toBe('fetchproxy');
+    expect(r.expiresAt?.toISOString()).toBe('2030-01-01T00:00:00.000Z');
+  });
+
+  it('still accepts a plain string, so every existing caller is unaffected', async () => {
+    const resolve = createAuthResolver({
+      envVar: 'NOPE_TOKEN',
+      bootstrap,
+      bootstrapOptions: {},
+      parseTokens: (s) => s.localStorage!['auth'],
+      env: {},
+    });
+    const r = await resolve();
+    expect(r.credential).toBe('TOK');
+    expect(r.expiresAt).toBeUndefined();
+  });
+
+  it('treats an object with an empty credential as "not signed in", exactly like an empty string', async () => {
+    const resolve = createAuthResolver({
+      envVar: 'NOPE_TOKEN',
+      bootstrap,
+      bootstrapOptions: {},
+      parseTokens: () => ({ credential: '' }),
+      serviceName: 'Example',
+      env: {},
+    });
+    await expect(resolve()).rejects.toThrow(SessionNotAuthenticatedError);
+  });
+
+  it('reports no expiry on the env path, where there is nothing to report', async () => {
+    const resolve = createAuthResolver({
+      envVar: 'X_TOKEN',
+      bootstrap,
+      bootstrapOptions: {},
+      parseTokens: () => 'unused',
+      env: { X_TOKEN: 'FROM_ENV' },
+    });
+    const r = await resolve();
+    expect(r).toEqual({ credential: 'FROM_ENV', source: 'env' });
+  });
+
+  it('lets a resolveAuthPattern path carry an expiry through unchanged', async () => {
+    const r = await resolveAuthPattern({
+      sessionScrape: async () => ({ credential: 'C', source: 'session', expiresAt: new Date(0) }),
+    });
+    expect(r.expiresAt?.getTime()).toBe(0);
   });
 });
