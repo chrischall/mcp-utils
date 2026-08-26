@@ -309,3 +309,130 @@ describe('resolveStateFile', () => {
     );
   });
 });
+
+// ===========================================================================
+// Review round 1 on #142 — a persistence failure is not a credential failure
+// ===========================================================================
+
+describe('a failed write must never be mistaken for a revoked credential', () => {
+  it('does not clear the store or re-bootstrap when the hook rethrows', async () => {
+    const file = join(dir, 'tokens.json');
+    writeFileSync(
+      file,
+      JSON.stringify({ v: 1, state: { accessToken: 'a1', refreshToken: 'PRECIOUS', expiresAt: Date.now() - 1 } }),
+      { mode: 0o600 },
+    );
+    let cleared = 0;
+    let logins = 0;
+    const mgr = new TokenManager({
+      initial: async () => {
+        logins += 1;
+        return { accessToken: 'new', expiresAt: later() };
+      },
+      refresh: async () => ({ accessToken: 'a2', refreshToken: 'ROTATED', expiresAt: later() }),
+      persistence: {
+        load: () => JSON.parse(readFileSync(file, 'utf8')).state as BearerTokens,
+        save: () => {
+          throw new Error('EROFS');
+        },
+        clear: () => {
+          cleared += 1;
+        },
+      },
+      onPersistError: (err) => {
+        throw new Error(`cannot persist: ${(err as Error).message}`);
+      },
+    });
+
+    await expect(mgr.getAccessToken()).rejects.toThrow(/cannot persist/);
+    // The refresh SUCCEEDED and burned the old token upstream. Deleting the
+    // stored record here is the lockout this whole option exists to prevent.
+    expect(cleared).toBe(0);
+    expect(logins).toBe(0);
+    expect(readFileSync(file, 'utf8')).toContain('PRECIOUS');
+  });
+
+  it('still recovers when the refresh ITSELF is rejected', async () => {
+    // The recovery path must stay intact for the case it was built for.
+    let cleared = 0;
+    let logins = 0;
+    const mgr = new TokenManager({
+      initial: async () => {
+        logins += 1;
+        return { accessToken: 'fresh', expiresAt: later() };
+      },
+      refresh: async () => {
+        throw new Error('invalid_grant');
+      },
+      persistence: {
+        load: () => ({ accessToken: 'old', refreshToken: 'revoked', expiresAt: Date.now() - 1 }),
+        save: () => {},
+        clear: () => {
+          cleared += 1;
+        },
+      },
+      onPersistError: () => {
+        throw new Error('unused');
+      },
+    });
+    expect(await mgr.getAccessToken()).toBe('fresh');
+    expect(cleared).toBe(1);
+    expect(logins).toBe(1);
+  });
+
+  it('withAuth takes the same protection', async () => {
+    let cleared = 0;
+    const mgr = new TokenManager({
+      initial: async () => ({ accessToken: 'a1', refreshToken: 'r1', expiresAt: later() }),
+      refresh: async () => ({ accessToken: 'a2', refreshToken: 'r2', expiresAt: later() }),
+      persistence: {
+        load: () => null,
+        save: () => {
+          throw new Error('ENOSPC');
+        },
+        clear: () => {
+          cleared += 1;
+        },
+      },
+      onPersistError: (err) => {
+        throw err;
+      },
+    });
+    await expect(mgr.withAuth(async () => new Response(null, { status: 401 }))).rejects.toThrow();
+    expect(cleared).toBe(0);
+  });
+});
+
+describe('binding digest hardening', () => {
+  it('salts the digest, so the same credential does not produce a stable artifact', () => {
+    const a = join(dir, 'a.json');
+    const b = join(dir, 'b.json');
+    createFileStatePersistence<BearerTokens>({ filePath: a, boundTo: 'same-password' }).save({
+      accessToken: 'AT',
+      expiresAt: 1,
+    });
+    createFileStatePersistence<BearerTokens>({ filePath: b, boundTo: 'same-password' }).save({
+      accessToken: 'AT',
+      expiresAt: 1,
+    });
+    const da = JSON.parse(readFileSync(a, 'utf8')).boundTo;
+    const db = JSON.parse(readFileSync(b, 'utf8')).boundTo;
+    expect(da.digest).not.toBe(db.digest); // no rainbow-table target
+    // ...and each still verifies against its own salt.
+    expect(createFileStatePersistence<BearerTokens>({ filePath: a, boundTo: 'same-password' }).load()).not.toBeNull();
+    expect(createFileStatePersistence<BearerTokens>({ filePath: b, boundTo: 'same-password' }).load()).not.toBeNull();
+  });
+});
+
+describe('resolveStateFile path expansion', () => {
+  it('expands a ~ in the env override instead of creating a literal ./~', () => {
+    const got = resolveStateFile({
+      envVar: 'X_FILE',
+      subdir: '.x',
+      fileName: 't.json',
+      env: { X_FILE: '~/state/t.json', HOME: '/home/u' },
+    });
+    expect(got.startsWith('~')).toBe(false);
+    expect(got.endsWith('/state/t.json')).toBe(true);
+  });
+});

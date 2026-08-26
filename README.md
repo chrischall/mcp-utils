@@ -557,17 +557,28 @@ turned up behaviour the first cut did not have:
   one that never reaches disk locks the account out on the next start. Throw
   from the hook to make the write fatal (`freshbooks-mcp`'s case). Accordingly
   `createFileStatePersistence.save` now *reports* a failed write by throwing;
-  `load` stays total.
+  `load` stays total. A failure raised this way is wrapped in a
+  `StatePersistenceError` so it can never be mistaken for a revoked credential —
+  the refresh that produced it succeeded, so discarding the stored record would
+  destroy the only surviving copy, which is the lockout the option exists to
+  prevent.
 - **`boundTo`** — bind a record to the credential that minted it, so a rotated
   password or a re-run OAuth bootstrap discards the cache instead of being
-  shadowed by it. Only a SHA-256 digest is written, never the credential.
-  (`freshbooks-mcp` tracked this as `seededFromEnv`, storing the raw token.)
+  shadowed by it. Only a salted HMAC digest is written, never the credential, and
+  the salt is fresh per write so the same credential never leaves the same
+  artifact twice. It is a change-detector, not a password store — pass a
+  non-secret discriminator where you have one. (`freshbooks-mcp` tracked this as
+  `seededFromEnv`, storing the raw token.)
 - **`createKeyedFileStatePersistence`** — many records in one file, keyed by
   account, each key handed out as a plain `StatePersistence` a manager takes
   directly. Required for any server authenticating as more than one identity,
   and for anything serving several users from one process, where a
   single-record file would hand one user's token to the next. Keys normalize
   trim+lowercase by default, because they are account identities, not origins.
+  Writes are whole-file read-modify-write, so two processes saving different
+  keys at the same instant can drop one update — the loser re-authenticates
+  rather than reading anything wrong, which is the right trade for a credential
+  cache and would not be for a general store.
 - **`resolveStateFile({ envVar, subdir, fileName })`** — an env override for the
   path, checked through the same hardened `readEnvVar`. Every one of the four
   had one, and every one used it to keep its test suite off the developer's real

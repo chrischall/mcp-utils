@@ -44,10 +44,10 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { randomBytes, createHash } from 'node:crypto';
+import { randomBytes, createHmac } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { textResult } from '../response/index.js';
-import { readEnvVar } from '../config/index.js';
+import { readEnvVar, expandPath } from '../config/index.js';
 import { ApiError, RateLimitedError, RequestTimeoutError } from '../http/index.js';
 
 // ===========================================================================
@@ -569,18 +569,55 @@ export interface StatePersistence<T> {
  */
 interface StateEnvelope<T> {
   v: 1;
-  /** Digest of the credential that minted this record; absent when unbound. */
-  boundTo?: string;
+  /** Salted digest of the credential that minted this record; absent when unbound. */
+  boundTo?: Binding;
   state: T;
 }
 
-/** Digest a credential for {@link FileStatePersistenceOptions.boundTo}. */
-function bindingDigest(secret: string): string {
-  return createHash('sha256').update(secret).digest('hex').slice(0, 32);
+/** A binding: a random salt plus the digest of the credential under it. */
+interface Binding {
+  salt: string;
+  digest: string;
+}
+
+/**
+ * Digest a credential under a salt.
+ *
+ * Salted per record rather than a bare `sha256(secret)`: this artifact sits in
+ * the same file as the tokens, and callers are invited to pass a password, so an
+ * unsalted digest would be a stable, precomputable target. The salt is random
+ * per write, so the same credential never produces the same digest twice.
+ *
+ * This is a change-detector, not a password store — prefer passing a non-secret
+ * discriminator (an env-supplied refresh token, an account id) where one exists.
+ */
+function bindingDigest(secret: string, salt: string): string {
+  return createHmac('sha256', salt).update(secret).digest('hex').slice(0, 32);
 }
 
 function isEnvelope<T>(raw: unknown): raw is StateEnvelope<T> {
   return raw !== null && typeof raw === 'object' && (raw as StateEnvelope<T>).v === 1 && 'state' in (raw as object);
+}
+
+/**
+ * Wraps a failure that came from WRITING state, so the managers can tell it
+ * apart from a failure of the credential itself.
+ *
+ * This distinction is load-bearing, not cosmetic. `TokenManager` recovers from a
+ * rejected refresh by discarding the stored record and re-running the login —
+ * correct for a revoked token, catastrophic for a disk error, because the
+ * refresh that just SUCCEEDED already burned the old token upstream. Deleting
+ * the record at that point is precisely the lockout `onPersistError` exists to
+ * prevent, so a persistence failure is never routed into that recovery.
+ */
+export class StatePersistenceError extends Error {
+  override readonly cause: unknown;
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = 'StatePersistenceError';
+    this.cause = cause;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
 }
 
 /** Options for {@link createFileStatePersistence}. */
@@ -628,9 +665,10 @@ export interface FileStatePersistenceOptions<T> {
  * the same registration can share a data directory, and a half-written token
  * file that parses as valid JSON is worse than none.
  *
- * Nothing here throws. A load failure (absent, corrupt, rejected by `validate`)
- * returns `null`; a save failure is swallowed and leaves the previous file
- * intact. On `mcp-host` this belongs under {@link resolveStateDir}, which needs
+ * A load failure (absent, corrupt, rejected by `validate`) returns `null`; a
+ * save failure throws, leaving the previous file intact — the atomic replace
+ * means a failed write never damages what was already there. On `mcp-host` this
+ * belongs under {@link resolveStateDir}, which needs
  * the registration to declare `state.dataDir: true` — the runner's
  * unpersisted-state detector will report the omission rather than let the
  * writes silently vanish on the next idle-stop.
@@ -639,7 +677,7 @@ export function createFileStatePersistence<T>(
   opts: FileStatePersistenceOptions<T>,
 ): Required<StatePersistence<T>> {
   const { filePath, validate } = opts;
-  const binding = opts.boundTo !== undefined ? bindingDigest(opts.boundTo) : undefined;
+  const secret = opts.boundTo;
 
   return {
     load(): T | null {
@@ -648,12 +686,19 @@ export function createFileStatePersistence<T>(
         const raw: unknown = JSON.parse(readFileSync(filePath, 'utf8'));
         let state: unknown;
         if (isEnvelope<T>(raw)) {
-          if (raw.boundTo !== binding) return null; // wrong credential, or unbound
+          const b = raw.boundTo;
+          if (secret === undefined) {
+            // A bound record is not ours to read when we hold no credential.
+            if (b !== undefined) return null;
+          } else {
+            if (b === undefined) return null; // unbound record, binding required
+            if (bindingDigest(secret, b.salt) !== b.digest) return null; // rotated
+          }
           state = raw.state;
         } else {
           // Legacy bare record. Trusted only when no binding is required: it
           // carries no evidence of which credential minted it.
-          if (binding !== undefined) return null;
+          if (secret !== undefined) return null;
           state = raw;
         }
         if (validate !== undefined) return validate(state);
@@ -678,7 +723,12 @@ export function createFileStatePersistence<T>(
         mkdirSync(dir, { recursive: true, mode: 0o700 });
         // mkdir's mode is subject to the umask, so re-assert it on what we made.
         if (!dirExisted) chmodSync(dir, 0o700);
-        const envelope: StateEnvelope<T> = { v: 1, ...(binding !== undefined ? { boundTo: binding } : {}), state };
+        let boundTo: Binding | undefined;
+        if (secret !== undefined) {
+          const salt = randomBytes(16).toString('hex');
+          boundTo = { salt, digest: bindingDigest(secret, salt) };
+        }
+        const envelope: StateEnvelope<T> = { v: 1, ...(boundTo !== undefined ? { boundTo } : {}), state };
         writeFileSync(tmp, JSON.stringify(envelope, null, 2), { mode: 0o600 });
         // Tighten BEFORE the rename: the window where fresh secrets sit in a
         // possibly-loose file should not exist at all.
@@ -748,9 +798,17 @@ export interface KeyedStatePersistence<T> {
  * shared form, with the same atomic-replace and `0600`/`0700` hardening as the
  * single-record store.
  *
- * Reads and writes go through the file each time rather than an in-process
- * cache, so a record written by a SIBLING process is picked up — the property
- * kiaaccess-mcp's "constructed per call" comment exists to preserve.
+ * Reads go through the file each time rather than an in-process cache, so a
+ * record written by a SIBLING process is picked up — the property kiaaccess-mcp's
+ * "constructed per call" comment exists to preserve.
+ *
+ * WRITES, though, are whole-file read-modify-write: two processes saving
+ * DIFFERENT keys at the same instant can lose one of the two, because each
+ * rewrites the map it read. The replace is atomic, so the file is never torn —
+ * only a concurrent sibling's update can be dropped, and the loser re-authenticates
+ * rather than reading anything wrong. That is acceptable for credential caches
+ * (rare writes, self-healing) and would not be for a general-purpose store. If
+ * that ever stops being true the fix is a lock file, not a bigger read.
  */
 export function createKeyedFileStatePersistence<T>(
   opts: KeyedFileStatePersistenceOptions<T>,
@@ -877,7 +935,9 @@ export interface ResolveStateFileOptions extends ResolveStateDirOptions {
 export function resolveStateFile(opts: ResolveStateFileOptions): string {
   const override =
     opts.envVar !== undefined ? readEnvVar(opts.envVar, { env: opts.env }) : undefined;
-  if (override !== undefined) return override;
+  // expandPath, so a `~/...` override is a home-relative path rather than a
+  // literal `./~` directory (the same treatment `fs/output.ts` gives its input).
+  if (override !== undefined) return expandPath(override);
   const dirOpts: ResolveStateDirOptions = { env: opts.env };
   if (opts.subdir !== undefined) dirOpts.subdir = opts.subdir;
   return join(resolveStateDir(dirOpts), opts.fileName);
@@ -1079,15 +1139,25 @@ export class TokenManager {
     }
   }
 
-  /** Write tokens. Never throws — a failed write costs a login, not a request. */
+  /**
+   * Write tokens. Silent by default (a lost write costs a future login, not this
+   * request); throws a {@link StatePersistenceError} when `onPersistError` does.
+   */
   private async persist(t: BearerTokens): Promise<void> {
     if (this.persistence === undefined) return;
     try {
       await this.persistence.save(t);
     } catch (err) {
       // Default: the in-memory token is still valid for this process, so the
-      // request proceeds. A hook that rethrows makes the lost write fatal.
-      this.onPersistErrorFn?.(err);
+      // request proceeds. A hook that rethrows makes the lost write fatal —
+      // wrapped so the recovery path below cannot mistake a disk error for a
+      // revoked credential and delete the very record that was not written.
+      if (this.onPersistErrorFn === undefined) return;
+      try {
+        this.onPersistErrorFn(err);
+      } catch (hookErr) {
+        throw new StatePersistenceError(hookErr);
+      }
     }
   }
 
@@ -1166,6 +1236,10 @@ export class TokenManager {
    * staying broken forever. Shared so the two entry points cannot diverge.
    */
   private async reBootstrap(err: unknown): Promise<BearerTokens> {
+    // A write that failed says nothing about the credential — and the refresh
+    // that produced it SUCCEEDED, spending the old token upstream. Clearing the
+    // store here would destroy the only surviving copy.
+    if (err instanceof StatePersistenceError) throw err.cause;
     if (this.bootstrapFn === undefined) throw err;
     // Only a credential we believe is DEAD is worth destroying. A 5xx or a
     // timeout leaves a perfectly good refresh token that the next call can use.
@@ -1322,10 +1396,11 @@ export interface CookieSessionManagerOptions<S, R = Response> {
   persistence?: StatePersistence<PersistedCookieSession<S>>;
   /**
    * Called when a {@link CookieSessionManagerOptions.persistence} write fails.
-   * Swallowed by default — the in-memory session is still usable. Note that
-   * `seed()` and `invalidate()` write fire-and-forget, so a hook that throws
-   * there surfaces as an unhandled rejection rather than to the caller; use it
-   * to report, and reserve throwing for the awaited login path.
+   * Swallowed by default — the in-memory session is still usable. Throwing from
+   * the hook does NOT propagate: every write goes through the ordering chain,
+   * whose tail is `.catch(() => undefined)`, and `seed()`/`invalidate()` do not
+   * await it at all. Treat this as a reporting hook. (`TokenManager`'s version
+   * DOES surface, because its writes are awaited on the request path.)
    */
   onPersistError?: (err: unknown) => void;
 }
@@ -1571,7 +1646,7 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
     return next;
   }
 
-  /** Write the session. Never throws — a failed write costs a login, not a request. */
+  /** Write the session. Silent unless `onPersistError` throws. */
   private persist(session: S, sessionAt: number): Promise<void> {
     return this.enqueuePersist(async () => {
       if (this.persistence === undefined) return;
