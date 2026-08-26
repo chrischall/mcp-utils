@@ -555,17 +555,31 @@ describe('createFileStatePersistence', () => {
     const p = createFileStatePersistence<BearerTokens>({ filePath: file });
     p.save({ accessToken: 'first', expiresAt: 1 });
     p.save({ accessToken: 'second', expiresAt: 2 });
-    // A torn write would leave trailing bytes of the longer previous body.
-    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ accessToken: 'second', expiresAt: 2 });
+    // Asserted through load() rather than the raw bytes: the on-disk form is an
+    // envelope now, and what matters is that a torn write can't be read back.
+    expect(p.load()).toEqual({ accessToken: 'second', expiresAt: 2 });
+    expect(() => JSON.parse(readFileSync(file, 'utf8'))).not.toThrow();
   });
 
-  it('does not throw when the destination cannot be written', () => {
-    // A path whose parent is a FILE — mkdir and write both fail.
+  it('reports a failed write, and the manager above decides what it costs', async () => {
+    // The store tells the truth; whether a lost write is survivable belongs to
+    // the manager (see onPersistError) — freshbooks-mcp's rotating single-use
+    // tokens make it fatal, most services make it a nuisance.
     const blocker = join(dir, 'blocker');
-    writeFileSync(blocker, 'x');
+    writeFileSync(blocker, 'x'); // parent is a FILE: mkdir and write both fail
     const p = createFileStatePersistence<BearerTokens>({ filePath: join(blocker, 'tokens.json') });
-    expect(() => p.save({ accessToken: 'a1', expiresAt: 1 })).not.toThrow();
-    expect(p.load()).toBeNull();
+    expect(() => p.save({ accessToken: 'a1', expiresAt: 1 })).toThrow();
+    expect(p.load()).toBeNull(); // load stays total
+
+    // By default TokenManager swallows it and the request still succeeds.
+    const mgr = new TokenManager({
+      initial: async () => ({ accessToken: 'fresh', expiresAt: Date.now() + 3_600_000 }),
+      refresh: async () => {
+        throw new Error('no');
+      },
+      persistence: p,
+    });
+    expect(await mgr.getAccessToken()).toBe('fresh');
   });
 
   it('clear() removes the file and is a no-op when it is already gone', () => {

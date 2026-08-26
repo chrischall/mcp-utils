@@ -44,7 +44,7 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { textResult } from '../response/index.js';
 import { readEnvVar } from '../config/index.js';
@@ -540,9 +540,12 @@ export class SessionStore<T extends Record<string, unknown>> {
  * ({@link createFileStatePersistence}) is sync — it writes one small file — but
  * the async signature leaves room for a backend that has to go over a wire.
  *
- * **Implementations must not throw.** The managers guard every call anyway, but
- * the contract is that a persistence failure degrades to in-memory operation:
- * a read-only or full disk must cost a re-login, never a failed request.
+ * **A failing implementation should throw.** Whether losing a write is
+ * survivable is the MANAGER's call, not the store's: for most services a failed
+ * save costs a re-login, but freshbooks-mcp rotates single-use refresh tokens,
+ * so a new token that does not reach disk locks the account out on the next
+ * start. The managers catch every call and, by default, swallow it — pass
+ * `onPersistError` to observe or to make it fatal.
  */
 export interface StatePersistence<T> {
   /** Read the stored state; `null` when absent, unparseable, or unusable. */
@@ -557,10 +560,47 @@ export interface StatePersistence<T> {
   clear?(): void | Promise<void>;
 }
 
+/**
+ * The on-disk envelope. Written for every save so a record can carry metadata
+ * (currently the credential binding) without polluting `T`'s own shape. A file
+ * written before the envelope existed is a bare `T`, and {@link readEnvelope}
+ * still accepts one — that keeps vibo-mcp's "a stale pre-migration file degrades
+ * gracefully" property and the files skylight-mcp already wrote.
+ */
+interface StateEnvelope<T> {
+  v: 1;
+  /** Digest of the credential that minted this record; absent when unbound. */
+  boundTo?: string;
+  state: T;
+}
+
+/** Digest a credential for {@link FileStatePersistenceOptions.boundTo}. */
+function bindingDigest(secret: string): string {
+  return createHash('sha256').update(secret).digest('hex').slice(0, 32);
+}
+
+function isEnvelope<T>(raw: unknown): raw is StateEnvelope<T> {
+  return raw !== null && typeof raw === 'object' && (raw as StateEnvelope<T>).v === 1 && 'state' in (raw as object);
+}
+
 /** Options for {@link createFileStatePersistence}. */
 export interface FileStatePersistenceOptions<T> {
   /** Absolute path to the JSON file. Parent directories are created as needed. */
   filePath: string;
+  /**
+   * Bind the record to the credential that minted it. Pass the credential whose
+   * change should invalidate the cache — the env-supplied refresh token, the
+   * password, an account id. Only a SHA-256 digest is written, never the value.
+   *
+   * Without this a rotated credential is silently shadowed by a cache minted
+   * from the old one: the operator re-bootstraps, and the server keeps using
+   * what it had. freshbooks-mcp discovered this and tracked it as
+   * `seededFromEnv`; this is the generalised, non-secret-storing form.
+   *
+   * A record with no binding is not accepted when one is required — it cannot
+   * be shown to belong to this credential.
+   */
+  boundTo?: string;
   /**
    * Narrow the parsed JSON to `T`, returning `null` to reject it. Without this
    * any well-formed JSON is handed back and the caller must check the shape —
@@ -570,7 +610,11 @@ export interface FileStatePersistenceOptions<T> {
 }
 
 /**
- * File-backed {@link StatePersistence}. The file is `0600`, re-asserted after
+ * File-backed {@link StatePersistence}. `load` never throws — an absent, corrupt
+ * or rejected record is simply `null`. `save` DOES throw on a failed write, so
+ * the manager above it can decide what that means.
+ *
+ * The file is `0600`, re-asserted after
  * the write because `mode` only applies on creation. A directory is created
  * `0700` and re-asserted the same way — but ONLY one this call creates: a bare
  * {@link resolveStateDir} is `$HOME`, and on `mcp-host` the data dir exists
@@ -595,14 +639,25 @@ export function createFileStatePersistence<T>(
   opts: FileStatePersistenceOptions<T>,
 ): Required<StatePersistence<T>> {
   const { filePath, validate } = opts;
+  const binding = opts.boundTo !== undefined ? bindingDigest(opts.boundTo) : undefined;
 
   return {
     load(): T | null {
       if (!existsSync(filePath)) return null;
       try {
         const raw: unknown = JSON.parse(readFileSync(filePath, 'utf8'));
-        if (validate !== undefined) return validate(raw);
-        return raw as T;
+        let state: unknown;
+        if (isEnvelope<T>(raw)) {
+          if (raw.boundTo !== binding) return null; // wrong credential, or unbound
+          state = raw.state;
+        } else {
+          // Legacy bare record. Trusted only when no binding is required: it
+          // carries no evidence of which credential minted it.
+          if (binding !== undefined) return null;
+          state = raw;
+        }
+        if (validate !== undefined) return validate(state);
+        return state as T;
       } catch {
         // Corrupt or unreadable: the caller re-authenticates. Unlike
         // SessionStore this does NOT preserve a `.corrupt` copy — the file
@@ -623,20 +678,25 @@ export function createFileStatePersistence<T>(
         mkdirSync(dir, { recursive: true, mode: 0o700 });
         // mkdir's mode is subject to the umask, so re-assert it on what we made.
         if (!dirExisted) chmodSync(dir, 0o700);
-        writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
+        const envelope: StateEnvelope<T> = { v: 1, ...(binding !== undefined ? { boundTo: binding } : {}), state };
+        writeFileSync(tmp, JSON.stringify(envelope, null, 2), { mode: 0o600 });
         // Tighten BEFORE the rename: the window where fresh secrets sit in a
         // possibly-loose file should not exist at all.
         chmodSync(tmp, 0o600);
         renameSync(tmp, filePath);
         chmodSync(filePath, 0o600);
-      } catch {
-        // Degrade to in-memory. Best-effort cleanup of the temp file so a
-        // failed write does not litter the data dir.
+      } catch (err) {
+        // Best-effort cleanup of the temp file so a failed write does not
+        // litter the data dir. The failure itself is RE-THROWN: whether losing
+        // a write is survivable is the manager's call (see `onPersistError`),
+        // not this file's — freshbooks-mcp's rotating single-use tokens make it
+        // fatal, most services make it a nuisance.
         try {
           if (existsSync(tmp)) unlinkSync(tmp);
         } catch {
           /* best-effort */
         }
+        throw err;
       }
     },
 
@@ -646,6 +706,114 @@ export function createFileStatePersistence<T>(
       } catch {
         /* best-effort */
       }
+    },
+  };
+}
+
+/** Options for {@link createKeyedFileStatePersistence}. */
+export interface KeyedFileStatePersistenceOptions<T> {
+  /** Absolute path to the shared JSON file. Parent dirs are created as needed. */
+  filePath: string;
+  /** Narrow a stored record to `T`, returning `null` to reject it. */
+  validate?: (raw: unknown) => T | null;
+  /**
+   * Normalize a key before storing or looking up. Defaults to trim + lowercase,
+   * because these keys are account identities (emails, usernames) — NOT origins.
+   * kiaaccess-mcp and alphaportal-mcp both had to override `SessionStore`'s
+   * origin normalizer for exactly this reason, so it is the default here.
+   */
+  normalizeKey?: (key: string) => string;
+}
+
+/** A keyed store: hand each key out as its own {@link StatePersistence}. */
+export interface KeyedStatePersistence<T> {
+  /**
+   * A single-record view of one key, shaped exactly like the persistence the
+   * managers take — so a multi-account server gives each account its own
+   * {@link TokenManager} over one shared file.
+   */
+  forKey(key: string): Required<StatePersistence<T>>;
+  /** The normalized keys currently held. */
+  keys(): string[];
+}
+
+/**
+ * Many records in one file, keyed by account.
+ *
+ * {@link createFileStatePersistence} holds exactly one record, which is wrong
+ * for any server that authenticates as more than one identity — and actively
+ * unsafe for one that serves several users from a single process, where a
+ * single-record file would hand one user's token to the next. kiaaccess-mcp and
+ * alphaportal-mcp both hand-rolled this over {@link SessionStore}; this is the
+ * shared form, with the same atomic-replace and `0600`/`0700` hardening as the
+ * single-record store.
+ *
+ * Reads and writes go through the file each time rather than an in-process
+ * cache, so a record written by a SIBLING process is picked up — the property
+ * kiaaccess-mcp's "constructed per call" comment exists to preserve.
+ */
+export function createKeyedFileStatePersistence<T>(
+  opts: KeyedFileStatePersistenceOptions<T>,
+): KeyedStatePersistence<T> {
+  const { filePath, validate } = opts;
+  const normalize = opts.normalizeKey ?? ((k: string) => k.trim().toLowerCase());
+
+  const readAll = (): Record<string, unknown> => {
+    if (!existsSync(filePath)) return {};
+    try {
+      const raw: unknown = JSON.parse(readFileSync(filePath, 'utf8'));
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {};
+      return raw as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  };
+
+  const writeAll = (all: Record<string, unknown>): void => {
+    const dir = dirname(filePath);
+    const tmp = `${filePath}.tmp-${randomBytes(6).toString('hex')}`;
+    const dirExisted = existsSync(dir);
+    try {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      if (!dirExisted) chmodSync(dir, 0o700);
+      writeFileSync(tmp, JSON.stringify(all, null, 2), { mode: 0o600 });
+      chmodSync(tmp, 0o600);
+      renameSync(tmp, filePath);
+      chmodSync(filePath, 0o600);
+    } catch (err) {
+      try {
+        if (existsSync(tmp)) unlinkSync(tmp);
+      } catch {
+        /* best-effort */
+      }
+      throw err;
+    }
+  };
+
+  return {
+    forKey(key: string): Required<StatePersistence<T>> {
+      const k = normalize(key);
+      return {
+        load(): T | null {
+          const raw = readAll()[k];
+          if (raw === undefined) return null;
+          return validate !== undefined ? validate(raw) : (raw as T);
+        },
+        save(state: T): void {
+          const all = readAll();
+          all[k] = state;
+          writeAll(all);
+        },
+        clear(): void {
+          const all = readAll();
+          if (!(k in all)) return;
+          delete all[k];
+          writeAll(all);
+        },
+      };
+    },
+    keys(): string[] {
+      return Object.keys(readAll());
     },
   };
 }
@@ -682,6 +850,37 @@ export function resolveStateDir(opts: ResolveStateDirOptions = {}): string {
   const base =
     readEnvVar('MCP_DATA_DIR', { env }) ?? readEnvVar('HOME', { env }) ?? homedir();
   return opts.subdir !== undefined ? join(base, opts.subdir) : base;
+}
+
+/** Options for {@link resolveStateFile}. */
+export interface ResolveStateFileOptions extends ResolveStateDirOptions {
+  /**
+   * An env var naming the file outright, checked first. Every fleet repo that
+   * hand-rolled persistence has one (`KIA_SESSION_FILE`, `VIBO_SESSION_FILE`,
+   * `ALPHAPORTAL_SESSION_FILE`) and every one of them uses it to keep its test
+   * suite off the developer's real `$HOME` — which is worth having by default
+   * rather than rediscovering per repo.
+   */
+  envVar?: string;
+  /** File name inside the resolved directory. */
+  fileName: string;
+}
+
+/**
+ * The full path to a state file: `<envVar>` if set, else
+ * {@link resolveStateDir}`/<subdir>/<fileName>`.
+ *
+ * The override goes through the same hardened {@link readEnvVar} as the base, so
+ * a host forwarding an unexpanded `${...}` — or the literal `null` — falls back
+ * rather than creating a relative directory of that name under the process cwd.
+ */
+export function resolveStateFile(opts: ResolveStateFileOptions): string {
+  const override =
+    opts.envVar !== undefined ? readEnvVar(opts.envVar, { env: opts.env }) : undefined;
+  if (override !== undefined) return override;
+  const dirOpts: ResolveStateDirOptions = { env: opts.env };
+  if (opts.subdir !== undefined) dirOpts.subdir = opts.subdir;
+  return join(resolveStateDir(dirOpts), opts.fileName);
 }
 
 // ===========================================================================
@@ -762,6 +961,17 @@ export interface TokenManagerOptions {
    * split {@link CookieSessionManagerOptions.isPermanentError} already makes.
    */
   isRefreshRevoked?: (err: unknown) => boolean;
+  /**
+   * Called when a {@link TokenManagerOptions.persistence} write fails.
+   *
+   * Default: the failure is swallowed and the request proceeds on the
+   * in-memory token — right when a lost write merely costs a future re-login.
+   * It is WRONG when the service rotates single-use refresh tokens: the old one
+   * is already spent upstream, so a new one that never reaches disk locks the
+   * account out on the next start. **Throw from this hook to make the write
+   * fatal**, with a message naming the recovery (freshbooks-mcp's case).
+   */
+  onPersistError?: (err: unknown) => void;
   /** Injectable clock (defaults to `Date.now`) — for tests. */
   now?: () => number;
 }
@@ -815,6 +1025,7 @@ export class TokenManager {
   private readonly persistence: StatePersistence<BearerTokens> | undefined;
   private readonly now: () => number;
   private readonly isRefreshRevokedFn: (err: unknown) => boolean;
+  private readonly onPersistErrorFn: ((err: unknown) => void) | undefined;
   private inFlight: Promise<void> | undefined;
   private bootstrapInFlight: Promise<BearerTokens> | undefined;
   /**
@@ -837,6 +1048,7 @@ export class TokenManager {
     this.persistence = opts.persistence;
     this.now = opts.now ?? Date.now;
     this.isRefreshRevokedFn = opts.isRefreshRevoked ?? defaultIsRefreshRevoked;
+    this.onPersistErrorFn = opts.onPersistError;
   }
 
   /** Whether the token is within the skew window of (or past) expiry. */
@@ -872,8 +1084,10 @@ export class TokenManager {
     if (this.persistence === undefined) return;
     try {
       await this.persistence.save(t);
-    } catch {
-      /* in-memory tokens are still valid for this process */
+    } catch (err) {
+      // Default: the in-memory token is still valid for this process, so the
+      // request proceeds. A hook that rethrows makes the lost write fatal.
+      this.onPersistErrorFn?.(err);
     }
   }
 
@@ -1106,6 +1320,14 @@ export interface CookieSessionManagerOptions<S, R = Response> {
    * in-memory-only behaviour. See {@link StatePersistence}.
    */
   persistence?: StatePersistence<PersistedCookieSession<S>>;
+  /**
+   * Called when a {@link CookieSessionManagerOptions.persistence} write fails.
+   * Swallowed by default — the in-memory session is still usable. Note that
+   * `seed()` and `invalidate()` write fire-and-forget, so a hook that throws
+   * there surfaces as an unhandled rejection rather than to the caller; use it
+   * to report, and reserve throwing for the awaited login path.
+   */
+  onPersistError?: (err: unknown) => void;
 }
 
 /** What {@link CookieSessionManagerOptions.persistence} stores: a session plus its login time. */
@@ -1177,6 +1399,7 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
   private readonly now: () => number;
   private readonly onReplayLoginErrorFn: ((err: unknown) => void) | undefined;
   private readonly persistence: StatePersistence<PersistedCookieSession<S>> | undefined;
+  private readonly onPersistErrorFn: ((err: unknown) => void) | undefined;
   /** Persistence is consulted once per process; a miss must not be re-read. */
   private persistenceRead = false;
   /**
@@ -1197,6 +1420,7 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
     this.now = opts.now ?? Date.now;
     this.onReplayLoginErrorFn = opts.onReplayLoginError;
     this.persistence = opts.persistence;
+    this.onPersistErrorFn = opts.onPersistError;
   }
 
   /** The current session, or `undefined` before the first successful login. */
@@ -1353,8 +1577,9 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
       if (this.persistence === undefined) return;
       try {
         await this.persistence.save({ session, sessionAt });
-      } catch {
-        /* the in-memory session is still usable for this process */
+      } catch (err) {
+        // The in-memory session is still usable for this process.
+        this.onPersistErrorFn?.(err);
       }
     });
   }
