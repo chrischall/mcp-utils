@@ -32,7 +32,7 @@ import light:
 | Import | Contents |
 | --- | --- |
 | `@chrischall/mcp-utils` | core barrel: `server` + `response` + `errors` + `config` + `fs` + `http` + `concurrency` + `dates` + `zod` + `auth` + `scrape` |
-| `@chrischall/mcp-utils/session` | session registry, session store, token manager, cookie-session manager |
+| `@chrischall/mcp-utils/session` | session registry, session store, state persistence, token manager, cookie-session manager |
 | `@chrischall/mcp-utils/fetchproxy` | fetchproxy transport adapter, bot-wall / retry / concurrency helpers |
 | `@chrischall/mcp-utils/html` | opt-in HTML scraping helpers (needs `node-html-parser`) |
 | `@chrischall/mcp-utils/scrape` | convenience alias for the zero-dep `scrape` module (also in the core barrel) |
@@ -484,6 +484,63 @@ const custom = new CookieSessionManager<MySession, MyResponse>({
 Replaces the hand-rolled re-login / single-flight / 401-replay code in
 `artsonia-mcp`, `canvas-parent-mcp`, `evite-mcp`, `signupgenius-mcp`, and
 `skylight-mcp`.
+
+#### Surviving a restart — `StatePersistence` *(opt-in)*
+
+Both managers own a credential only for the life of the process. On a
+scale-to-zero host that means a full login on every cold start — children idle
+out after ten minutes, several services rate-limit the login endpoint, and one
+escalates repeated attempts to a captcha that breaks server-side auth outright.
+Pass `persistence` and the credential survives instead:
+
+```ts
+import {
+  TokenManager,
+  createFileStatePersistence,
+  resolveStateDir,
+  type BearerTokens,
+} from '@chrischall/mcp-utils/session';
+import { join } from 'node:path';
+
+const tokens = new TokenManager({
+  // Function form: run the login ONLY when nothing usable was restored.
+  initial: () => loginWithPassword(),
+  refresh: (rt) => exchangeRefreshToken(rt),
+  persistence: createFileStatePersistence<BearerTokens>({
+    filePath: join(resolveStateDir({ subdir: '.acme-mcp' }), 'tokens.json'),
+  }),
+});
+```
+
+What that buys, in order of how often it applies: a stored token that is still
+valid costs **nothing**; a stored token that has expired but carries a refresh
+token costs **one refresh** instead of a login; only an empty or unusable store
+runs `initial`. A refresh token revoked between runs is not terminal — the
+stored copy is discarded and the login re-runs, so a stale file cannot brick the
+server.
+
+`createFileStatePersistence` writes atomically (temp file + rename) with the
+same `0600`/`0700` hardening as `SessionStore`, and never throws: a read-only or
+full disk degrades to in-memory operation, costing a login rather than a failed
+request. `resolveStateDir` prefers `MCP_DATA_DIR` — the variable `mcp-host`
+injects for a registration with `state.dataDir: true` — then `HOME`, then the OS
+home directory, ignoring blank and unexpanded `${...}` placeholders.
+
+> On `mcp-host`, set `state.dataDir: true` in the repo's `mint.yaml` when you
+> adopt this. Without it the child's `$HOME` is on the container rootfs, which
+> an idle-stop discards — the runner's unpersisted-state detector will report
+> the omission, but the writes still vanish.
+
+`CookieSessionManager` takes the same option, storing `{ session, sessionAt }`
+so `maxAgeMs` keeps counting from the original login. Its `invalidate()` clears
+the stored copy — without that, a session detected as expired would be read back
+off disk and the expiry would loop.
+
+Persistence is **opt-in throughout**: a manager constructed without it behaves
+exactly as before, and no credential reaches a disk because a dependency was
+upgraded. The interface is two methods (`load` / `save`, plus an optional
+`clear`), each allowed to be async, so a backend other than the local filesystem
+can be dropped in.
 
 ### `fetchproxy` — transport adapter *(subpath, optional peer)*
 
