@@ -524,7 +524,10 @@ same `0600`/`0700` hardening as `SessionStore`, and never throws: a read-only or
 full disk degrades to in-memory operation, costing a login rather than a failed
 request. `resolveStateDir` prefers `MCP_DATA_DIR` — the variable `mcp-host`
 injects for a registration with `state.dataDir: true` — then `HOME`, then the OS
-home directory, ignoring blank and unexpanded `${...}` placeholders.
+home directory. It reads both through `readEnvVar`, so blank values, the
+`'null'` / `'undefined'` sentinels and unexpanded `${...}` placeholders are all
+treated as unset (`MCP_DATA_DIR=null` would otherwise be a *relative* `./null`
+directory, quietly parking the credential under the process cwd).
 
 > On `mcp-host`, set `state.dataDir: true` in the repo's `mint.yaml` when you
 > adopt this. Without it the child's `$HOME` is on the container rootfs, which

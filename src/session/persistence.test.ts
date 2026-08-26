@@ -375,6 +375,10 @@ describe('CookieSessionManager persistence', () => {
       now: c.now,
     });
     mgr.seed({ cookieHeader: 'seeded' });
+    // seed() is synchronous by contract but its write is queued (writes are
+    // ordered so an async backend cannot land a save after a later clear), so
+    // let the queue drain before asserting.
+    await new Promise((r) => setTimeout(r, 0));
     expect(store.saves.at(-1)).toEqual({
       session: { cookieHeader: 'seeded' },
       sessionAt: c.now(),
@@ -601,5 +605,180 @@ describe('resolveStateDir', () => {
 
   it('falls back to the OS home directory when neither is set', () => {
     expect(resolveStateDir({ env: {} })).toBe(homedir());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression tests for the auto-review findings on PR #137
+// ---------------------------------------------------------------------------
+
+describe('TokenManager persistence — once-per-process read', () => {
+  it('reads persistence at most once', async () => {
+    const c = clock();
+    const store = memory<BearerTokens>({ accessToken: 'stored', expiresAt: c.now() + 3_600_000 });
+    const mgr = new TokenManager({
+      initial: async () => ({ accessToken: 'fresh', expiresAt: c.now() + 3_600_000 }),
+      refresh: async () => {
+        throw new Error('no');
+      },
+      persistence: store,
+      now: c.now,
+    });
+    await mgr.getAccessToken();
+    await mgr.getAccessToken();
+    await mgr.getAccessToken();
+    expect(store.loads).toBe(1);
+  });
+
+  it('recovers from a revoked refresh token even when clear() is ABSENT', async () => {
+    const c = clock();
+    let logins = 0;
+    // `clear` is optional on StatePersistence. Without a once-only read guard the
+    // recovery path reloads this same revoked record and the failure loops.
+    const store: StatePersistence<BearerTokens> = {
+      load: () => ({ accessToken: 'revoked', refreshToken: 'bad', expiresAt: c.now() - 1 }),
+      save: () => {},
+    };
+    const mgr = new TokenManager({
+      initial: async () => {
+        logins += 1;
+        return { accessToken: 'fresh', expiresAt: c.now() + 3_600_000 };
+      },
+      refresh: async () => {
+        throw new Error('invalid_grant');
+      },
+      persistence: store,
+      now: c.now,
+    });
+    expect(await mgr.getAccessToken()).toBe('fresh');
+    expect(logins).toBe(1);
+  });
+
+  it('recovers from a revoked refresh token even when clear() FAILS', async () => {
+    const c = clock();
+    let logins = 0;
+    const store: StatePersistence<BearerTokens> = {
+      load: () => ({ accessToken: 'revoked', refreshToken: 'bad', expiresAt: c.now() - 1 }),
+      save: () => {},
+      clear: () => {
+        throw new Error('EROFS');
+      },
+    };
+    const mgr = new TokenManager({
+      initial: async () => {
+        logins += 1;
+        return { accessToken: 'fresh', expiresAt: c.now() + 3_600_000 };
+      },
+      refresh: async () => {
+        throw new Error('invalid_grant');
+      },
+      persistence: store,
+      now: c.now,
+    });
+    expect(await mgr.getAccessToken()).toBe('fresh');
+    expect(logins).toBe(1);
+  });
+
+  it('withAuth re-mints via the bootstrap when a 401 refresh is rejected', async () => {
+    const c = clock();
+    let logins = 0;
+    const seen: string[] = [];
+    const mgr = new TokenManager({
+      initial: async () => {
+        logins += 1;
+        return { accessToken: `a${logins}`, refreshToken: 'bad', expiresAt: c.now() + 3_600_000 };
+      },
+      refresh: async () => {
+        throw new Error('invalid_grant');
+      },
+      persistence: memory<BearerTokens>(null),
+      now: c.now,
+    });
+    const res = await mgr.withAuth(async (tok) => {
+      seen.push(tok);
+      return new Response(null, { status: seen.length === 1 ? 401 : 200 });
+    });
+    // Same revoked credential as getAccessToken's path — same outcome, not a throw.
+    expect(res.status).toBe(200);
+    expect(seen).toEqual(['a1', 'a2']);
+    expect(logins).toBe(2);
+  });
+});
+
+describe('CookieSessionManager persistence — shape guard', () => {
+  it('rejects a persisted record whose session is a primitive', async () => {
+    const c = clock();
+    let logins = 0;
+    const store = memory({ session: 'not-an-object', sessionAt: c.now() } as unknown as {
+      session: Sess;
+      sessionAt: number;
+    });
+    const mgr = new CookieSessionManager<Sess>({
+      login: async () => {
+        logins += 1;
+        return { cookieHeader: 'fresh' };
+      },
+      persistence: store,
+      now: c.now,
+    });
+    expect((await mgr.ensure()).cookieHeader).toBe('fresh');
+    expect(logins).toBe(1);
+  });
+
+  it('orders fire-and-forget writes, so a save cannot land after a clear', async () => {
+    const c = clock();
+    const ops: string[] = [];
+    let stored: unknown = null;
+    const mgr = new CookieSessionManager<Sess>({
+      login: async () => ({ cookieHeader: 'x' }),
+      persistence: {
+        load: () => null,
+        // An async backend: a slow save must not overtake the clear that follows it.
+        save: async (s) => {
+          await new Promise((r) => setTimeout(r, 10));
+          ops.push('save');
+          stored = s;
+        },
+        clear: async () => {
+          ops.push('clear');
+          stored = null;
+        },
+      },
+      now: c.now,
+    });
+    mgr.seed({ cookieHeader: 'seeded' });
+    mgr.invalidate();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(ops).toEqual(['save', 'clear']);
+    expect(stored).toBeNull(); // an invalidated session must not survive on disk
+  });
+});
+
+describe('createFileStatePersistence — directory permissions', () => {
+  it('does not re-permission a directory it did not create', () => {
+    // resolveStateDir() with no subdir is $HOME; chmodding that to 0700 would be
+    // an invasive side effect of writing one token file.
+    const file = join(dir, 'tokens.json');
+    chmodSync(dir, 0o755);
+    createFileStatePersistence<BearerTokens>({ filePath: file }).save({
+      accessToken: 'a1',
+      expiresAt: 1,
+    });
+    expect(statSync(dir).mode & 0o777).toBe(0o755);
+    expect(statSync(file).mode & 0o777).toBe(0o600); // the file is still hardened
+  });
+});
+
+describe('resolveStateDir — env hardening', () => {
+  it('ignores the "null" and "undefined" sentinels', () => {
+    // MCP_DATA_DIR=null would otherwise be a RELATIVE "./null" directory: tokens
+    // land under the process cwd and silently stop surviving restarts.
+    expect(resolveStateDir({ env: { MCP_DATA_DIR: 'null', HOME: '/home/u' } })).toBe('/home/u');
+    expect(resolveStateDir({ env: { MCP_DATA_DIR: 'undefined', HOME: '/home/u' } })).toBe('/home/u');
+    expect(resolveStateDir({ env: { MCP_DATA_DIR: 'null', HOME: 'undefined' } })).toBe(homedir());
+  });
+
+  it('trims surrounding whitespace like readEnvVar does', () => {
+    expect(resolveStateDir({ env: { MCP_DATA_DIR: '  /data  ' } })).toBe('/data');
   });
 });

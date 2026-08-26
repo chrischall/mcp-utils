@@ -47,6 +47,7 @@ import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { textResult } from '../response/index.js';
+import { readEnvVar } from '../config/index.js';
 
 // ===========================================================================
 // 1. In-memory SessionRegistry + MCP tools
@@ -610,15 +611,20 @@ export function createFileStatePersistence<T>(
       const dir = dirname(filePath);
       // A unique temp name so two writers cannot share (and tear) one temp file.
       const tmp = `${filePath}.tmp-${randomBytes(6).toString('hex')}`;
+      // Only a directory THIS call creates gets tightened. `resolveStateDir()`
+      // without a `subdir` is `$HOME`, and chmodding a user's home directory to
+      // 0700 is not an acceptable side effect of writing one token file.
+      const dirExisted = existsSync(dir);
       try {
         mkdirSync(dir, { recursive: true, mode: 0o700 });
+        // mkdir's mode is subject to the umask, so re-assert it on what we made.
+        if (!dirExisted) chmodSync(dir, 0o700);
         writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
         // Tighten BEFORE the rename: the window where fresh secrets sit in a
         // possibly-loose file should not exist at all.
         chmodSync(tmp, 0o600);
         renameSync(tmp, filePath);
         chmodSync(filePath, 0o600);
-        chmodSync(dir, 0o700);
       } catch {
         // Degrade to in-memory. Best-effort cleanup of the temp file so a
         // failed write does not litter the data dir.
@@ -663,15 +669,14 @@ export interface ResolveStateDirOptions {
  * {@link readEnvVar} applies.
  */
 export function resolveStateDir(opts: ResolveStateDirOptions = {}): string {
-  const env = opts.env ?? process.env;
-  const usable = (v: string | undefined): string | undefined => {
-    const t = v?.trim();
-    if (t === undefined || t === '') return undefined;
-    // An unsubstituted `${VAR}` placeholder is not a path.
-    if (/^\$\{[^}]*\}$/.test(t)) return undefined;
-    return t;
-  };
-  const base = usable(env.MCP_DATA_DIR) ?? usable(env.HOME) ?? homedir();
+  // Delegated rather than re-implemented: readEnvVar is the fleet's one place
+  // that suppresses blank, `'null'`, `'undefined'` AND `${...}` placeholders.
+  // The sentinels matter as much as the placeholders here — `MCP_DATA_DIR=null`
+  // is a RELATIVE `./null` directory, so the credential would be written under
+  // the process cwd and silently stop surviving restarts.
+  const env = opts.env;
+  const base =
+    readEnvVar('MCP_DATA_DIR', { env }) ?? readEnvVar('HOME', { env }) ?? homedir();
   return opts.subdir !== undefined ? join(base, opts.subdir) : base;
 }
 
@@ -774,6 +779,14 @@ export class TokenManager {
   private readonly now: () => number;
   private inFlight: Promise<void> | undefined;
   private bootstrapInFlight: Promise<BearerTokens> | undefined;
+  /**
+   * Persistence is consulted at most once per process. Without this the
+   * revoked-token recovery below re-reads the SAME rejected record — `clear()`
+   * is optional on {@link StatePersistence} and its failures are swallowed, so
+   * recovery must not depend on it. After the first read the in-memory tokens
+   * (or their deliberate absence) are the truth.
+   */
+  private persistenceRead = false;
 
   constructor(opts: TokenManagerOptions) {
     if (typeof opts.initial === 'function') {
@@ -804,7 +817,8 @@ export class TokenManager {
 
   /** Read persisted tokens, guarding shape and usability. Never throws. */
   private async loadPersisted(): Promise<BearerTokens | null> {
-    if (this.persistence === undefined) return null;
+    if (this.persistence === undefined || this.persistenceRead) return null;
+    this.persistenceRead = true;
     try {
       const raw = await this.persistence.load();
       if (!isBearerTokens(raw) || !this.isUsable(raw)) return null;
@@ -892,6 +906,19 @@ export class TokenManager {
     await this.persist(this.tokens);
   }
 
+  /**
+   * Recover from a refresh the current credential could not satisfy — commonly
+   * a refresh token restored from a previous process and revoked since. Without
+   * a bootstrap to fall back on this is terminal; with one, re-minting beats
+   * staying broken forever. Shared so the two entry points cannot diverge.
+   */
+  private async reBootstrap(err: unknown): Promise<BearerTokens> {
+    if (this.bootstrapFn === undefined) throw err;
+    this.tokens = undefined;
+    await this.clearPersisted();
+    return this.ensureTokens();
+  }
+
   /** Get a valid access token, refreshing proactively inside the skew window. */
   async getAccessToken(): Promise<string> {
     // Not `await this.ensureTokens()` unconditionally: with tokens already in
@@ -902,13 +929,7 @@ export class TokenManager {
       try {
         await this.refreshNow();
       } catch (err) {
-        // A refresh token that no longer works — commonly one restored from a
-        // previous process and revoked since. Without a login to fall back to
-        // this is terminal; with one, re-minting beats staying broken forever.
-        if (this.bootstrapFn === undefined) throw err;
-        this.tokens = undefined;
-        await this.clearPersisted();
-        return (await this.ensureTokens()).accessToken;
+        return (await this.reBootstrap(err)).accessToken;
       }
       tokens = this.tokens ?? tokens;
     }
@@ -936,7 +957,15 @@ export class TokenManager {
     const usedToken = await this.getAccessToken();
     let res = await call(usedToken);
     if (res.status === 401) {
-      if (this.tokens?.accessToken === usedToken) await this.refreshNow();
+      if (this.tokens?.accessToken === usedToken) {
+        // Same revoked-credential recovery getAccessToken has: a 401 replay must
+        // not be the one entry point that throws where the other re-mints.
+        try {
+          await this.refreshNow();
+        } catch (err) {
+          await this.reBootstrap(err);
+        }
+      }
       res = await call(this.tokens?.accessToken ?? usedToken);
     }
     return res;
@@ -1049,7 +1078,8 @@ function isPersistedCookieSession<S>(raw: unknown): raw is PersistedCookieSessio
   if (raw === null || typeof raw !== 'object') return false;
   const r = raw as Partial<PersistedCookieSession<S>>;
   if (typeof r.sessionAt !== 'number' || !Number.isFinite(r.sessionAt)) return false;
-  return r.session !== null && r.session !== undefined;
+  // Field-by-field, like isBearerTokens: a primitive is not a session shape.
+  return typeof r.session === 'object' && r.session !== null;
 }
 
 /**
@@ -1107,6 +1137,13 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
   private readonly persistence: StatePersistence<PersistedCookieSession<S>> | undefined;
   /** Persistence is consulted once per process; a miss must not be re-read. */
   private persistenceRead = false;
+  /**
+   * Serializes persistence writes. `seed()` and `invalidate()` are synchronous
+   * by contract and so fire-and-forget their save/clear; with an async backend a
+   * slow save could otherwise land AFTER the clear that followed it and leave an
+   * invalidated session on disk.
+   */
+  private persistChain: Promise<void> = Promise.resolve();
 
   constructor(opts: CookieSessionManagerOptions<S, R>) {
     this.loginFn = opts.login;
@@ -1252,24 +1289,35 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
     }
   }
 
+  /** Append a persistence op to the chain, preserving call order. Never throws. */
+  private enqueuePersist(op: () => Promise<void>): Promise<void> {
+    const next = this.persistChain.then(op);
+    this.persistChain = next.catch(() => undefined);
+    return next;
+  }
+
   /** Write the session. Never throws — a failed write costs a login, not a request. */
-  private async persist(session: S, sessionAt: number): Promise<void> {
-    if (this.persistence === undefined) return;
-    try {
-      await this.persistence.save({ session, sessionAt });
-    } catch {
-      /* the in-memory session is still usable for this process */
-    }
+  private persist(session: S, sessionAt: number): Promise<void> {
+    return this.enqueuePersist(async () => {
+      if (this.persistence === undefined) return;
+      try {
+        await this.persistence.save({ session, sessionAt });
+      } catch {
+        /* the in-memory session is still usable for this process */
+      }
+    });
   }
 
   /** Discard the persisted session. Never throws. */
-  private async clearPersisted(): Promise<void> {
-    if (this.persistence?.clear === undefined) return;
-    try {
-      await this.persistence.clear();
-    } catch {
-      /* best-effort */
-    }
+  private clearPersisted(): Promise<void> {
+    return this.enqueuePersist(async () => {
+      if (this.persistence?.clear === undefined) return;
+      try {
+        await this.persistence.clear();
+      } catch {
+        /* best-effort */
+      }
+    });
   }
 
   /**
