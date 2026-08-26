@@ -927,15 +927,60 @@ describe('CookieSessionManager — persistence read ordering', () => {
       now: c.now,
     });
 
-    // seed() then invalidate() in one tick: the clear is queued behind the
-    // seed's save, and the ensure() below must not read ahead of either.
+    // seed() then invalidate() in one tick. seed() marks persistence consumed,
+    // so this covers the `persistenceRead` half of the fix: the stored session
+    // is never even read, let alone restored over the invalidate.
     mgr.seed({ cookieHeader: 'seeded' });
     mgr.invalidate();
     const got = await mgr.ensure();
 
     expect(got.cookieHeader).toBe('s1'); // a fresh login, not the stale disk copy
     expect(logins).toBe(1);
-    expect(ops.indexOf('clear')).toBeLessThan(ops.lastIndexOf('load') === -1 ? Infinity : ops.length);
+    expect(ops).not.toContain('load'); // seed() consumed the persistence slot
     expect(stored).toEqual({ session: { cookieHeader: 's1' }, sessionAt: c.now() });
+  });
+
+  it('queues the persistence read behind a pending clear', async () => {
+    const c = clock();
+    let logins = 0;
+    const ops: string[] = [];
+    let stored: { session: Sess; sessionAt: number } | null = {
+      session: { cookieHeader: 'on-disk' },
+      sessionAt: c.now(),
+    };
+    const mgr = new CookieSessionManager<Sess>({
+      login: async () => {
+        logins += 1;
+        return { cookieHeader: `s${logins}` };
+      },
+      persistence: {
+        load: () => {
+          ops.push('load');
+          return stored;
+        },
+        save: (v) => {
+          ops.push('save');
+          stored = v;
+        },
+        // Async on purpose: with the read routed AROUND the chain, this clear
+        // is still pending when the load runs and the stale session comes back.
+        clear: async () => {
+          await new Promise((r) => setTimeout(r, 5));
+          ops.push('clear');
+          stored = null;
+        },
+      },
+      now: c.now,
+    });
+
+    // No seed() and no prior ensure(), so `persistenceRead` is still false and
+    // the read genuinely happens — this is the path the seeded test cannot reach.
+    mgr.invalidate();
+    const got = await mgr.ensure();
+
+    expect(ops).toContain('load'); // guard: the read really did run
+    expect(ops.indexOf('clear')).toBeLessThan(ops.indexOf('load')); // ordered
+    expect(got.cookieHeader).toBe('s1'); // the cleared session was NOT restored
+    expect(logins).toBe(1);
   });
 });
