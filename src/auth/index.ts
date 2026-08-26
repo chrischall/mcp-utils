@@ -70,7 +70,25 @@ export interface ResolvedCredential {
   credential: string;
   /** Which path produced it. Diagnostics / cache-keying only — do not branch on it. */
   source: 'env' | 'fetchproxy';
+  /**
+   * When the credential stops being valid, if the source knew. Absent on the
+   * env path (an env var carries no expiry) and on any `parseTokens` that
+   * returns a bare string.
+   *
+   * It exists because every hand-rolled resolver this module was written to
+   * absorb carries one — a signed-in tab stores it (OFW keeps
+   * `localStorage["tokenExpiry"]` beside the token), and 401-replay logic is
+   * smarter for having it. Without somewhere to put it, adopting this resolver
+   * meant discarding it silently, and none of those eight migrated.
+   */
+  expiresAt?: Date;
 }
+
+/**
+ * What {@link AuthResolverOptions.parseTokens} may return: the credential
+ * alone, or the credential with the expiry the session carried beside it.
+ */
+export type ParsedCredential = string | { credential: string; expiresAt?: Date };
 
 /** Options for {@link createAuthResolver}. */
 export interface AuthResolverOptions {
@@ -90,7 +108,7 @@ export interface AuthResolverOptions {
    * credential string, or `undefined`/`''` when the signed-in tab didn't carry
    * it (→ surfaced as a "sign in" error).
    */
-  parseTokens: (session: FetchproxySession) => string | undefined;
+  parseTokens: (session: FetchproxySession) => ParsedCredential | undefined;
   /** Human-readable service name for the not-signed-in error (e.g. "Zola"). */
   serviceName?: string;
   /** Host to point the user at when the browser session is missing (e.g. "zola.com"). */
@@ -187,9 +205,14 @@ export function createAuthResolver(
           { hint: `Set ${envVar}, or sign in in your browser and retry.` },
         );
       }
-      const credential = parseTokens(session);
+      // A bare string and `{ credential, expiresAt }` are both accepted; the
+      // emptiness check is on the CREDENTIAL either way, so an object carrying
+      // an empty one means "not signed in" exactly as an empty string does.
+      const parsed = parseTokens(session);
+      const credential = typeof parsed === 'string' ? parsed : parsed?.credential;
       if (credential) {
-        return { credential, source: 'fetchproxy' };
+        const expiresAt = typeof parsed === 'string' ? undefined : parsed?.expiresAt;
+        return { credential, source: 'fetchproxy', ...(expiresAt ? { expiresAt } : {}) };
       }
       // Bootstrap succeeded but the declared key wasn't present → the browser
       // tab isn't signed in. This is the stable "go authenticate" condition.
@@ -215,6 +238,12 @@ export interface PatternResult {
   credential: string;
   /** Which path produced it. Diagnostics only — callers should not branch on it. */
   source: string;
+  /**
+   * When the credential stops being valid, if the path knew. Passed straight
+   * through — {@link resolveAuthPattern} returns whatever the winning resolver
+   * produced. See {@link ResolvedCredential.expiresAt}.
+   */
+  expiresAt?: Date;
 }
 
 /** A single path resolver. Returning a value claims the path; throwing aborts. */
