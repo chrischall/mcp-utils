@@ -104,9 +104,13 @@ export interface AuthResolverOptions {
   /** The opts object passed verbatim to {@link bootstrap} (domains, declare, …). */
   bootstrapOptions: unknown;
   /**
-   * Lift the credential out of the fetchproxy session blob. Returns the
-   * credential string, or `undefined`/`''` when the signed-in tab didn't carry
-   * it (→ surfaced as a "sign in" error).
+   * Lift the credential out of the fetchproxy session blob. Return either the
+   * credential string, or `{ credential, expiresAt }` when the session carried
+   * an expiry beside it (see {@link ResolvedCredential.expiresAt}).
+   *
+   * `undefined`, `''`, or `{ credential: '' }` all mean the signed-in tab did
+   * not carry the credential — the emptiness check is on the credential in
+   * every form — and are surfaced as a "sign in" error.
    */
   parseTokens: (session: FetchproxySession) => ParsedCredential | undefined;
   /** Human-readable service name for the not-signed-in error (e.g. "Zola"). */
