@@ -545,6 +545,49 @@ so `maxAgeMs` keeps counting from the original login. Its `invalidate()` clears
 the stored copy — without that, a session detected as expired would be read back
 off disk and the expiry would loop.
 
+#### Capabilities lifted from the hand-rolled stores
+
+Four repos (`freshbooks-mcp`, `kiaaccess-mcp`, `alphaportal-mcp`, `vibo-mcp`)
+persisted tokens before this helper existed. Auditing them before migrating
+turned up behaviour the first cut did not have:
+
+- **`onPersistError`** — a failed write is swallowed by default, which is right
+  when it merely costs a future re-login. It is wrong for a service that rotates
+  **single-use** refresh tokens: the old one is already spent upstream, so a new
+  one that never reaches disk locks the account out on the next start. Throw
+  from the hook to make the write fatal (`freshbooks-mcp`'s case). Accordingly
+  `createFileStatePersistence.save` now *reports* a failed write by throwing;
+  `load` stays total. A failure raised this way is wrapped in a
+  `StatePersistenceError` so it can never be mistaken for a revoked credential —
+  the refresh that produced it succeeded, so discarding the stored record would
+  destroy the only surviving copy, which is the lockout the option exists to
+  prevent.
+- **`boundTo`** — bind a record to the credential that minted it, so a rotated
+  password or a re-run OAuth bootstrap discards the cache instead of being
+  shadowed by it. Only a salted HMAC digest is written, never the credential, and
+  the salt is fresh per write so the same credential never leaves the same
+  artifact twice. It is a change-detector, not a password store — pass a
+  non-secret discriminator where you have one. (`freshbooks-mcp` tracked this as
+  `seededFromEnv`, storing the raw token.)
+- **`createKeyedFileStatePersistence`** — many records in one file, keyed by
+  account, each key handed out as a plain `StatePersistence` a manager takes
+  directly. Required for any server authenticating as more than one identity,
+  and for anything serving several users from one process, where a
+  single-record file would hand one user's token to the next. Keys normalize
+  trim+lowercase by default, because they are account identities, not origins.
+  Writes are whole-file read-modify-write, so two processes saving different
+  keys at the same instant can drop one update — the loser re-authenticates
+  rather than reading anything wrong, which is the right trade for a credential
+  cache and would not be for a general store.
+- **`resolveStateFile({ envVar, subdir, fileName })`** — an env override for the
+  path, checked through the same hardened `readEnvVar`. Every one of the four
+  had one, and every one used it to keep its test suite off the developer's real
+  `$HOME`.
+
+Records are written in a small envelope (`{ v: 1, boundTo?, state }`). A bare
+record written by an earlier version is still read, so nothing already on disk
+is lost.
+
 Persistence is **opt-in throughout**: a manager constructed without it behaves
 exactly as before, and no credential reaches a disk because a dependency was
 upgraded. The interface is two methods (`load` / `save`, plus an optional
