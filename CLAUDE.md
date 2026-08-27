@@ -8,7 +8,7 @@ Shared scaffolding for the **chrischall MCP fleet** — the generic MCP glue hoi
 npm install            # install deps
 npm run build          # tsc -b (composite build → dist/)
 npm run typecheck      # tsc -b --noEmit false
-npm test               # vitest run (the gate)
+npm test               # tsc typecheck + vitest run (the gate)
 npm run test:watch     # vitest in watch mode
 
 # single file / pattern
@@ -16,7 +16,7 @@ npx vitest run src/http/index.test.ts
 npx vitest run -t "buildQueryString"
 ```
 
-Tests are colocated as `src/**/*.test.ts` (run by vitest) and excluded from the build by `tsconfig.json`. There is **no lint step** and **no enforced coverage threshold** (`@vitest/coverage-v8` is installed but no thresholds are configured) — `npm test` is the bar. CI runs on Node **26**.
+Tests are colocated as `src/**/*.test.ts` (run by vitest) and excluded from the build by `tsconfig.json`. There is **no lint step** and **no enforced coverage threshold** (`@vitest/coverage-v8` is installed but no thresholds are configured) — `npm test` is the bar, and it typechecks before it runs a single test. CI runs on Node **26**.
 
 ## Architecture
 
