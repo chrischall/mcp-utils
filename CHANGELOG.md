@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.18.0](https://github.com/chrischall/mcp-utils/compare/v0.17.1...v0.18.0) (2026-08-27)
+
+
+### Features
+
+* **auth:** carry an expiry alongside the resolved credential ([#148](https://github.com/chrischall/mcp-utils/issues/148)) ([a3847b3](https://github.com/chrischall/mcp-utils/commit/a3847b3726d515eec9e4d3ab3d1da7ee73b40fa9))
+
+
+### Documentation
+
+* align CLAUDE.md's npm test description with the README ([#154](https://github.com/chrischall/mcp-utils/issues/154)) ([cc2d72d](https://github.com/chrischall/mcp-utils/commit/cc2d72db32b44b80b510504b572fa64a86f9d508))
+* **auth:** describe the object return form of parseTokens ([#151](https://github.com/chrischall/mcp-utils/issues/151)) ([119f119](https://github.com/chrischall/mcp-utils/commit/119f1192ec68b493098e22f6f711b4e1545d67a4))
+* **readme:** npm test now typechecks before running vitest ([#152](https://github.com/chrischall/mcp-utils/issues/152)) ([ea28ac9](https://github.com/chrischall/mcp-utils/commit/ea28ac9636e1b9109e651c5781f77a8d9ea22952))
+
 ## [0.17.1](https://github.com/chrischall/mcp-utils/compare/v0.17.0...v0.17.1) (2026-08-26)
 
 
