@@ -743,7 +743,7 @@ This repo also hosts composite GitHub Actions the MCP fleet reuses, under
 
 ```sh
 npm run build      # tsc -b → dist/
-npm test           # vitest run
+npm test           # tsc typecheck + vitest run
 npm run test:watch # vitest (watch mode)
 ```
 
