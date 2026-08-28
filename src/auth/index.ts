@@ -32,10 +32,42 @@
  * actionable `.hint` verbatim ("make sure a signed-in tab is open… reload
  * the extension…") instead of the generic truncated wrap. This absorbs the
  * `classifyBridgeError(e) === 'bridge_down'` branch the fleet copies of this
- * skeleton hand-rolled, and unblocks the zola / infinitecampus / ofw /
- * creditkarma migrations onto this resolver in a later wave.
+ * skeleton hand-rolled, and unblocked the ofw migration (ofw-mcp#255).
  * ({@link resolveAuthPattern} never had the gap — it propagates a configured
  * path's errors unwrapped, so an injected fetchproxy path's hint survives.)
+ *
+ * ## Who can actually adopt these, and who cannot
+ *
+ * The "later wave" this header used to promise turned out to be one repo. The
+ * eight candidates were surveyed in 2026-08; the results are recorded here so
+ * nobody re-derives them:
+ *
+ *  - **ofw** — adopted {@link resolveAuthPattern} (ofw-mcp#255). Its order
+ *    (sessionScrape → fetchproxy) is a prefix of the fixed one, so nothing
+ *    moved. It is the worked example.
+ *  - **evite** — CANNOT, without changing behaviour. It runs sessionScrape
+ *    BEFORE its env token, documented as "the user's documented default
+ *    (username/password first)". The fixed order below is token → oauth →
+ *    sessionScrape, which would silently invert which credential wins when
+ *    both are set.
+ *  - **canvas-parent** — CANNOT, same reason on a different pair: it runs
+ *    sessionScrape before OAuth and says so ("Takes precedence over OAuth").
+ *  - **signupgenius** — CANNOT, on the result shape rather than the order. Its
+ *    resolution returns `{ account, refresh }` — a strategy, not a credential —
+ *    and deliberately does NOT resolve at resolve time, because a
+ *    startup-captured JWT dies at the 30-minute cliff and a boot-time lift
+ *    failure sticks for the life of the process. A {@link PathResolver} must
+ *    RETURN a credential, so adopting it reintroduces both bugs.
+ *  - **vibo / artsonia / resy** — nothing to adopt. Each has a single auth
+ *    path, so there is no ordering to share.
+ *
+ * The pattern in the refusals is worth stating plainly: **the fixed order is a
+ * design stance, not a default.** "This is the only ordering — it never
+ * branches on which site is calling" is what makes this shared, and it is also
+ * what makes it inapplicable to a site whose own order was chosen for a
+ * documented reason. Before migrating anything else, check its order against
+ * the one below; where they differ, the repo is telling you something and the
+ * answer is not to reorder it silently.
  */
 
 import { readEnvVar, parseBoolEnv, type EnvSource } from '../config/index.js';
