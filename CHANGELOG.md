@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.18.1](https://github.com/chrischall/mcp-utils/compare/v0.18.0...v0.18.1) (2026-08-28)
+
+
+### Documentation
+
+* **auth:** finish the adoption survey — infinitecampus and creditkarma ([#157](https://github.com/chrischall/mcp-utils/issues/157)) ([eff58a9](https://github.com/chrischall/mcp-utils/commit/eff58a9f65531977d64cdd56eec2cafa703ada5b))
+* **auth:** record which fleet repos can adopt these resolvers, and which cannot ([#155](https://github.com/chrischall/mcp-utils/issues/155)) ([d0d7855](https://github.com/chrischall/mcp-utils/commit/d0d785587fda2e3cf6fb81b6a6106ed767aaef6c))
+
 ## [0.18.0](https://github.com/chrischall/mcp-utils/compare/v0.17.1...v0.18.0) (2026-08-27)
 
 
