@@ -38,8 +38,8 @@
  *
  * ## Who can actually adopt these, and who cannot
  *
- * The "later wave" this header used to promise turned out to be one repo. The
- * eight candidates were surveyed in 2026-08; the results are recorded here so
+ * The "later wave" this header used to promise turned out to be one repo. All
+ * nine candidates were surveyed in 2026-08; the results are recorded here so
  * nobody re-derives them:
  *
  *  - **ofw** — adopted {@link resolveAuthPattern} (ofw-mcp#255). Its order
@@ -58,11 +58,32 @@
  *    startup-captured JWT dies at the 30-minute cliff and a boot-time lift
  *    failure sticks for the life of the process. A {@link PathResolver} must
  *    RETURN a credential, so adopting it reintroduces both bugs.
+ *  - **infinitecampus** — CANNOT, for signupgenius's reason exactly: its
+ *    resolution returns `{ account, refresh }` and defers the lift on purpose,
+ *    because JSESSIONID is a short-idle Java servlet session and a fetchproxy
+ *    account has no credentials to re-login with. A value captured once at
+ *    process start is dead by the first request.
+ *  - **creditkarma** — CANNOT, and this one is the subtlest refusal. Its
+ *    shape fits: two paths (`CK_COOKIES` → fetchproxy, since `ck_set_session`
+ *    writes the env var and re-enters at path 1) returning
+ *    `{ cookies, source }`, which is {@link ResolvedCredential} under another
+ *    name. What blocks it is the ERROR contract: `resolveAuth` throws a typed
+ *    `CkAuthError` carrying a `reason`, and `tools/sync.ts` branches on
+ *    `isCkAuthError(err, 'session_rejected')` to decide whether to
+ *    re-bootstrap. These resolvers throw `createHelpfulError` /
+ *    `SessionNotAuthenticatedError`, so that branch would stop matching and a
+ *    retry path would change behaviour silently.
  *  - **vibo / artsonia / resy** — nothing to adopt. Each has a single auth
  *    path, so there is no ordering to share.
  *
- * The pattern in the refusals is worth stating plainly: **the fixed order is a
- * design stance, not a default.** "This is the only ordering — it never
+ * Three different things blocked adoption, which is the useful part: the
+ * ORDER (evite, canvas-parent), the RESULT SHAPE (signupgenius,
+ * infinitecampus) and the ERROR CONTRACT (creditkarma). A repo can match this
+ * module on two of the three and still be unable to use it, so check all
+ * three before starting.
+ *
+ * On the first of them: **the fixed order is a design stance, not a
+ * default.** "This is the only ordering — it never
  * branches on which site is calling" is what makes this shared, and it is also
  * what makes it inapplicable to a site whose own order was chosen for a
  * documented reason. Before migrating anything else, check its order against
