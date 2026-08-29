@@ -182,6 +182,110 @@ describe('createAuthResolver', () => {
     await expect(resolve()).rejects.toThrow(/HTTP 502/);
   });
 
+  // -- typed hints from the REST of the fetchproxy error family --
+  //
+  // `FetchproxySessionNotReadyError` (pairing not yet approved) and the
+  // `FetchproxyScopeError` / `FetchproxyNoTabError` pair all carry an
+  // actionable `.hint`, and none of them is bridge-down. Before this branch
+  // they fell to the generic wrap, so the user got the correct remedy buried in
+  // the message and contradicting advice ("Set X_TOKEN, or sign in in your
+  // browser") in the structured hint that tool surfaces render prominently.
+
+  /** Duck-typed stand-in for a non-bridge-down fetchproxy error. */
+  function makeFetchproxyError(name: string, message: string, hint: string): Error {
+    const err = new Error(`${message} ${hint}`);
+    err.name = name;
+    (err as Error & { hint: string }).hint = hint;
+    return err;
+  }
+
+  it.each([
+    [
+      'FetchproxySessionNotReadyError',
+      'fetchproxy: pairing not yet approved for "svc:1.0.0:abc".',
+      'Open the Transporter extension popup and approve pair code 482-913 for "svc:1.0.0:abc", then retry.',
+    ],
+    [
+      'FetchproxyScopeError',
+      'fetchproxy: cookie keys not in declared set: session.',
+      'Revoke this MCP in the Transporter popup and re-approve the new scope, then retry.',
+    ],
+    [
+      'FetchproxyNoTabError',
+      'fetchproxy: no tab matching https://x.com/.',
+      'Open a signed-in tab for x.com and retry.',
+    ],
+  ])('defers to the typed hint on %s', async (name, message, hint) => {
+    const bootstrap = vi.fn().mockRejectedValue(makeFetchproxyError(name, message, hint));
+    const resolve = createAuthResolver({
+      envVar: 'X_TOKEN',
+      bootstrap,
+      bootstrapOptions: { domains: ['x.com'], declare: { cookies: ['s'] } },
+      parseTokens: () => 'unused',
+      env: {},
+    });
+
+    const err = await resolve().then(
+      () => {
+        throw new Error('expected a rejection');
+      },
+      (e: unknown) => e as Error & { hint?: string },
+    );
+
+    // The structured hint is the remedy, not the env-var boilerplate.
+    expect(err.hint).toBe(hint);
+    expect(err.hint).not.toMatch(/Set X_TOKEN/);
+    // The detail still reaches the message — for pairing that includes the
+    // pair code, which the user must compare against the extension popup.
+    expect(err.message).toContain(message);
+  });
+
+  it('keeps the distinctive bridge-down wording off the other family members', async () => {
+    // Only a genuine bridge-down should claim the service worker is unreachable.
+    const bootstrap = vi
+      .fn()
+      .mockRejectedValue(
+        makeFetchproxyError(
+          'FetchproxySessionNotReadyError',
+          'fetchproxy: pairing not yet approved.',
+          'Approve pair code 482-913, then retry.',
+        ),
+      );
+    const resolve = createAuthResolver({
+      envVar: 'X_TOKEN',
+      bootstrap,
+      bootstrapOptions: { domains: ['x.com'], declare: { cookies: ['s'] } },
+      parseTokens: () => 'unused',
+      env: {},
+    });
+
+    await expect(resolve()).rejects.toThrow(/fetchproxy fallback failed/);
+    await expect(resolve()).rejects.not.toThrow(/service worker unreachable/);
+  });
+
+  it('does not treat a hint-less Fetchproxy-named error as hinted', async () => {
+    // Right name prefix, no usable hint - falls to the generic wrap.
+    const err = new Error('fetchproxy: something else went wrong');
+    err.name = 'FetchproxySessionNotReadyError';
+    const bootstrap = vi.fn().mockRejectedValue(err);
+    const resolve = createAuthResolver({
+      envVar: 'X_TOKEN',
+      bootstrap,
+      bootstrapOptions: { domains: ['x.com'], declare: { cookies: ['s'] } },
+      parseTokens: () => 'unused',
+      env: {},
+    });
+
+    const thrown = await resolve().then(
+      () => {
+        throw new Error('expected a rejection');
+      },
+      (e: unknown) => e as Error & { hint?: string },
+    );
+
+    expect(thrown.hint).toMatch(/Set X_TOKEN/);
+  });
+
   it('env path is unaffected by a bridge-down-throwing bootstrap', async () => {
     const bootstrap = vi.fn().mockRejectedValue(makeBridgeDownError('wake the worker'));
     const resolve = createAuthResolver({

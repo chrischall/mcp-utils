@@ -175,24 +175,42 @@ export interface AuthResolverOptions {
 }
 
 /**
- * Duck-typed `bridge_down` detection — mirrors `classifyBridgeError(e) ===
- * 'bridge_down'` from the `/fetchproxy` subpath WITHOUT importing
- * `@fetchproxy/server` (this core module must stay zero-runtime-dep).
- * `classifyBridgeError`'s `'bridge_down'` arm is exactly
- * `err instanceof FetchproxyBridgeDownError`, and that class's constructor
- * unconditionally sets `name = 'FetchproxyBridgeDownError'` and a non-empty
- * string `hint` — so the (name, string-hint) pair is a faithful stand-in for
- * the `instanceof`, and unlike `instanceof` it stays correct when the dep
- * tree carries a duplicated copy of `@fetchproxy/server`.
+ * The actionable `.hint` carried by a fetchproxy error, if any.
  *
- * Returns the actionable `.hint` when `err` is bridge-down, else `undefined`.
+ * Duck-typed WITHOUT importing `@fetchproxy/server` (this core module must stay
+ * zero-runtime-dep), and unlike `instanceof` it stays correct when the dep tree
+ * carries a duplicated copy of that package.
+ *
+ * The match is the `Fetchproxy` name prefix plus a non-empty string `hint`,
+ * which is the whole family: `FetchproxyBridgeDownError`,
+ * `FetchproxySessionNotReadyError` (pairing not yet approved — its hint carries
+ * the pair code), and the `FetchproxyHintedError` pair
+ * `FetchproxyScopeError` / `FetchproxyNoTabError`. Every one of them sets
+ * `name` in its constructor and authors a hint meant to be read by a user.
+ *
+ * Matching the FAMILY rather than any error carrying a `hint` is deliberate: an
+ * unrelated rejection that happens to have one (an HTTP 502 with
+ * `hint: 'retry later'`) is not auth guidance and must not displace the env-var
+ * advice below.
  */
-function bridgeDownHintOf(err: unknown): string | undefined {
-  if (err instanceof Error && err.name === 'FetchproxyBridgeDownError') {
+function fetchproxyHintOf(err: unknown): string | undefined {
+  if (err instanceof Error && err.name.startsWith('Fetchproxy')) {
     const hint = (err as Error & { hint?: unknown }).hint;
     if (typeof hint === 'string' && hint.length > 0) return hint;
   }
   return undefined;
+}
+
+/**
+ * Duck-typed `bridge_down` detection — mirrors `classifyBridgeError(e) ===
+ * 'bridge_down'`, whose `'bridge_down'` arm is exactly
+ * `err instanceof FetchproxyBridgeDownError`. Kept separate from
+ * {@link fetchproxyHintOf} because bridge-down is the one member of the family
+ * that earns its own wording: it means the extension's service worker is
+ * unreachable, which no other member implies.
+ */
+function isBridgeDown(err: unknown): boolean {
+  return err instanceof Error && err.name === 'FetchproxyBridgeDownError';
 }
 
 /**
@@ -240,6 +258,7 @@ export function createAuthResolver(
       try {
         session = await bootstrap(bootstrapOptions);
       } catch (e) {
+        const typedHint = fetchproxyHintOf(e);
         // Bridge-down gets first-class treatment. A `FetchproxyBridgeDownError`
         // only escapes bootstrap() after the server's one-shot lazy-revive
         // retry also failed — the extension's service worker is genuinely down
@@ -247,16 +266,29 @@ export function createAuthResolver(
         // the fleet (zola / IC / ofw / honeybook) hand-rolled this branch to
         // preserve; surface it verbatim (library-authored, not an untrusted
         // upstream body — so no truncation that could clip the guidance).
-        const bridgeHint = bridgeDownHintOf(e);
-        if (bridgeHint !== undefined) {
+        if (typedHint !== undefined && isBridgeDown(e)) {
           throw createHelpfulError(
             `Auth: no ${envVar} set, and the fetchproxy bridge is down ` +
-              `(extension service worker unreachable). ${bridgeHint}`,
-            { hint: bridgeHint },
+              `(extension service worker unreachable). ${typedHint}`,
+            { hint: typedHint },
           );
         }
-        // Surface the fallback failure but point back at the env-var escape
-        // hatch. Redact + truncate the underlying message.
+        // The rest of the family — pairing not yet approved, a scope that
+        // changed, no matching tab — carries a remedy of its own. DEFER to it
+        // rather than appending the env-var copy: bolting "Set X, or sign in in
+        // your browser" onto "approve pair code 482-913" is how a user ends up
+        // reading the correct remedy and contradicting advice in one string,
+        // with the wrong half in the position tool surfaces render. The message
+        // still carries the detail (the pair code included), truncated because
+        // it may quote an upstream body.
+        if (typedHint !== undefined) {
+          throw createHelpfulError(
+            `Auth: no ${envVar} set, and fetchproxy fallback failed: ${truncateErrorMessage(messageOf(e))}`,
+            { hint: typedHint },
+          );
+        }
+        // Unclassified: surface the failure but point back at the env-var
+        // escape hatch. Redact + truncate the underlying message.
         throw createHelpfulError(
           `Auth: no ${envVar} set, and fetchproxy fallback failed: ${truncateErrorMessage(messageOf(e))}`,
           { hint: `Set ${envVar}, or sign in in your browser and retry.` },
