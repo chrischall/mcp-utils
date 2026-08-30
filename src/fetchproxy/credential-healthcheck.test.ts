@@ -152,4 +152,108 @@ describe('registerCredentialHealthcheckTool', () => {
     expect(r.probe.url).toBeUndefined();
     expect(r.ok).toBe(true);
   });
+
+  it("classifies a bare AbortController abort as timeout, by err.name", async () => {
+    // The message carries nothing useful for a bare abort — matching text
+    // alone classified these as 'unknown'. src/http/index.ts checks err.name.
+    const abort = Object.assign(new Error('The operation was aborted'), {
+      name: 'AbortError',
+    });
+    const r = await run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => ({ source: 'env' }),
+      probeFn: async () => {
+        throw abort;
+      },
+    });
+    expect(r.error?.kind).toBe('timeout');
+  });
+
+  it("classifies a message-shaped timeout as timeout", async () => {
+    const r = await run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => ({ source: 'env' }),
+      probeFn: async () => {
+        throw new Error('ETIMEDOUT connecting to host');
+      },
+    });
+    expect(r.error?.kind).toBe('timeout');
+  });
+
+  it('classifies an unreachable host as transport', async () => {
+    const r = await run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => ({ source: 'env' }),
+      probeFn: async () => {
+        throw new Error('fetch failed');
+      },
+    });
+    expect(r.error?.kind).toBe('transport');
+    expect(r.hint).toMatch(/reach/i);
+  });
+
+  it('honours a per-arm hints override', async () => {
+    const r = await run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => ({ source: null }),
+      probeFn: async () => ({}),
+      hints: { no_credential: 'Connect the connector first.' },
+    });
+    expect(r.hint).toBe('Connect the connector first.');
+  });
+
+  // A healthcheck is the tool people paste into a chat when something is
+  // broken, and upstream failures routinely quote what they were sent.
+  it('redacts secrets out of an upstream error message', async () => {
+    const r = await run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => ({ source: 'env' }),
+      probeFn: async () => {
+        throw new Error('rejected: Bearer sk-live-ABCDEF1234567890abcdef');
+      },
+    });
+    expect(r.error?.message ?? '').not.toContain('sk-live-ABCDEF1234567890abcdef');
+  });
+
+  it('redacts a secret thrown by the resolver too', async () => {
+    const r = await run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => {
+        throw new Error('mint failed for Bearer sk-live-ABCDEF1234567890abcdef');
+      },
+      probeFn: async () => ({}),
+    });
+    expect(r.error?.message ?? '').not.toContain('sk-live-ABCDEF1234567890abcdef');
+  });
+
+  // Resolving can mint a token or drive the browser bridge; counting that as
+  // probe latency reports it as far-side slowness.
+  it('excludes credential-resolution time from probe.elapsed_ms', async () => {
+    const r = await run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => {
+        await new Promise((res) => setTimeout(res, 60));
+        return { source: 'env' };
+      },
+      probeFn: async () => ({}),
+    });
+    expect(r.probe.elapsed_ms).toBeLessThan(50);
+  });
+
+  it('emits no probe.url on the no-credential paths', async () => {
+    const r = await run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => ({ source: null }),
+      probeFn: async () => ({}),
+    });
+    expect(r.probe.url).toBeUndefined();
+  });
 });

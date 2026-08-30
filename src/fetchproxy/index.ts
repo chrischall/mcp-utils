@@ -904,6 +904,12 @@ export interface CredentialState {
   detail?: Record<string, unknown>;
 }
 
+/**
+ * Options for {@link registerCredentialHealthcheckTool} — the credential-side
+ * twin of {@link RegisterBridgeHealthcheckToolArgs}. The per-connector bits are
+ * `prefix`, `hostLabel`, the optional `probePath`, and the two functions that
+ * reach the outside world (`resolveCredential`, `probeFn`).
+ */
 export interface RegisterCredentialHealthcheckToolArgs {
   server: {
     registerTool: (name: string, config: unknown, handler: () => Promise<unknown>) => void;
@@ -931,6 +937,15 @@ export interface RegisterCredentialHealthcheckToolArgs {
   hints?: Partial<Record<CredentialHealthcheckArm, string>>;
 }
 
+/**
+ * The JSON body `${prefix}_healthcheck` returns for a credential-style
+ * connector, mirroring {@link BridgeHealthcheckResult}'s envelope: `ok`, the
+ * per-subject block (here `credential` rather than `bridge`), the `probe`
+ * measurements, an optional typed `error`, and always a human-readable `hint`.
+ *
+ * `credential` never carries the credential itself — only the source label and
+ * whatever non-secret `detail` the resolver chose to report.
+ */
 export interface CredentialHealthcheckResult {
   ok: boolean;
   credential: { source: string | null; resolved: boolean; detail?: Record<string, unknown> };
@@ -963,7 +978,7 @@ function credentialHint(
     case 'timeout':
       return `The credential from '${source}' resolved, but ${hostLabel} did not answer in time. Usually transient — retry. If it persists, ${hostLabel} is slow or unreachable from here.`;
     case 'http':
-      return `${hostLabel} answered with an error status. The credential was accepted, so this is a ${hostLabel}-side problem rather than an auth one.`;
+      return `${hostLabel} answered with an error status that is not an auth rejection. That is USUALLY a ${hostLabel}-side problem rather than an auth one — but a 404 here more often means the probe path is wrong than that ${hostLabel} is broken, so check error.message and probe.url before concluding anything about the credential.`;
     case 'transport':
       return `Could not reach ${hostLabel} at all. Check network egress; the credential itself was never judged.`;
     default:
@@ -1009,7 +1024,10 @@ export function registerCredentialHealthcheckTool(
       inputSchema: {},
     },
     async () => {
-      const started = Date.now();
+      // Timed from just BEFORE the probe, never from the top: resolving a
+      // credential can mint a token or drive the browser bridge, and folding
+      // that into `probe.elapsed_ms` reports it as far-side latency.
+      let probeStarted = 0;
 
       let state: CredentialState;
       try {
@@ -1018,8 +1036,9 @@ export function registerCredentialHealthcheckTool(
         const result: CredentialHealthcheckResult = {
           ok: false,
           credential: { source: null, resolved: false },
-          probe: { ...(probeUrl ? { url: probeUrl } : {}), elapsed_ms: Date.now() - started },
-          error: { kind: 'no_credential', message: messageOf(e) },
+          // No `url`: nothing was probed, and naming one implies it was tried.
+          probe: { elapsed_ms: 0 },
+          error: { kind: 'no_credential', message: truncateErrorMessage(messageOf(e)) },
           hint: hints?.no_credential ?? credentialHint('no_credential', prefix, hostLabel, null),
         };
         return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
@@ -1038,7 +1057,7 @@ export function registerCredentialHealthcheckTool(
         const result: CredentialHealthcheckResult = {
           ok: false,
           credential,
-          probe: { ...(probeUrl ? { url: probeUrl } : {}), elapsed_ms: Date.now() - started },
+          probe: { elapsed_ms: 0 },
           error: { kind: 'no_credential', message: 'no credential source resolved' },
           hint: hints?.no_credential ?? credentialHint('no_credential', prefix, hostLabel, null),
         };
@@ -1050,16 +1069,21 @@ export function registerCredentialHealthcheckTool(
       let status: number | undefined;
       let customHint: string | undefined;
 
+      probeStarted = Date.now();
       try {
         await probeFn();
       } catch (e) {
         status = statusOf(e);
+        // `AbortError` is matched on `err.name`, as src/http/index.ts does — a
+        // bare AbortController abort carries it there and NOT in the message,
+        // so matching the text alone classified those as 'unknown'.
+        const aborted = e instanceof Error && e.name === 'AbortError';
         arm =
           status === 401 || status === 403
             ? 'credential_rejected'
             : status !== undefined
               ? 'http'
-              : /timeout|timed out|ETIMEDOUT|AbortError/i.test(messageOf(e))
+              : aborted || /timeout|timed out|ETIMEDOUT/i.test(messageOf(e))
                 ? 'timeout'
                 : /fetch failed|ENOTFOUND|ECONNREFUSED|ECONNRESET|network/i.test(messageOf(e))
                   ? 'transport'
@@ -1074,7 +1098,10 @@ export function registerCredentialHealthcheckTool(
         }
         error = {
           kind,
-          message: messageOf(e),
+          // Redacted AND bounded before it reaches the result: an upstream
+          // failure routinely quotes what it was sent, and a healthcheck is
+          // the tool people paste into a chat when something is broken.
+          message: truncateErrorMessage(messageOf(e)),
           ...(detail !== undefined ? { detail } : {}),
         };
       }
@@ -1084,7 +1111,7 @@ export function registerCredentialHealthcheckTool(
         credential,
         probe: {
           ...(probeUrl ? { url: probeUrl } : {}),
-          elapsed_ms: Date.now() - started,
+          elapsed_ms: Date.now() - probeStarted,
           ...(status !== undefined ? { status } : {}),
         },
         ...(error ? { error } : {}),

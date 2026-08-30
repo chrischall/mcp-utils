@@ -698,6 +698,40 @@ custom `{ kind, hint }` (e.g. an SSO bounce → `session_expired` with re-sign-i
 copy; its hint wins the result hint), and `hints` overrides the default copy
 per ladder arm (`{ timeout: 'DataDome may be challenging the tab — …' }`).
 
+**Credential-healthcheck tool factory.** `registerCredentialHealthcheckTool({
+server, prefix, hostLabel, probePath?, resolveCredential, probeFn })` is the
+twin for connectors whose health is about a **credential** rather than a
+browser bridge: OAuth connectors, API-key connectors, and the fetchproxy MCPs
+that only *bootstrap* a token and then talk to an API directly.
+
+It exists because three failures are otherwise indistinguishable and have
+different fixes: nothing minted a credential, something minted one the far side
+rejects, and the far side is down.
+
+```ts
+registerCredentialHealthcheckTool({
+  server,
+  prefix: 'freshbooks',
+  hostLabel: 'api.freshbooks.com',
+  probePath: '/auth/api/v1/users/me',
+  resolveCredential: async () => ({ source: 'env', detail: { age_days: 3 } }),
+  probeFn: () => client.getIdentity(),
+});
+```
+
+Arms: `ok`, `no_credential`, `credential_rejected` (401/403), `timeout`,
+`http`, `transport`, `unknown` — with the same `classifyThrown` / `hints`
+hooks as the bridge factory.
+
+Two behaviours worth knowing. **The probe is skipped entirely when no
+credential resolved**, because probing without one returns 401 and reads as
+"rejected", sending people off to re-authenticate a credential that does not
+exist. And **`CredentialState` carries a source label plus a non-secret
+`detail` bag, never the value** — `detail` is echoed verbatim into the result,
+and a healthcheck is the tool people paste into a chat when something is
+broken. Error messages go through `truncateErrorMessage`, so redaction runs
+before any upstream text reaches the result.
+
 ### `html` — scraping helpers *(subpath, optional peer)*
 
 ```ts
