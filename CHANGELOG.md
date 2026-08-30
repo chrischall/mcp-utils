@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.1](https://github.com/chrischall/mcp-utils/compare/v0.19.0...v0.19.1) (2026-08-30)
+
+
+### Bug Fixes
+
+* **fetchproxy:** type registerCredentialHealthcheckTool's server as McpServer ([#164](https://github.com/chrischall/mcp-utils/issues/164)) ([fde8b6d](https://github.com/chrischall/mcp-utils/commit/fde8b6d0fcbcd5d9bdb59f5eb08d7a71560584d8))
+
 ## [0.19.0](https://github.com/chrischall/mcp-utils/compare/v0.18.1...v0.19.0) (2026-08-30)
 
 
