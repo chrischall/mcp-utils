@@ -867,3 +867,21 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
     },
   );
 }
+
+/**
+ * @deprecated Import from `@chrischall/mcp-utils/healthcheck` instead.
+ *
+ * `registerCredentialHealthcheckTool` shipped here in 0.19.0–0.19.1 and moved
+ * out because this module imports the optional `@fetchproxy/server` peer,
+ * which most of its callers do not install. Re-exported so those releases keep
+ * working rather than breaking under a patch-level change; it will be removed
+ * in the next minor.
+ */
+export {
+  registerCredentialHealthcheckTool,
+  type RegisterCredentialHealthcheckToolArgs,
+  type CredentialHealthcheckResult,
+  type CredentialHealthcheckArm,
+  type CredentialState,
+} from '../healthcheck/index.js';
+

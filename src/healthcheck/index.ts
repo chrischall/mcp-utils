@@ -46,14 +46,15 @@ export interface CredentialState {
 
 /**
  * Options for {@link registerCredentialHealthcheckTool} — the credential-side
- * twin of {@link RegisterBridgeHealthcheckToolArgs}. The per-connector bits are
+ * twin of `RegisterBridgeHealthcheckToolArgs` (in `../fetchproxy/`; not an
+ * `{@link}` because this module deliberately cannot import that one). The per-connector bits are
  * `prefix`, `hostLabel`, the optional `probePath`, and the two functions that
  * reach the outside world (`resolveCredential`, `probeFn`).
  */
 export interface RegisterCredentialHealthcheckToolArgs {
   /**
    * The `McpServer` to register the tool on — the same type
-   * {@link RegisterBridgeHealthcheckToolArgs} takes. NOT a structural
+   * `RegisterBridgeHealthcheckToolArgs` takes. NOT a structural
    * `{ registerTool }` shape: `McpServer.registerTool` is generic over its
    * schema arguments, so a loose signature with `config: unknown` is not
    * assignable from the real method and every caller fails to typecheck.
@@ -84,7 +85,7 @@ export interface RegisterCredentialHealthcheckToolArgs {
 
 /**
  * The JSON body `${prefix}_healthcheck` returns for a credential-style
- * connector, mirroring {@link BridgeHealthcheckResult}'s envelope: `ok`, the
+ * connector, mirroring `BridgeHealthcheckResult`'s envelope: `ok`, the
  * per-subject block (here `credential` rather than `bridge`), the `probe`
  * measurements, an optional typed `error`, and always a human-readable `hint`.
  *
@@ -140,7 +141,7 @@ function credentialHint(
  * It exists because those three failures are indistinguishable today and have
  * different fixes: nothing minted a credential, something minted one the far
  * side rejects, and the far side is simply down. The bridge helper
- * ({@link registerBridgeHealthcheckTool}) answers the equivalent question for
+ * (`registerBridgeHealthcheckTool`, in `../fetchproxy/`) answers the equivalent question for
  * MCPs where every request rides the bridge.
  *
  * The probe is SKIPPED when no credential resolved — probing without one

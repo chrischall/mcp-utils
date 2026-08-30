@@ -27,6 +27,7 @@ The package exports a light **core barrel** plus heavier **subpath entries** so 
 | `@chrischall/mcp-utils` | `server` `response` `errors` `config` `fs` `http` `concurrency` `dates` `zod` `auth` `scrape` | core barrel — re-exported from `src/index.ts` |
 | `@chrischall/mcp-utils/session` | `session` | session registry / disk store / `TokenManager` / `CookieSessionManager` |
 | `@chrischall/mcp-utils/fetchproxy` | `fetchproxy` | transport adapter; needs optional peer `@fetchproxy/server` |
+| `@chrischall/mcp-utils/healthcheck` | `healthcheck` | credential-style healthcheck factory; ZERO optional peers, which is why it is not in `/fetchproxy` |
 | `@chrischall/mcp-utils/html` | `html` | HTML scraping helpers; needs optional peer `node-html-parser` |
 | `@chrischall/mcp-utils/scrape` | `scrape` | convenience alias; `scrape` is zero-dep and also in the core barrel |
 | `@chrischall/mcp-utils/test` | `test` | in-memory vitest harness; devtime-only, never imported by runtime code |
