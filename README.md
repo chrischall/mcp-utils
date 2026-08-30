@@ -34,6 +34,7 @@ import light:
 | `@chrischall/mcp-utils` | core barrel: `server` + `response` + `errors` + `config` + `fs` + `http` + `concurrency` + `dates` + `zod` + `auth` + `scrape` |
 | `@chrischall/mcp-utils/session` | session registry, session store, state persistence, token manager, cookie-session manager |
 | `@chrischall/mcp-utils/fetchproxy` | fetchproxy transport adapter, bot-wall / retry / concurrency helpers |
+| `@chrischall/mcp-utils/healthcheck` | credential-style healthcheck factory (no fetchproxy peer needed) |
 | `@chrischall/mcp-utils/html` | opt-in HTML scraping helpers (needs `node-html-parser`) |
 | `@chrischall/mcp-utils/scrape` | convenience alias for the zero-dep `scrape` module (also in the core barrel) |
 | `@chrischall/mcp-utils/test` | in-memory test harness for tool registration |
@@ -698,7 +699,16 @@ custom `{ kind, hint }` (e.g. an SSO bounce → `session_expired` with re-sign-i
 copy; its hint wins the result hint), and `hints` overrides the default copy
 per ladder arm (`{ timeout: 'DataDome may be challenging the tab — …' }`).
 
-**Credential-healthcheck tool factory.** `registerCredentialHealthcheckTool({
+### `healthcheck` — credential healthchecks *(subpath, no optional peers)*
+
+```ts
+import { registerCredentialHealthcheckTool } from '@chrischall/mcp-utils/healthcheck';
+```
+
+Its own subpath rather than `/fetchproxy`, which pulls the optional
+`@fetchproxy/server` peer that most callers of this factory do not install.
+
+`registerCredentialHealthcheckTool({
 server, prefix, hostLabel, probePath?, resolveCredential, probeFn })` is the
 twin for connectors whose health is about a **credential** rather than a
 browser bridge: OAuth connectors, API-key connectors, and the fetchproxy MCPs
