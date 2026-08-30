@@ -698,7 +698,7 @@ custom `{ kind, hint }` (e.g. an SSO bounce → `session_expired` with re-sign-i
 copy; its hint wins the result hint), and `hints` overrides the default copy
 per ladder arm (`{ timeout: 'DataDome may be challenging the tab — …' }`).
 
-**Credential-healthcheck tool factory.** `registerCredentialHealthcheckTool({
+**Credential-healthcheck tool factory** *(subpath `@chrischall/mcp-utils/healthcheck` — NOT `/fetchproxy`, which pulls the optional `@fetchproxy/server` peer)*. `registerCredentialHealthcheckTool({
 server, prefix, hostLabel, probePath?, resolveCredential, probeFn })` is the
 twin for connectors whose health is about a **credential** rather than a
 browser bridge: OAuth connectors, API-key connectors, and the fetchproxy MCPs
