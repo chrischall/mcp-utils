@@ -911,9 +911,14 @@ export interface CredentialState {
  * reach the outside world (`resolveCredential`, `probeFn`).
  */
 export interface RegisterCredentialHealthcheckToolArgs {
-  server: {
-    registerTool: (name: string, config: unknown, handler: () => Promise<unknown>) => void;
-  };
+  /**
+   * The `McpServer` to register the tool on — the same type
+   * {@link RegisterBridgeHealthcheckToolArgs} takes. NOT a structural
+   * `{ registerTool }` shape: `McpServer.registerTool` is generic over its
+   * schema arguments, so a loose signature with `config: unknown` is not
+   * assignable from the real method and every caller fails to typecheck.
+   */
+  server: McpServer;
   /** Tool-name prefix; the tool is `${prefix}_healthcheck`. */
   prefix: string;
   /** Display host for the probe URL and hint copy, e.g. `'api.freshbooks.com'`. */
