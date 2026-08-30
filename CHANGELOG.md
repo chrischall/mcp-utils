@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.19.0](https://github.com/chrischall/mcp-utils/compare/v0.18.1...v0.19.0) (2026-08-30)
+
+
+### Features
+
+* **fetchproxy:** add registerCredentialHealthcheckTool ([#161](https://github.com/chrischall/mcp-utils/issues/161)) ([9abfdf1](https://github.com/chrischall/mcp-utils/commit/9abfdf1cbc3a22180476cd11691bc5a963b887ab))
+
+
+### Bug Fixes
+
+* **auth:** defer to the typed fetchproxy hint instead of overwriting it ([#158](https://github.com/chrischall/mcp-utils/issues/158)) ([9e68b5a](https://github.com/chrischall/mcp-utils/commit/9e68b5ab184d01ab0f53fec980c4e0ce6a808eab))
+
+
+### Documentation
+
+* **skill:** match the fetchproxy hint FAMILY, not the FetchproxyHintedError base ([#163](https://github.com/chrischall/mcp-utils/issues/163)) ([5934881](https://github.com/chrischall/mcp-utils/commit/59348813e428d1c7eadfc40e29b90877baac6372)), closes [#159](https://github.com/chrischall/mcp-utils/issues/159)
+
 ## [0.18.1](https://github.com/chrischall/mcp-utils/compare/v0.18.0...v0.18.1) (2026-08-28)
 
 
