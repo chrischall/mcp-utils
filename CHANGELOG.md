@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.2](https://github.com/chrischall/mcp-utils/compare/v0.19.1...v0.19.2) (2026-08-30)
+
+
+### Bug Fixes
+
+* **healthcheck:** move registerCredentialHealthcheckTool out of /fetchproxy ([#166](https://github.com/chrischall/mcp-utils/issues/166)) ([662ce87](https://github.com/chrischall/mcp-utils/commit/662ce87308cb3226119997dd427db4054f42caed))
+
 ## [0.19.1](https://github.com/chrischall/mcp-utils/compare/v0.19.0...v0.19.1) (2026-08-30)
 
 
