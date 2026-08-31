@@ -57,7 +57,7 @@ mint.yaml         # how this MCP wants to be HOSTED (mcp-host reads it; see belo
 
 Each `tools/*.ts` exports `registerXxxTools(server, deps)` that calls `server.registerTool(name, { description, annotations, inputSchema }, handler)` (high-level `McpServer` API with zod). `index.ts` only wires them.
 
-## @chrischall/mcp-utils surface  (current: 0.14.x)
+## @chrischall/mcp-utils surface  (current: 0.19.x)
 
 Declared exports are `.`, `./scrape`, `./test`, `./fetchproxy`, `./session`, `./html`. Everything under "Core entry" below is a grouping within the root export, not an importable subpath. This list goes stale — check `package.json#exports` in `~/git/mcp-utils` before concluding a helper doesn't exist and hand-rolling it.
 
@@ -158,6 +158,30 @@ Check the web surface early too: **a site's dashboard may be read-only while the
 Try the metadata endpoints first (`/metadata`, `/types/typescript`, `/openapi`, `/swagger-ui`) — production usually 404s them all, which is what makes the bundle the only machine-readable source. pickuppatrol yielded 41 DTOs with verbs and fields this way in one pass.
 
 **But the DTO classes give you the request SHAPE, not the payload VALUES — and the call sites live in lazily-loaded route chunks.** A field list does not tell you that `Plans` is an array of one entry per date, or that "revert to default" is the same call with a null id. Find the chunk that builds the payload: open the SPA route in a signed-in tab and diff `performance.getEntriesByType('resource')` before/after navigating; the new `*.js` is the one to read. Two of pickuppatrol's writes were only decidable this way — and one of them turned out to have no endpoint of its own at all (weekly defaults are a read-modify-write PUT of the whole parent record), which no amount of staring at the DTO list would have revealed.
+
+**And the URL the code composes may not be the URL on the wire — an interceptor
+can rewrite it, and an endpoint probe will not tell you.** honeybook-mcp's
+`get_flow` was built by reading the shipped flow app, correctly: `_fetchFlow`
+really does compose `/api/v2/flow/<id>/active`. The wire call is
+`/api/v2/**client**/flow/<id>/active?ctxc=<companyId>`, because a shared axios
+interceptor one layer below does `url.replace("/api/v2/", "/api/v2/client/")`
+and injects `params.ctxc` from a store. **Neither `/api/v2/client/flow` nor the
+`ctxc` assignment is greppable as a request path** — the literal does not exist
+in the bundle, so a search for endpoints finds only the pre-interceptor form.
+
+Worse, the obvious check CONFIRMS the wrong answer: both paths return a
+byte-identical `404 {"error_type":"HBUnauthorizedError"}` unauthenticated, so
+"the route exists" was true of a URL that never works. It shipped, and the
+first real call was a 400 whose body says only "Unexpected server error".
+
+So: read the bundle to learn the SHAPE and to find candidates, and take **one
+HAR of the real call** before writing the client — an authenticated capture is
+the only artifact that shows the request as sent, headers included. It also
+hands you things reading cannot: `hb-api-client-version` turned out to be
+load-bearing (without it every call is that same 400), while
+`hb-api-fingerprint`, which looks equally required, is ignored — isolated in
+three requests by removing one header at a time. Budget the capture; it is
+cheaper than shipping a tool whose only real-world test fails.
 
 **Auth preference order — avoid requiring the browser bridge at runtime.** fetchproxy needs the Transporter extension + a signed-in tab, so it's the heaviest thing to ask of a user. Pick the FIRST that authenticates cleanly, and even then keep the bridge off the hot path:
 
@@ -435,6 +459,8 @@ A new fleet repo isn't done until ALL of this exists. Each line below was a real
 - **A green JOB does not mean the action happened — read the log, not the conclusion.** The `mcp-publish` composite *warns and skips* rather than failing when a secret is absent, so a job goes green next to `##[warning] … was NOT published`. This is the same class as "a green tag does not mean a green publish", and it fools you twice over: grepping the log for the warning text also matches the **echoed script source** (lines prefixed with the `^[[36;1m` command-echo escape), so a naive grep "finds" the warning on runs where it never fired. Grep for the real markers — `##[warning]`, `Total Upload`, `Current Version ID` — or just verify the artifact: `npm view <pkg> version`, `mcp-host get <slug>`, a live `curl`.
 - **`npm view <pkg> version` is necessary but NOT sufficient — install the published tarball and run the handshake.** `npm i <pkg>@<v>` into a clean dir, then drive `initialize` + `tools/list` against its `bin`. That is what caught `manifest.json` listing 13 of the 14 tools the server registers: the tool was callable by name, the server booted fine, and nothing else reads that file — so an mcpb host would simply never have shown it. **Guard it with a test that asserts the `manifest.json` roster equals the registered roster in BOTH directions** (drive the real registrars through `createTestHarness`), and reject a blank description while you're there. Do the install in a directory with no parent `package.json`: npm walks up, and a scratch dir under one with a symlinked `node_modules` will install straight into the linked target.
 - **Release-please does NOT refresh its PR for hidden commit types, so its branch goes stale and conflicts.** Merge a run of `build(deps-dev)` / `chore` / `ci` commits while a release PR is open and the release branch stays pinned at its old merge-base; because those types are `hidden: true` in `changelog-sections`, release-please sees nothing changelog-relevant and leaves the PR alone. Every run keeps reporting **success** while the PR sits `DIRTY` — the conflict is `package.json`/`package-lock.json`, which both the dep bumps and the version bump touch. `workflow_dispatch` does not fix it (same no-op logic). **Recovery: delete the release branch** (`gh api -X DELETE repos/<o>/<r>/git/refs/heads/release-please--branches--main--components--<pkg>`, which auto-closes the PR) **then re-run release-please** — it rebuilds from current `main`. The contents are generated-only, so nothing is lost. Then verify the regenerated PR's **merge-base equals `main` head** AND that it **preserved the dep bumps** — a rebuild from a stale base would silently revert every merged bump.
+- **Never detect a condition by matching PROSE — export a constant or a predicate.** The recurring shape is a message whose wording serves two purposes, so a classifier keyed on it fires on the wrong one. It bit twice in one day. freshbooks regex-matched a rendered error for `FRESHBOOKS_REFRESH_TOKEN`, which is true whenever the token is merely NAMED among the missing vars — so with an app credential also missing, the message said "reconnecting cannot supply them" while the hint said "Reconnect this connector". honeybook's `classifyThrown` matched `use_magic_link` as a SYMPTOM of a rejected session, and its no-session message names `use_magic_link` as the FIX — so a user who had never connected was told their session expired. Both now key on an exported constant/predicate (`NO_AUTH_CONFIGURED`/`isNoAuthConfigured`, `CkAuthError.reason`, `HoneyBookApiError.status`) so the thrower and the reader cannot drift. A copied string keeps its own test green the day the wording changes. Corollary: when two sites must agree on a message, ONE of them owns it and the other imports it — and add a test that the real thrower actually raises it, since two strings agreeing proves nothing if nothing throws the message they agree about.
+- **Mutation-test every guard, and distrust a test that passes the first time.** A test written after the fix can pass for the wrong reason. Two live examples: an assertion guarded by `if (status !== 200)` never ran because the failure it needed could not be induced (`deleteUnlessLive` returns `'failed'` rather than throwing), and a sweep test passed because the code path it targeted was skipped entirely on the tier it was exercising. Break the thing on purpose, confirm the RIGHT test fails, restore. If nothing fails, the test asserts nothing.
 - **stdio transport**: logs go to **stderr only** — stdout is reserved for JSON-RPC.
 - **Don't merge PRs**: open with one release-notes label; `pr-auto-review` + `auto-merge` ship it. Never add `ready-to-merge` yourself to override a warn/fail.
 - **NEVER `git add -A` / `git add .` in a fleet repo — these working trees carry active uncommitted WIP.** Stage the exact paths your change touches. During a fleet-wide rollout a retry script used `git add -A` across eight repos; in `gogcli-mcp` that swept ~1,450 lines of unrelated in-progress work (new tool modules + tests + manifest edits) into a `chore:` PR that could have auto-merged. Nothing in the local flow caught it — the auto-review did, by noting the commit "bundles 20 new base tools". A script that commits must stage a whitelist and refuse when `git status --porcelain` shows anything outside it. **Recovery without touching the user's tree:** save a backup branch ref, split the bad commit (`git diff <good> <bad> -- '<your-paths>'`), rebuild in a throwaway `git worktree add --detach /tmp/x <good-sha>`, apply only your patch, commit, `push --force-with-lease` — their working copy is never checked out or reset, so the WIP stays put. Verify afterwards that the WIP files still exist and the branch diff contains only your files.
