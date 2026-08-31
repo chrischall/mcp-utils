@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.19.3](https://github.com/chrischall/mcp-utils/compare/v0.19.2...v0.19.3) (2026-08-31)
+
+
+### Bug Fixes
+
+* **healthcheck:** let a consumer classify a resolveCredential failure ([#172](https://github.com/chrischall/mcp-utils/issues/172)) ([63088a6](https://github.com/chrischall/mcp-utils/commit/63088a61b3a13a94a8da0881954a60f7d908aa9c))
+
+
+### Documentation
+
+* **skill:** document /healthcheck and how to pick between the two factories ([#170](https://github.com/chrischall/mcp-utils/issues/170)) ([231ca9b](https://github.com/chrischall/mcp-utils/commit/231ca9b69ad242e8e8768c4d85abf48c46330d8b))
+
 ## [0.19.2](https://github.com/chrischall/mcp-utils/compare/v0.19.1...v0.19.2) (2026-08-30)
 
 
