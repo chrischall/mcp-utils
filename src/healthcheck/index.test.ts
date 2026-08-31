@@ -329,3 +329,53 @@ describe('a resolver throw can be classified', () => {
     expect(r.hint).toBe('custom copy');
   });
 });
+
+// A classifier may name a kind without supplying copy. The hint then has to
+// follow THAT kind — falling back to `no_credential`'s copy would state a
+// cause the `kind` beside it contradicts, which is the whole failure this
+// classification path exists to remove.
+describe('a classified resolver throw gets a hint matching its kind', () => {
+  const base = {
+    prefix: 'demo',
+    hostLabel: 'example.com',
+    probeFn: async () => ({ ok: true }),
+    resolveCredential: async () => {
+      throw new Error('bridge is down');
+    },
+  };
+
+  it('uses the classified arm’s default copy when the classifier gives no hint', async () => {
+    const r = await run({ ...base, classifyThrown: () => ({ kind: 'transport' }) } as never);
+    expect(r.error?.kind).toBe('transport');
+    expect(r.hint).not.toMatch(/No credential resolved/i);
+    // transport's own copy, not no_credential's
+    expect(r.hint).toMatch(/example\.com/);
+  });
+
+  it('prefers a hints override for the CLASSIFIED arm, not for no_credential', async () => {
+    const r = await run({
+      ...base,
+      classifyThrown: () => ({ kind: 'transport' }),
+      hints: { transport: 'transport copy', no_credential: 'WRONG' },
+    } as never);
+    expect(r.hint).toBe('transport copy');
+  });
+
+  // A consumer may use a kind of its own (kia_healthcheck reports
+  // `no_session`). There is no copy for it, and no_credential's would assert a
+  // cause that kind denies — so the neutral `unknown` copy is the honest one.
+  it('does not assert a cause for a custom kind it has no copy for', async () => {
+    const r = await run({ ...base, classifyThrown: () => ({ kind: 'no_session' }) } as never);
+    expect(r.error?.kind).toBe('no_session');
+    expect(r.hint).not.toMatch(/No credential resolved/i);
+  });
+
+  it('an inline hint still wins over everything', async () => {
+    const r = await run({
+      ...base,
+      classifyThrown: () => ({ kind: 'transport', hint: 'inline' }),
+      hints: { transport: 'override' },
+    } as never);
+    expect(r.hint).toBe('inline');
+  });
+});

@@ -68,9 +68,15 @@ export interface RegisterCredentialHealthcheckToolArgs {
   probePath?: string;
   /**
    * Resolve the credential the way the real tools do — same cache, same
-   * fallback order — so a passing healthcheck means real tools work. Throwing
-   * is treated as `no_credential` with the throw's message, because a resolver
-   * that cannot produce one has answered the question.
+   * fallback order — so a passing healthcheck means real tools work.
+   *
+   * Throwing reports the throw's message and `resolved: false`. The ARM is
+   * `no_credential` by default — a resolver that cannot produce one has
+   * answered the question — but {@link
+   * RegisterCredentialHealthcheckToolArgs.classifyThrown} is consulted first,
+   * so a resolver that failed for some other reason (a bridge that is down, a
+   * rejected password) can say so instead of being told to set variables that
+   * are already set.
    */
   resolveCredential: () => Promise<CredentialState>;
   /** One authenticated round-trip. Only called when a credential resolved. */
@@ -120,6 +126,21 @@ function statusOf(err: unknown): number | undefined {
   const s = (err as { status?: unknown; statusCode?: unknown }).status ??
     (err as { statusCode?: unknown }).statusCode;
   return typeof s === 'number' ? s : undefined;
+}
+
+const CREDENTIAL_ARMS = new Set<string>([
+  'ok',
+  'no_credential',
+  'credential_rejected',
+  'timeout',
+  'http',
+  'transport',
+  'unknown',
+]);
+
+/** True for a kind this module has copy for. A consumer may invent others. */
+function isArm(kind: string | undefined): kind is CredentialHealthcheckArm {
+  return kind !== undefined && CREDENTIAL_ARMS.has(kind);
 }
 
 function credentialHint(
@@ -213,10 +234,22 @@ export function registerCredentialHealthcheckTool(
             message: truncateErrorMessage(messageOf(e)),
             ...(classified?.detail !== undefined ? { detail: classified.detail } : {}),
           },
+          // The hint must follow the KIND beside it. Falling back to
+          // `no_credential`'s copy under a classified kind would state a cause
+          // the kind contradicts — the same disagreement this path exists to
+          // remove. So: an inline hint wins; else the classified arm's own
+          // copy (consumer override first); else, for a kind this module has
+          // no copy for, the neutral `unknown` text rather than one that
+          // asserts a cause; else the unclassified `no_credential` default.
           hint:
             classified?.hint ??
-            hints?.no_credential ??
-            credentialHint('no_credential', prefix, hostLabel, null),
+            (isArm(classified?.kind)
+              ? (hints?.[classified.kind] ??
+                credentialHint(classified.kind, prefix, hostLabel, null))
+              : classified !== undefined
+                ? credentialHint('unknown', prefix, hostLabel, null)
+                : (hints?.no_credential ??
+                  credentialHint('no_credential', prefix, hostLabel, null))),
         };
         return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
       }
