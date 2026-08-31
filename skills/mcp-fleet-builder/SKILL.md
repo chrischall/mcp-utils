@@ -77,9 +77,39 @@ Core entry (zero runtime deps — safe for any MCP):
 Subpath entries (only pull their heavy/optional dep when imported):
 - `@chrischall/mcp-utils/session` — `createSessionRegistry` + `registerSessionTools(server, registry, {prefix, serviceLabel?})` (adopt instead of hand-rolling session tools: `<p>_register_session` [`account_identity` required, `auth_expires_at?`, `mark_active?`], `_set_active_session`, `_get_session_context` — zillow/redfin/homes are on it), `SessionStore` (disk 0600/0700, `.corrupt` backup), `TokenManager` (race-safe refresh + double-refresh guard; a `ReactiveTokenSource` for `createApiClient({tokenManager})`), **`CookieSessionManager<S, R=Response>`** (the cookie-session analog of TokenManager: `ensure()` single-flight login, `withSession(call)` exactly-one replay-on-expiry, `invalidate()`; `isExpired?(res)` predicate — can sniff a 200-HTML-login-page body, not just status; `isPermanentError?` to cache config errors; canvas/signupgenius/skylight/artsonia/evite are on it)
 - `@chrischall/mcp-utils/fetchproxy` — `createFetchproxyTransport(opts)` owns server construction + `start/close/status` + the verb adapters (`fetch`/`requestJson`/`runProbe`, `defaultSubdomain?`) + opt-in `logListening` banner + `serverVersion` in `status()` + a `createServer?` TEST SEAM (inject a mock server — unit-test the transport WITHOUT `vi.mock('@fetchproxy/server')`); `registerBridgeHealthcheckTool({server,prefix,probePath,hostLabel,transport,probeFn})` (the `<prefix>_healthcheck` tool — reads the REAL port, not a 37149 literal); `createBootstrapOpts`; re-exports of `@fetchproxy/server` primitives (`mapWithConcurrency`, `withDeadline`, `retryOnceOnTimeout`, `classifyBridgeError`/`classifyRowError`, `chunk`, …)
+- `@chrischall/mcp-utils/healthcheck` — `registerCredentialHealthcheckTool({server,prefix,hostLabel,probePath?,resolveCredential,probeFn})`, the `<prefix>_healthcheck` for an MCP whose health is a CREDENTIAL rather than a browser bridge. Its OWN subpath, not `/fetchproxy`: that module imports the optional `@fetchproxy/server` peer, and most callers of this one do not have it (importing from there fails at runtime with `Cannot find package '@fetchproxy/server'`). Zero optional peers.
 - `@chrischall/mcp-utils/scrape` — the reverse-engineering toolkit; **check here before writing a parser by hand**. `isCloudflareChallenge` (the tightened `_cf_chl_opt` + `<title>Just a moment` predicate — do NOT re-derive it), `matchBalanced(text,start)` → exclusive end index or -1 (the brace-walk every SSR-store parser needs), `extractJsonAfterMarker(text,markers,{sanitize})` (marker → next `{`/`[` → balanced → parse; null on any failure), `sanitizeJsLiterals` (bare `undefined` etc. in JS-object stores), `decodeHtmlEntities`, `stripHtml`, `extractJsonLdBlocks`/`findJsonLdEntity` (the latter also checks `@graph` and `mainEntity`), `stripJsonGuard` (`)]}'`, `while(1);`, redfin's `{}&&`), `deepFindObject`/`deepCollectArrays`/`findArrayByShape`, `ogContent`
 - `@chrischall/mcp-utils/html` — `parsePropertyTable`, `extractJsonFromHtml`, `findLinksUnderHeading`, etc. (needs `node-html-parser`)
 - `@chrischall/mcp-utils/test` — `createTestHarness`, `parseToolResult`, `versionSyncTest`
+
+**Which healthcheck — and the classification trap.** Two factories, and the
+choice follows how the MCP actually reaches its upstream:
+
+- **Every request rides the browser bridge** → `registerBridgeHealthcheckTool`
+  (`/fetchproxy`). Reports bridge role/port, whether the extension answered,
+  and a probe round-trip. alltrails, etix, opentable.
+- **Anything else** → `registerCredentialHealthcheckTool` (`/healthcheck`).
+  That includes OAuth and API-key MCPs *and* the fetchproxy ones that only
+  BOOTSTRAP a credential and then talk to an API directly.
+
+Do NOT classify by imports. `createFetchproxyTransport` in a repo does not mean
+the bridge is on the request path: resy constructs one EPHEMERALLY inside
+`mintTokenViaFetchproxy()` — start, one `postJson` to mint a token, close — and
+every call after that is a plain API request. Read where the transport is
+HELD: a persistent bridge lives on the client for the process's life; a
+bootstrap one is created and closed inside a function. Of ten repos audited
+this way, one was a persistent bridge and nine were credential-shaped; the
+import list suggested seven.
+
+Three rules the nine consumers converged on, each of which was a real bug first:
+- the probe is SKIPPED when no credential resolved — probing without one
+  returns 401, which reads as "rejected" and sends people to re-authenticate a
+  credential that does not exist;
+- `resolveCredential` returns a SOURCE LABEL and non-secret detail, never the
+  value — the result is what people paste into a chat when something is broken;
+- run the resolver the REAL tools use, not a re-derivation. splitwise's
+  re-derived copy diverged on `apiKey: ''` (truthiness vs `??`) and named a
+  source the client had never consulted.
 
 **Library→migrate discipline:** when you add a helper to mcp-utils, also migrate the hand-rolled consumers in the same wave — don't leave the loop half-finished (that's how `runWithDeadline`/`mapLimit`/the session registries drifted into N copies). Building a shared helper that no repo adopts is half a job.
 
