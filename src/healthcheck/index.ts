@@ -68,14 +68,34 @@ export interface RegisterCredentialHealthcheckToolArgs {
   probePath?: string;
   /**
    * Resolve the credential the way the real tools do — same cache, same
-   * fallback order — so a passing healthcheck means real tools work. Throwing
-   * is treated as `no_credential` with the throw's message, because a resolver
-   * that cannot produce one has answered the question.
+   * fallback order — so a passing healthcheck means real tools work.
+   *
+   * Throwing reports the throw's message and `resolved: false`. The ARM is
+   * `no_credential` by default — a resolver that cannot produce one has
+   * answered the question — but {@link
+   * RegisterCredentialHealthcheckToolArgs.classifyThrown} is consulted first,
+   * so a resolver that failed for some other reason (a bridge that is down, a
+   * rejected password) can say so instead of being told to set variables that
+   * are already set.
    */
   resolveCredential: () => Promise<CredentialState>;
   /** One authenticated round-trip. Only called when a credential resolved. */
   probeFn: () => Promise<unknown>;
-  /** Re-kind a thrown error and supply site-specific copy. */
+  /**
+   * Classify a thrown error into an arm, and optionally override the hint and
+   * carry structured detail. Consulted for a `probeFn` failure AND for a
+   * `resolveCredential` failure.
+   *
+   * The resolver case is the one worth knowing about: a resolver fails for
+   * reasons that are not "no credential" — a browser bridge that is down, an
+   * upstream that rejected a password, a store that will not decrypt — and
+   * without a classification all of those answer with the `no_credential`
+   * arm's advice, which tells someone to set variables that are already set.
+   * Returning `undefined` (or omitting this) keeps that fallback.
+   *
+   * A classification never changes `credential.resolved`: nothing resolved
+   * either way, and the classification explains why.
+   */
   classifyThrown?: (
     err: unknown,
   ) => { kind: string; hint?: string; detail?: Record<string, unknown> } | undefined;
@@ -106,6 +126,21 @@ function statusOf(err: unknown): number | undefined {
   const s = (err as { status?: unknown; statusCode?: unknown }).status ??
     (err as { statusCode?: unknown }).statusCode;
   return typeof s === 'number' ? s : undefined;
+}
+
+const CREDENTIAL_ARMS = new Set<string>([
+  'ok',
+  'no_credential',
+  'credential_rejected',
+  'timeout',
+  'http',
+  'transport',
+  'unknown',
+]);
+
+/** True for a kind this module has copy for. A consumer may invent others. */
+function isArm(kind: string | undefined): kind is CredentialHealthcheckArm {
+  return kind !== undefined && CREDENTIAL_ARMS.has(kind);
 }
 
 function credentialHint(
@@ -179,13 +214,42 @@ export function registerCredentialHealthcheckTool(
       try {
         state = await resolveCredential();
       } catch (e) {
+        // A resolver can fail for reasons that are NOT "no credential": a
+        // browser bridge that is down, an upstream that rejected a password,
+        // a store that will not decrypt. Flattening those into
+        // `no_credential` hands out that arm's advice — set the variables —
+        // to someone whose variables are already set. So the consumer's
+        // classifier is consulted here as it already is for a probe failure;
+        // declining it (or not supplying one) keeps the old behaviour exactly.
+        const classified = classifyThrown?.(e);
         const result: CredentialHealthcheckResult = {
           ok: false,
+          // Still false, and still no source: a classification explains WHY
+          // nothing resolved, it does not invent a credential that did.
           credential: { source: null, resolved: false },
           // No `url`: nothing was probed, and naming one implies it was tried.
           probe: { elapsed_ms: 0 },
-          error: { kind: 'no_credential', message: truncateErrorMessage(messageOf(e)) },
-          hint: hints?.no_credential ?? credentialHint('no_credential', prefix, hostLabel, null),
+          error: {
+            kind: classified?.kind ?? 'no_credential',
+            message: truncateErrorMessage(messageOf(e)),
+            ...(classified?.detail !== undefined ? { detail: classified.detail } : {}),
+          },
+          // The hint must follow the KIND beside it. Falling back to
+          // `no_credential`'s copy under a classified kind would state a cause
+          // the kind contradicts — the same disagreement this path exists to
+          // remove. So: an inline hint wins; else the classified arm's own
+          // copy (consumer override first); else, for a kind this module has
+          // no copy for, the neutral `unknown` text rather than one that
+          // asserts a cause; else the unclassified `no_credential` default.
+          hint:
+            classified?.hint ??
+            (isArm(classified?.kind)
+              ? (hints?.[classified.kind] ??
+                credentialHint(classified.kind, prefix, hostLabel, null))
+              : classified !== undefined
+                ? credentialHint('unknown', prefix, hostLabel, null)
+                : (hints?.no_credential ??
+                  credentialHint('no_credential', prefix, hostLabel, null))),
         };
         return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
       }

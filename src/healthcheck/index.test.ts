@@ -257,3 +257,125 @@ describe('registerCredentialHealthcheckTool', () => {
     expect(r.probe.url).toBeUndefined();
   });
 });
+
+// A `resolveCredential` that THROWS used to be flattened into `no_credential`
+// with that arm's static hint, whatever the cause. So "nothing is configured"
+// and "the browser bridge is down" — or a password the upstream rejected —
+// came out identical, and the one hint on offer told people to set variables
+// that were already set. Consumers could classify a PROBE failure and not this.
+describe('a resolver throw can be classified', () => {
+  const base = {
+    prefix: 'demo',
+    hostLabel: 'example.com',
+    probeFn: async () => ({ ok: true }),
+  };
+
+  it('uses classifyThrown for a resolver failure that is not a missing credential', async () => {
+    const r = await run({
+      ...base,
+      resolveCredential: async () => {
+        throw new Error('bridge is down');
+      },
+      classifyThrown: (err) =>
+        String((err as Error).message).includes('bridge')
+          ? { kind: 'transport', hint: 'The bridge is down — start the extension.', detail: { hop: 'bridge' } }
+          : undefined,
+    } as never);
+    expect(r.ok).toBe(false);
+    expect(r.error?.kind).toBe('transport');
+    expect(r.error?.detail).toEqual({ hop: 'bridge' });
+    expect(r.hint).toBe('The bridge is down — start the extension.');
+    // Still true: nothing resolved. The classification explains WHY, it does
+    // not invent a credential.
+    expect(r.credential.resolved).toBe(false);
+    expect(r.credential.source).toBeNull();
+    // Nothing was probed, so no url may be implied.
+    expect(r.probe.url).toBeUndefined();
+  });
+
+  it('falls back to no_credential when classifyThrown declines', async () => {
+    const r = await run({
+      ...base,
+      resolveCredential: async () => {
+        throw new Error('nothing configured');
+      },
+      classifyThrown: () => undefined,
+    } as never);
+    expect(r.error?.kind).toBe('no_credential');
+    expect(r.error?.message).toMatch(/nothing configured/);
+  });
+
+  // Backwards compatibility: every consumer written before this passes no
+  // classifier at all, and must behave exactly as it did.
+  it('is unchanged when no classifier is supplied', async () => {
+    const r = await run({
+      ...base,
+      resolveCredential: async () => {
+        throw new Error('boom');
+      },
+    } as never);
+    expect(r.error?.kind).toBe('no_credential');
+    expect(r.hint).toMatch(/No credential resolved/i);
+  });
+
+  it('still prefers an explicit hints override for the fallback arm', async () => {
+    const r = await run({
+      ...base,
+      resolveCredential: async () => {
+        throw new Error('boom');
+      },
+      hints: { no_credential: 'custom copy' },
+    } as never);
+    expect(r.hint).toBe('custom copy');
+  });
+});
+
+// A classifier may name a kind without supplying copy. The hint then has to
+// follow THAT kind — falling back to `no_credential`'s copy would state a
+// cause the `kind` beside it contradicts, which is the whole failure this
+// classification path exists to remove.
+describe('a classified resolver throw gets a hint matching its kind', () => {
+  const base = {
+    prefix: 'demo',
+    hostLabel: 'example.com',
+    probeFn: async () => ({ ok: true }),
+    resolveCredential: async () => {
+      throw new Error('bridge is down');
+    },
+  };
+
+  it('uses the classified arm’s default copy when the classifier gives no hint', async () => {
+    const r = await run({ ...base, classifyThrown: () => ({ kind: 'transport' }) } as never);
+    expect(r.error?.kind).toBe('transport');
+    expect(r.hint).not.toMatch(/No credential resolved/i);
+    // transport's own copy, not no_credential's
+    expect(r.hint).toMatch(/example\.com/);
+  });
+
+  it('prefers a hints override for the CLASSIFIED arm, not for no_credential', async () => {
+    const r = await run({
+      ...base,
+      classifyThrown: () => ({ kind: 'transport' }),
+      hints: { transport: 'transport copy', no_credential: 'WRONG' },
+    } as never);
+    expect(r.hint).toBe('transport copy');
+  });
+
+  // A consumer may use a kind of its own (kia_healthcheck reports
+  // `no_session`). There is no copy for it, and no_credential's would assert a
+  // cause that kind denies — so the neutral `unknown` copy is the honest one.
+  it('does not assert a cause for a custom kind it has no copy for', async () => {
+    const r = await run({ ...base, classifyThrown: () => ({ kind: 'no_session' }) } as never);
+    expect(r.error?.kind).toBe('no_session');
+    expect(r.hint).not.toMatch(/No credential resolved/i);
+  });
+
+  it('an inline hint still wins over everything', async () => {
+    const r = await run({
+      ...base,
+      classifyThrown: () => ({ kind: 'transport', hint: 'inline' }),
+      hints: { transport: 'override' },
+    } as never);
+    expect(r.hint).toBe('inline');
+  });
+});
