@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.19.4](https://github.com/chrischall/mcp-utils/compare/v0.19.3...v0.19.4) (2026-09-02)
+
+
+### Bug Fixes
+
+* **fetchproxy:** keep fetch in the capabilities createBootstrapOpts derives ([#177](https://github.com/chrischall/mcp-utils/issues/177)) ([6960d35](https://github.com/chrischall/mcp-utils/commit/6960d35ef1c3ffa69d2a2bf447c0848d71c3e2cf))
+
+
+### Documentation
+
+* **skill:** a HAR beats reading the bundle, and never classify on prose ([#174](https://github.com/chrischall/mcp-utils/issues/174)) ([c60d0d0](https://github.com/chrischall/mcp-utils/commit/c60d0d0dba034017d36014b2c5d44367fd29cfff))
+* **skill:** enable auto-delete of head branches when bootstrapping a repo ([#176](https://github.com/chrischall/mcp-utils/issues/176)) ([8f61e6d](https://github.com/chrischall/mcp-utils/commit/8f61e6dc4e1e36386ec16c9ec48266ae6cb859c9))
+
 ## [0.19.3](https://github.com/chrischall/mcp-utils/compare/v0.19.2...v0.19.3) (2026-08-31)
 
 
