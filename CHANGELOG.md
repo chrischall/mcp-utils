@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.20.0](https://github.com/chrischall/mcp-utils/compare/v0.19.4...v0.20.0) (2026-09-02)
+
+
+### Features
+
+* **fetchproxy:** name the missing extension leg in the bridge healthcheck, and serve direct-first consumers ([#179](https://github.com/chrischall/mcp-utils/issues/179)) ([a9fa061](https://github.com/chrischall/mcp-utils/commit/a9fa0612dcd6742f1c930dfaf3cd44dfea8b3882))
+
+
+### Bug Fixes
+
+* **fetchproxy:** keep the healthcheck arm in step with its hint, and stop the direct copy denying a bridge beside it ([#182](https://github.com/chrischall/mcp-utils/issues/182)) ([50c8f54](https://github.com/chrischall/mcp-utils/commit/50c8f5447c4476472c876296c1366691655a0d7e))
+
 ## [0.19.4](https://github.com/chrischall/mcp-utils/compare/v0.19.3...v0.19.4) (2026-09-02)
 
 
