@@ -1104,7 +1104,7 @@ describe('registerBridgeHealthcheckTool — `path` for direct-first consumers', 
     await harness.close();
     expect(body.error).toMatchObject({ kind: 'unknown', message: 'fetch failed' });
     expect(body.hint).toMatch(/direct fetch/i);
-    expect(body.hint).toMatch(/no browser bridge/i);
+    expect(body.hint).toMatch(/bridge wasn't used for this probe/);
   });
 
   it('fetchproxy path (after the fallback flipped mid-probe): projects the bridge from status()', async () => {
@@ -1226,6 +1226,33 @@ describe('registerBridgeHealthcheckTool — `path` for direct-first consumers', 
     expect(body.transport).toEqual({ transport: 'direct', mode: 'auto' });
     expect(body.bridge?.session_state).toBe('linked');
     expect(body.hint).toMatch(/^Direct fetch round-tripped/);
+    expect(body.hint).toMatch(/bridge wasn't used for this probe/);
+    expect(body.hint).not.toMatch(/no browser bridge/);
+  });
+
+  it('path says fetchproxy but no bridge exists yet: the no_role arm, not the direct one', async () => {
+    // A pinned-fetchproxy consumer whose bridge failed to build. The hint
+    // ladder says "never bound a role"; the arm must agree so a
+    // `hints.no_role` override lands on it.
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'hemnet',
+        probePath: '/graphql',
+        hostLabel: 'www.hemnet.se',
+        transport: () => undefined,
+        path: () => ({ transport: 'fetchproxy', mode: 'fetchproxy' }),
+        probeFn: async () => {
+          throw new Error('bridge never built');
+        },
+        hints: { no_role: 'custom no_role copy', direct: 'custom direct copy' },
+      }),
+    );
+    const body = parseToolResult<Body>(await harness.callTool('hemnet_healthcheck', {}));
+    await harness.close();
+    expect(body.ok).toBe(false);
+    expect(body.bridge).toBeUndefined();
+    expect(body.hint).toBe('custom no_role copy');
   });
 
   it('refuses a transport getter that returns nothing when no path is supplied', async () => {
