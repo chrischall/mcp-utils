@@ -1165,6 +1165,69 @@ describe('registerBridgeHealthcheckTool — `path` for direct-first consumers', 
     expect(body.hint).toMatch(/never confirmed a session for hemnet-mcp/);
   });
 
+  it('direct path: redacts and truncates the thrown message before it reaches the result', async () => {
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'hemnet',
+        probePath: '/graphql',
+        hostLabel: 'www.hemnet.se',
+        transport: () => undefined,
+        path: () => ({ transport: 'direct', mode: 'direct' }),
+        probeFn: async () => {
+          throw new Error(`HTTP 401 with Authorization: Bearer sk-live-secret-token-value ${'x'.repeat(5000)}`);
+        },
+      }),
+    );
+    const body = parseToolResult<Body>(await harness.callTool('hemnet_healthcheck', {}));
+    await harness.close();
+    expect(body.error?.message).not.toContain('sk-live-secret-token-value');
+    expect(body.error?.message).toMatch(/\[truncated\]$/);
+  });
+
+  it('names no port when no bridge exists yet — never the 37149 default', async () => {
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'hemnet',
+        probePath: '/graphql',
+        hostLabel: 'www.hemnet.se',
+        transport: () => undefined,
+        path: () => ({ transport: 'fetchproxy', mode: 'auto' }),
+        probeFn: async () => {
+          throw new FetchproxySessionNotReadyError({ mcpId: 'hemnet-mcp:0.4.0:abc', pairCode: null });
+        },
+      }),
+    );
+    const body = parseToolResult<Body>(await harness.callTool('hemnet_healthcheck', {}));
+    await harness.close();
+    expect(body.error?.kind).toBe('session_not_ready');
+    expect(body.hint).not.toContain('37149');
+    expect(body.hint).toMatch(/before it bound its port looks like/);
+  });
+
+  it('an eagerly-built bridge does not make a direct probe read as a bridge round-trip', async () => {
+    // mode=direct pin, or an auto consumer that built the bridge on an earlier
+    // call and rode direct this time: path() is the authority on the leg.
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'hemnet',
+        probePath: '/graphql',
+        hostLabel: 'www.hemnet.se',
+        transport: () => fakeBridge('linked'),
+        path: () => ({ transport: 'direct', mode: 'auto' }),
+        probeFn: async () => 'ok',
+      }),
+    );
+    const body = parseToolResult<Body>(await harness.callTool('hemnet_healthcheck', {}));
+    await harness.close();
+    expect(body.ok).toBe(true);
+    expect(body.transport).toEqual({ transport: 'direct', mode: 'auto' });
+    expect(body.bridge?.session_state).toBe('linked');
+    expect(body.hint).toMatch(/^Direct fetch round-tripped/);
+  });
+
   it('refuses a transport getter that returns nothing when no path is supplied', async () => {
     const harness = await createTestHarness((server) =>
       registerBridgeHealthcheckTool({

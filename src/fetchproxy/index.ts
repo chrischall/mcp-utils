@@ -789,8 +789,10 @@ function healthcheckHint(args: {
   /** Set when the probe rode a direct fetch with no bridge in play. */
   direct?: boolean;
 }): string {
-  const { hostLabel, prefix, probePath } = args;
-  const port = args.port ?? 37149;
+  const { hostLabel, prefix, probePath, port } = args;
+  // Never a literal 37149: when no bridge exists yet there is no port to
+  // name, and guessing the default is the bug this factory exists to remove.
+  const portNote = port === null ? '' : ` (port ${port})`;
   if (args.ok) {
     if (args.direct) {
       return `Direct fetch round-tripped ${probePath} successfully — no browser bridge in play. If real tools still fail, the problem is on the ${hostLabel} side (a bot wall answering some calls but not this one, a field that moved, …), not the transport.`;
@@ -803,9 +805,9 @@ function healthcheckHint(args: {
       return `The Transporter extension is waiting for you to approve pair code ${s.pairCode} for ${prefix}-mcp. Open the extension popup, approve it, then retry.`;
     }
     if (s?.state === 'extension_disconnected') {
-      return `No Transporter extension is attached to this bridge (port ${port}). Open Chrome with the extension installed and a ${hostLabel} tab, then retry.`;
+      return `No Transporter extension is attached to this bridge${portNote}. Open Chrome with the extension installed and a ${hostLabel} tab, then retry.`;
     }
-    return `The Transporter extension is attached but never confirmed a session for ${prefix}-mcp — its hello got no answer within the session-ready timeout. Reload the extension (chrome://extensions) or reopen the ${hostLabel} tab, then retry. On a hosted bridge this is also what a relay that dialled the child before it bound port ${port} looks like.`;
+    return `The Transporter extension is attached but never confirmed a session for ${prefix}-mcp — its hello got no answer within the session-ready timeout. Reload the extension (chrome://extensions) or reopen the ${hostLabel} tab, then retry. On a hosted bridge this is also what a relay that dialled the child before it bound its port${portNote} looks like.`;
   }
   if (args.errorKind === 'bridge_down') {
     const base = `The fetchproxy browser extension's service worker is not responding. Chrome evicts extension service workers after ~30s idle by default — this looks like that case. Wake it by clicking the fetchproxy extension icon (or opening any ${hostLabel} tab and reloading), then retry. If it keeps happening, reload the extension from chrome://extensions.`;
@@ -815,7 +817,7 @@ function healthcheckHint(args: {
     return `The probe ran over the direct fetch — no browser bridge in play — and failed; see error.message. If ${hostLabel} is answering with a bot wall, pin the bridge (the consumer's transport env var) or leave the default fallback to switch on the next challenge.`;
   }
   if (args.role === null) {
-    return `The bridge never bound a role. listen() may have failed silently on startup. Check stderr from ${prefix}-mcp for an error during start, and confirm port ${port} isn't blocked.`;
+    return `The bridge never bound a role. listen() may have failed silently on startup. Check stderr from ${prefix}-mcp for an error during start, and confirm ${port === null ? 'the bridge port' : `port ${port}`} isn't blocked.`;
   }
   if (args.errorKind === 'timeout') {
     return `Bridge is alive (role=${args.role}), but the request didn't get a response in time. Either (a) the fetchproxy browser extension isn't connected to this MCP yet — open the extension popup and check for a green dot next to "${prefix}-mcp", or (b) the signed-in ${hostLabel} tab is sleeping / closed. Open ${hostLabel} in your browser, then retry.`;
@@ -921,7 +923,10 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
           ok = true;
         } catch (e) {
           ok = false;
-          rawError = { kind: classifyBridgeErrorKind(e), message: messageOf(e) };
+          // Redaction first, then truncation — `probeFn` is consumer code and
+          // its throw is the one place an arbitrary upstream message reaches
+          // the tool result on this route.
+          rawError = { kind: classifyBridgeErrorKind(e), message: truncateErrorMessage(messageOf(e)) };
         }
         elapsedMs = Date.now() - start;
         pathNow = path();
@@ -985,7 +990,10 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
         };
       }
 
-      const direct = bridge === undefined;
+      // Which leg served the probe: `path()` is authoritative when supplied — a
+      // consumer may hold an eagerly-built bridge while riding direct — and
+      // only without it does "no bridge" mean "direct".
+      const direct = pathNow ? pathNow.transport === 'direct' : bridge === undefined;
       // Which ladder arm applies — mirrors healthcheckHint's precedence order —
       // so per-arm `hints` overrides land on the same arm the default copy would.
       const arm: HealthcheckHintArm = ok
@@ -994,7 +1002,7 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
           ? 'session_not_ready'
           : error?.kind === 'bridge_down'
             ? 'bridge_down'
-            : bridge === undefined
+            : direct || bridge === undefined
               ? 'direct'
               : bridge.role === null
                 ? 'no_role'
