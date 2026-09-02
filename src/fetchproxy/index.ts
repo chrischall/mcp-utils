@@ -467,8 +467,17 @@ function nonEmpty<T>(arr: T[] | undefined): arr is T[] {
  *
  * The returned `capabilities` is derived from the declared bootstrap: each
  * present declaration group adds exactly the capability that gates its verb
- * (deduped). When no bootstrap declarations are given, `capabilities` is left
- * unset so the server falls back to its default `['fetch']`.
+ * (deduped), ALWAYS alongside `fetch`. When no bootstrap declarations are
+ * given, `capabilities` is left unset so the server falls back to its default
+ * `['fetch']`.
+ *
+ * `fetch` is included because `capabilities` REPLACES the server's default
+ * rather than extending it. A fragment derived from declarations alone
+ * therefore declared (say) `['capture_request_header']`, and the transport
+ * that spread it lost the fetch verb silently — surfacing only at runtime, on
+ * the first request, as `capability "fetch" not granted (declared:
+ * [capture_request_header])`. Every fetchproxy transport carries the fetch
+ * verbs, so no bootstrap declaration can imply their absence.
  *
  * @example
  * const opts = createBootstrapOpts({
@@ -512,6 +521,8 @@ export function createBootstrapOpts(
   const capabilities = new Set<Capability>();
 
   if (nonEmpty(b.cookieKeys)) capabilities.add('read_cookies');
+  // (fetch is added below, only once something else is declared — see the
+  // `capabilities.size > 0` guard on the return.)
   if (nonEmpty(b.localStorageKeys) || nonEmpty(b.localStoragePointers)) {
     capabilities.add('read_local_storage');
   }
@@ -524,7 +535,12 @@ export function createBootstrapOpts(
 
   return {
     domains,
-    ...(capabilities.size > 0 ? { capabilities: [...capabilities] } : {}),
+    // `fetch` FIRST, so a reader sees the default plus what the declarations
+    // added rather than a set that appears to have replaced it. Emitted only
+    // when something was declared: with no declarations the key stays absent
+    // and the server keeps its own default, which is a stronger statement
+    // than handing it a one-element restatement of that default.
+    ...(capabilities.size > 0 ? { capabilities: ['fetch' as Capability, ...capabilities] } : {}),
     ...(nonEmpty(b.cookieKeys) ? { cookieKeys: b.cookieKeys } : {}),
     ...(nonEmpty(b.localStorageKeys) ? { localStorageKeys: b.localStorageKeys } : {}),
     ...(nonEmpty(b.sessionStorageKeys) ? { sessionStorageKeys: b.sessionStorageKeys } : {}),
