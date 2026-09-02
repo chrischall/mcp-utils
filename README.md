@@ -699,6 +699,32 @@ custom `{ kind, hint }` (e.g. an SSO bounce → `session_expired` with re-sign-i
 copy; its hint wins the result hint), and `hints` overrides the default copy
 per ladder arm (`{ timeout: 'DataDome may be challenging the tab — …' }`).
 
+**The extension link.** A probe that fails with fetchproxy's
+`FetchproxySessionNotReadyError` reports `error.kind: 'session_not_ready'`
+(classified here, so it holds on a pre-2.5 server too) and the hint names the
+missing leg: the pair code to approve in the popup, "no extension attached
+(port N)", or "attached but never answered the hello" — the shape a hosted
+bridge produces when the relay dials the child before it binds. With
+`@fetchproxy/server` 2.5.0+ the `bridge` block also carries `session_state`,
+`pending_pair_code` and `extension_connected` from `bridgeHealth().session`.
+
+**Direct-first consumers** (hemnet, booli: a plain fetch that falls back to
+the bridge when a bot wall answers) pass `path: () => ({ transport, mode })`
+reporting which leg serves calls now, and may pass `transport` as a getter
+that returns the bridge once it exists. The probe then runs through `probeFn`
+directly (the probe itself is often what flips the fallback), the result
+carries the path as `transport`, and the `bridge` block appears only once a
+bridge has been built:
+
+```ts
+registerBridgeHealthcheckTool({
+  server, prefix: 'hemnet', probePath: '/graphql', hostLabel: 'www.hemnet.se',
+  transport: () => fallback.bridgeTransport(),        // undefined until walled
+  path: () => fallback.status(),                       // { transport: 'direct' | 'fetchproxy', mode }
+  probeFn: () => client.healthcheck().then(JSON.stringify),
+});
+```
+
 ### `healthcheck` — credential healthchecks *(subpath, no optional peers)*
 
 ```ts

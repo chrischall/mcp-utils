@@ -38,6 +38,7 @@
 import {
   FetchproxyServer,
   FetchproxyBridgeDownError,
+  FetchproxySessionNotReadyError,
   classifyBridgeError as classifyBridgeErrorKind,
   type FetchproxyServerOpts,
   // Type-only — erased at compile, no runtime `@fetchproxy/server` reference
@@ -64,6 +65,7 @@ export {
   FetchproxyProtocolError,
   FetchproxyHttpError,
   FetchproxyBridgeDownError,
+  FetchproxySessionNotReadyError,
   FetchproxyTimeoutError,
   classifyBridgeError,
   classifyRowError,
@@ -559,7 +561,7 @@ export function createBootstrapOpts(
 
 /** Discriminated classification of a tool-boundary error. */
 export interface BridgeErrorInfo {
-  type: 'bridge_down' | 'timeout' | 'http' | 'protocol' | 'unknown';
+  type: 'session_not_ready' | 'bridge_down' | 'timeout' | 'http' | 'protocol' | 'unknown';
   message: string;
   hint?: string;
 }
@@ -574,6 +576,17 @@ export interface BridgeErrorInfo {
  * string kind (drop-in compatible with `@fetchproxy/server`).
  */
 export function bridgeErrorInfo(err: unknown): BridgeErrorInfo {
+  if (err instanceof FetchproxySessionNotReadyError) {
+    // Checked here rather than through the server's classifier so it holds on
+    // a 2.4 server too (2.5.0 classifies it; before that it fell to 'other').
+    // The server folds the hint into the message — split it back out so a
+    // consumer that appends `hint` to `message` does not say it twice.
+    return {
+      type: 'session_not_ready',
+      message: truncateErrorMessage(messageOf(err).replace(err.hint, '').trim()),
+      hint: err.hint,
+    };
+  }
   const kind = classifyBridgeErrorKind(err);
   const message = truncateErrorMessage(messageOf(err));
 
@@ -622,9 +635,21 @@ export function bridgeErrorInfo(err: unknown): BridgeErrorInfo {
 /** The diagnostic result a `<prefix>_healthcheck` tool returns. */
 export interface BridgeHealthcheckResult {
   ok: boolean;
-  bridge: BridgeProbeResult['bridge'] & {
+  /**
+   * The bridge projection. Present whenever a bridge transport exists —
+   * always, except on the direct leg of a {@link RegisterBridgeHealthcheckToolArgs.path}
+   * consumer, where no bridge has been built. `session_state` /
+   * `pending_pair_code` / `extension_connected` arrive with `@fetchproxy/server`
+   * 2.5.0+ (`bridgeHealth().session`) and are absent on older servers.
+   */
+  bridge?: BridgeProbeResult['bridge'] & {
     last_extension_message_at: number | null;
+    session_state?: 'not_listening' | 'linked' | 'pair_pending' | 'extension_disconnected' | 'no_session';
+    pending_pair_code?: string | null;
+    extension_connected?: boolean;
   };
+  /** Which leg served the probe — present when {@link RegisterBridgeHealthcheckToolArgs.path} is supplied. */
+  transport?: HealthcheckPath;
   probe: {
     url: string;
     elapsed_ms: number;
@@ -656,7 +681,30 @@ export interface BridgeHealthcheckResult {
 }
 
 /** The hint-ladder arms whose copy {@link RegisterBridgeHealthcheckToolArgs.hints} can override. */
-export type HealthcheckHintArm = 'ok' | 'bridge_down' | 'no_role' | 'timeout' | 'protocol' | 'unknown';
+export type HealthcheckHintArm =
+  | 'ok'
+  | 'session_not_ready'
+  | 'bridge_down'
+  | 'no_role'
+  | 'timeout'
+  | 'protocol'
+  | 'direct'
+  | 'unknown';
+
+/**
+ * Which leg a direct-first consumer is serving calls on. `transport` is the
+ * path the next call rides; `mode` is the configured pin (e.g. hemnet's
+ * `HEMNET_TRANSPORT`: `direct` / `fetchproxy` / `auto`). Extra fields pass
+ * through to the result untouched.
+ */
+export interface HealthcheckPath {
+  transport: 'direct' | 'fetchproxy' | 'unknown';
+  mode?: string;
+  [key: string]: unknown;
+}
+
+/** The slice of {@link FetchproxyTransport} the healthcheck drives. */
+export type BridgeHealthcheckTransport = Pick<FetchproxyTransport, 'runProbe' | 'status'>;
 
 /** Options for {@link registerBridgeHealthcheckTool}. */
 export interface RegisterBridgeHealthcheckToolArgs {
@@ -675,8 +723,22 @@ export interface RegisterBridgeHealthcheckToolArgs {
    * The bridge transport — supplies `runProbe` (the probe loop + classification
    * + post-probe bridge projection) and `status()` (for the liveness counter the
    * projection omits). Any {@link FetchproxyTransport}-shaped object works.
+   *
+   * A direct-first consumer (see {@link path}) builds its bridge lazily — often
+   * the probe itself is what flips the fallback — so it may pass a getter
+   * instead, returning the bridge once it exists and `undefined` before. The
+   * getter is read AFTER the probe.
    */
-  transport: Pick<FetchproxyTransport, 'runProbe' | 'status'>;
+  transport: BridgeHealthcheckTransport | (() => BridgeHealthcheckTransport | undefined);
+  /**
+   * Direct-first consumers (hemnet, booli: a plain fetch that falls back to the
+   * bridge when a bot wall answers): report which leg serves calls now. Read
+   * after the probe. When supplied, the probe runs through `probeFn` directly —
+   * `runProbe` needs a bridge up front and there may be none — and the bridge
+   * block is projected from `transport().status()` only if a bridge exists.
+   * The result carries the path as `transport`.
+   */
+  path?: () => HealthcheckPath;
   /**
    * Performs the actual probe fetch for `probePath`. Required — most consumers
    * pass `(path) => client.fetchHtml(path)` so the probe exercises the same
@@ -716,20 +778,41 @@ export interface RegisterBridgeHealthcheckToolArgs {
 function healthcheckHint(args: {
   ok: boolean;
   role: 'host' | 'peer' | null;
-  port: number;
+  port: number | null;
   hostLabel: string;
   prefix: string;
   probePath: string;
   errorKind?: string;
   bridgeHint?: string;
+  /** 2.5.0 session snapshot (when the server reports one), plus the thrown error's pair code. */
+  session?: { state?: string; pairCode: string | null };
+  /** Set when the probe rode a direct fetch with no bridge in play. */
+  direct?: boolean;
 }): string {
-  const { hostLabel, prefix, probePath, port } = args;
+  const { hostLabel, prefix, probePath } = args;
+  const port = args.port ?? 37149;
   if (args.ok) {
+    if (args.direct) {
+      return `Direct fetch round-tripped ${probePath} successfully — no browser bridge in play. If real tools still fail, the problem is on the ${hostLabel} side (a bot wall answering some calls but not this one, a field that moved, …), not the transport.`;
+    }
     return `Bridge round-tripped ${probePath} successfully. If real tools still fail, the problem is downstream of fetchproxy (${hostLabel} redirecting on login, a bot-wall / behavioral challenge, etc.) — not the bridge.`;
+  }
+  if (args.errorKind === 'session_not_ready') {
+    const s = args.session;
+    if (s?.pairCode) {
+      return `The Transporter extension is waiting for you to approve pair code ${s.pairCode} for ${prefix}-mcp. Open the extension popup, approve it, then retry.`;
+    }
+    if (s?.state === 'extension_disconnected') {
+      return `No Transporter extension is attached to this bridge (port ${port}). Open Chrome with the extension installed and a ${hostLabel} tab, then retry.`;
+    }
+    return `The Transporter extension is attached but never confirmed a session for ${prefix}-mcp — its hello got no answer within the session-ready timeout. Reload the extension (chrome://extensions) or reopen the ${hostLabel} tab, then retry. On a hosted bridge this is also what a relay that dialled the child before it bound port ${port} looks like.`;
   }
   if (args.errorKind === 'bridge_down') {
     const base = `The fetchproxy browser extension's service worker is not responding. Chrome evicts extension service workers after ~30s idle by default — this looks like that case. Wake it by clicking the fetchproxy extension icon (or opening any ${hostLabel} tab and reloading), then retry. If it keeps happening, reload the extension from chrome://extensions.`;
     return args.bridgeHint ? `${args.bridgeHint} ${base}` : base;
+  }
+  if (args.direct) {
+    return `The probe ran over the direct fetch — no browser bridge in play — and failed; see error.message. If ${hostLabel} is answering with a bot wall, pin the bridge (the consumer's transport env var) or leave the default fallback to switch on the next challenge.`;
   }
   if (args.role === null) {
     return `The bridge never bound a role. listen() may have failed silently on startup. Check stderr from ${prefix}-mcp for an error during start, and confirm port ${port} isn't blocked.`;
@@ -741,6 +824,35 @@ function healthcheckHint(args: {
     return `The bridge returned a protocol error before any HTTP response. Most commonly: no ${hostLabel} tab is open, or the extension declined the request. Open ${hostLabel}, sign in, and retry.`;
   }
   return `Unexpected error — see the error.message field for details.`;
+}
+
+/**
+ * Snake-case a live `status()` snapshot into the same shape `runProbe`'s
+ * `bridge` projection has — used on the path-aware route, where the probe
+ * did not go through `runProbe`. Tolerates a pre-2.5.0 server (no `session`).
+ */
+function projectBridgeStatus(
+  health: ReturnType<FetchproxyTransport['status']>,
+): NonNullable<BridgeHealthcheckResult['bridge']> {
+  const session = (health as { session?: { state: string; pairCode: string | null; extensionConnected: boolean } }).session;
+  return {
+    role: health.role,
+    port: health.port,
+    server_version: health.serverVersion,
+    fetch_timeout_ms: health.fetchTimeoutMs,
+    last_success_at: health.lastSuccessAt,
+    last_failure_at: health.lastFailureAt,
+    last_failure_reason: health.lastFailureReason,
+    consecutive_failures: health.consecutiveFailures,
+    last_extension_message_at: health.lastExtensionMessageAt,
+    ...(session
+      ? {
+          session_state: session.state as NonNullable<BridgeHealthcheckResult['bridge']>['session_state'],
+          pending_pair_code: session.pairCode,
+          extension_connected: session.extensionConnected,
+        }
+      : {}),
+  } as NonNullable<BridgeHealthcheckResult['bridge']>;
 }
 
 /**
@@ -762,15 +874,17 @@ function healthcheckHint(args: {
  * });
  */
 export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToolArgs): void {
-  const { server, prefix, probePath, hostLabel, transport, probeFn, classifyThrown, hints } = args;
+  const { server, prefix, probePath, hostLabel, probeFn, classifyThrown, hints, path } = args;
   const probeUrl = `https://${hostLabel}${probePath}`;
+  const resolveTransport = (): BridgeHealthcheckTransport | undefined =>
+    typeof args.transport === 'function' ? args.transport() : args.transport;
 
   server.registerTool(
     `${prefix}_healthcheck`,
     {
       title: 'Verify the fetchproxy bridge end-to-end',
       description:
-        `Round-trips a small public ${hostLabel} URL (${probePath}) through the fetchproxy bridge and returns diagnostics: the bridge's role (host/peer/null), port, version, the elapsed round-trip time, and a plain-English hint distinguishing 'bridge never came up' from 'extension not connected' from 'real ${hostLabel}-side problem'. Call this when a real tool fails and you want to know which hop broke. Read-only, no auth required.`,
+        `Round-trips a small public ${hostLabel} URL (${probePath}) through the fetchproxy bridge and returns diagnostics: the bridge's role (host/peer/null), port, version, the extension link (linked / pair pending / not attached / never answered), the elapsed round-trip time, and a plain-English hint distinguishing 'bridge never came up' from 'extension not connected' from 'real ${hostLabel}-side problem'. Call this when a real tool fails and you want to know which hop broke. Read-only, no auth required.`,
       annotations: {
         title: 'Verify the fetchproxy bridge end-to-end',
         readOnlyHint: true,
@@ -782,41 +896,77 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
     async () => {
       let probeBody = '';
       let thrown: unknown;
-      const probeResult = await transport.runProbe(async (path) => {
+      const wrappedProbe = async (p: string): Promise<string> => {
         try {
-          probeBody = await probeFn(path);
+          probeBody = await probeFn(p);
           return probeBody;
         } catch (e) {
           thrown = e;
           throw e;
         }
-      }, probePath);
+      };
 
-      const ok = probeResult.ok;
+      let ok: boolean;
+      let elapsedMs: number;
+      let bridge: BridgeHealthcheckResult['bridge'];
+      let rawError: { kind: string; message: string } | undefined;
+      let pathNow: HealthcheckPath | undefined;
+
+      if (path) {
+        // Direct-first route: the probe itself may be what flips the fallback,
+        // so run it plainly, then read the path and the bridge AFTER it.
+        const start = Date.now();
+        try {
+          await wrappedProbe(probePath);
+          ok = true;
+        } catch (e) {
+          ok = false;
+          rawError = { kind: classifyBridgeErrorKind(e), message: messageOf(e) };
+        }
+        elapsedMs = Date.now() - start;
+        pathNow = path();
+        const transport = resolveTransport();
+        bridge = transport ? projectBridgeStatus(transport.status()) : undefined;
+      } else {
+        const transport = resolveTransport();
+        if (!transport) {
+          throw new Error(
+            'registerBridgeHealthcheckTool: transport() returned nothing and no `path` was supplied — a bridge-only healthcheck needs its bridge.',
+          );
+        }
+        const probeResult = await transport.runProbe(wrappedProbe, probePath);
+        ok = probeResult.ok;
+        elapsedMs = probeResult.elapsed_ms;
+        // The post-probe bridge projection omits `lastExtensionMessageAt` before
+        // 2.5.0; read it off the live status snapshot (same call, so it's current).
+        bridge = {
+          ...probeResult.bridge,
+          last_extension_message_at: transport.status().lastExtensionMessageAt,
+        };
+        rawError = probeResult.error;
+      }
+
       const probe: BridgeHealthcheckResult['probe'] = ok
-        ? {
-            url: probeUrl,
-            elapsed_ms: probeResult.elapsed_ms,
-            status: 200,
-            body_length: probeBody.length,
-          }
-        : { url: probeUrl, elapsed_ms: probeResult.elapsed_ms };
+        ? { url: probeUrl, elapsed_ms: elapsedMs, status: 200, body_length: probeBody.length }
+        : { url: probeUrl, elapsed_ms: elapsedMs };
 
       let error: BridgeHealthcheckResult['error'];
       let bridgeHint: string | undefined;
       let customHint: string | undefined;
       let customDetail: Record<string, unknown> | undefined;
-      if (probeResult.error) {
-        // `runProbe` already classified the throw into `probeResult.error.kind`
-        // (fetchproxy's raw vocabulary). Trust that as the discriminator —
-        // mapping `'other'` → `'unknown'` to match the envelope — rather than
-        // re-classifying a plain `{kind,message}` object. Use the typed `thrown`
-        // (set by our probe wrapper) only to lift the server-authored
-        // `FetchproxyBridgeDownError.hint`.
-        let kind: string =
-          probeResult.error.kind === 'other' ? 'unknown' : probeResult.error.kind;
-        bridgeHint =
-          thrown instanceof FetchproxyBridgeDownError ? thrown.hint : undefined;
+      if (rawError) {
+        // `runProbe` (or classifyBridgeError on the direct route) already
+        // classified the throw in fetchproxy's raw vocabulary. Trust that as
+        // the discriminator — mapping `'other'` → `'unknown'` to match the
+        // envelope — except for a session-not-ready throw, which a 2.4 server
+        // still files under 'other': the typed `thrown` settles it either way.
+        let kind: string = rawError.kind === 'other' ? 'unknown' : rawError.kind;
+        if (thrown instanceof FetchproxySessionNotReadyError) {
+          kind = 'session_not_ready';
+          bridgeHint = thrown.hint;
+        } else if (thrown instanceof FetchproxyBridgeDownError) {
+          bridgeHint = thrown.hint;
+        }
         // A consumer classifier can re-kind the thrown error (e.g. workday's
         // session_expired) and supply site-specific next-step copy.
         if (thrown !== undefined && classifyThrown) {
@@ -829,48 +979,54 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
         }
         error = {
           kind,
-          message: probeResult.error.message,
+          message: rawError.message,
           ...(bridgeHint !== undefined ? { bridge_hint: bridgeHint } : {}),
           ...(customDetail !== undefined ? { detail: customDetail } : {}),
         };
       }
 
-      // The post-probe bridge projection omits `lastExtensionMessageAt`; read it
-      // off the live status snapshot (same call, so it's current).
-      const lastExtensionMessageAt = transport.status().lastExtensionMessageAt;
-
+      const direct = bridge === undefined;
       // Which ladder arm applies — mirrors healthcheckHint's precedence order —
       // so per-arm `hints` overrides land on the same arm the default copy would.
       const arm: HealthcheckHintArm = ok
         ? 'ok'
-        : error?.kind === 'bridge_down'
-          ? 'bridge_down'
-          : probeResult.bridge.role === null
-            ? 'no_role'
-            : error?.kind === 'timeout'
-              ? 'timeout'
-              : error?.kind === 'protocol' || error?.kind === 'http'
-                ? 'protocol'
-                : 'unknown';
+        : error?.kind === 'session_not_ready'
+          ? 'session_not_ready'
+          : error?.kind === 'bridge_down'
+            ? 'bridge_down'
+            : bridge === undefined
+              ? 'direct'
+              : bridge.role === null
+                ? 'no_role'
+                : error?.kind === 'timeout'
+                  ? 'timeout'
+                  : error?.kind === 'protocol' || error?.kind === 'http'
+                    ? 'protocol'
+                    : 'unknown';
 
       const defaultHint = healthcheckHint({
         ok,
-        role: probeResult.bridge.role,
-        // FIX: the real configured port from bridgeHealth(), not a literal 37149.
-        port: probeResult.bridge.port,
+        role: bridge?.role ?? null,
+        // The real configured port from bridgeHealth(), never a literal 37149.
+        port: bridge?.port ?? null,
         hostLabel,
         prefix,
         probePath,
         errorKind: error?.kind,
         bridgeHint: error?.kind === 'bridge_down' ? bridgeHint : undefined,
+        session: {
+          ...(bridge?.session_state !== undefined ? { state: bridge.session_state } : {}),
+          pairCode:
+            bridge?.pending_pair_code ??
+            (thrown instanceof FetchproxySessionNotReadyError ? thrown.pairCode : null),
+        },
+        direct,
       });
 
       const result: BridgeHealthcheckResult = {
         ok,
-        bridge: {
-          ...probeResult.bridge,
-          last_extension_message_at: lastExtensionMessageAt,
-        },
+        ...(bridge ? { bridge } : {}),
+        ...(pathNow ? { transport: pathNow } : {}),
         probe,
         ...(error ? { error } : {}),
         // Precedence: classifyThrown's hint > per-arm override > default ladder.
