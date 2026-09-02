@@ -27,6 +27,7 @@ import {
   lastPathSegment,
   bridgeErrorInfo,
   registerBridgeHealthcheckTool,
+  FetchproxySessionNotReadyError,
   type FetchproxyTransport,
 } from './index.js';
 import type { BridgeProbeResult } from '@fetchproxy/server';
@@ -861,5 +862,386 @@ describe('registerBridgeHealthcheckTool', () => {
     expect(res.hint).toContain(String(REAL_PORT));
     expect(res.hint).not.toContain('37149');
     await harness.close();
+  });
+});
+
+describe('bridgeErrorInfo — session_not_ready', () => {
+  it('splits the server-authored hint back out of the message and keys the kind', () => {
+    const err = new FetchproxySessionNotReadyError({ mcpId: 'hemnet-mcp:0.4.0:abc', pairCode: null });
+    const info = bridgeErrorInfo(err);
+    expect(info.type).toBe('session_not_ready');
+    expect(info.hint).toBe(err.hint);
+    // The message no longer carries the hint, so `${message} ${hint}` reads once.
+    expect(info.message).toBe('fetchproxy: no confirmed browser session for "hemnet-mcp:0.4.0:abc".');
+  });
+});
+
+describe('registerBridgeHealthcheckTool — session state (fetchproxy 2.5+)', () => {
+  function sessionProbe(
+    state: 'no_session' | 'pair_pending' | 'extension_disconnected' | 'linked',
+    pairCode: string | null,
+  ): BridgeProbeResult {
+    return {
+      ok: false,
+      elapsed_ms: 30_012,
+      bridge: {
+        role: 'host',
+        port: 37150,
+        server_version: '2.5.0',
+        fetch_timeout_ms: 30000,
+        last_success_at: null,
+        last_failure_at: null,
+        last_failure_reason: null,
+        consecutive_failures: 1,
+        // 2.5.0 projection fields — typed loosely here so this file also
+        // compiles against a 2.4 `BridgeProbeResult`.
+        ...({
+          session_state: state,
+          pending_pair_code: pairCode,
+          extension_connected: state !== 'extension_disconnected',
+          last_extension_message_at: null,
+        } as Record<string, unknown>),
+      },
+      error: { kind: 'other', message: 'fetchproxy: no confirmed browser session for "x". …' },
+    };
+  }
+
+  /** The probe throws the real session-not-ready error, as the bridge would. */
+  function notReady(pairCode: string | null) {
+    return async () => {
+      throw new FetchproxySessionNotReadyError({ mcpId: 'hemnet-mcp:0.4.0:abc', pairCode });
+    };
+  }
+
+  function fakeTransport(probeResult: BridgeProbeResult): Pick<FetchproxyTransport, 'runProbe' | 'status'> {
+    return {
+      async runProbe(fetchFn, probePath) {
+        try {
+          await fetchFn(probePath);
+        } catch {
+          /* classified into probeResult.error by the real server */
+        }
+        return probeResult;
+      },
+      status() {
+        return { lastExtensionMessageAt: null } as never;
+      },
+    };
+  }
+
+  async function run(probeResult: BridgeProbeResult, probeFn: () => Promise<string>) {
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'hemnet',
+        probePath: '/graphql',
+        hostLabel: 'www.hemnet.se',
+        transport: fakeTransport(probeResult),
+        probeFn,
+      }),
+    );
+    const res = await harness.callTool('hemnet_healthcheck', {});
+    await harness.close();
+    return parseToolResult<{
+      ok: boolean;
+      bridge: Record<string, unknown>;
+      error?: { kind: string; bridge_hint?: string };
+      hint: string;
+    }>(res);
+  }
+
+  it('passes the session fields through on the bridge block', async () => {
+    const body = await run(sessionProbe('no_session', null), notReady(null));
+    expect(body.bridge).toMatchObject({
+      session_state: 'no_session',
+      pending_pair_code: null,
+      extension_connected: true,
+      last_extension_message_at: null,
+    });
+  });
+
+  it('classifies the thrown session-not-ready error itself, even when an older server said "other"', async () => {
+    const body = await run(sessionProbe('no_session', null), notReady(null));
+    expect(body.ok).toBe(false);
+    expect(body.error?.kind).toBe('session_not_ready');
+    expect(body.error?.bridge_hint).toMatch(/hasn't confirmed a session/);
+  });
+
+  it('pair_pending → the hint names the pair code and the popup', async () => {
+    const body = await run(sessionProbe('pair_pending', '457-035'), notReady('457-035'));
+    expect(body.hint).toMatch(/approve pair code 457-035 for hemnet-mcp/);
+    expect(body.hint).toMatch(/popup/);
+  });
+
+  it('extension_disconnected → the hint says no extension is attached, with the real port', async () => {
+    const body = await run(sessionProbe('extension_disconnected', null), notReady(null));
+    expect(body.hint).toMatch(/No Transporter extension is attached/);
+    expect(body.hint).toMatch(/37150/);
+  });
+
+  it('no_session → the hint says the hello got no answer and mentions the hosted relay case', async () => {
+    const body = await run(sessionProbe('no_session', null), notReady(null));
+    expect(body.hint).toMatch(/never confirmed a session for hemnet-mcp/);
+    expect(body.hint).toMatch(/hosted bridge/);
+  });
+
+  it('a `hints.session_not_ready` override replaces the copy', async () => {
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'hemnet',
+        probePath: '/graphql',
+        hostLabel: 'www.hemnet.se',
+        transport: fakeTransport(sessionProbe('no_session', null)),
+        probeFn: notReady(null),
+        hints: { session_not_ready: 'custom copy' },
+      }),
+    );
+    const body = parseToolResult<{ hint: string }>(await harness.callTool('hemnet_healthcheck', {}));
+    await harness.close();
+    expect(body.hint).toBe('custom copy');
+  });
+});
+
+describe('registerBridgeHealthcheckTool — `path` for direct-first consumers', () => {
+  // hemnet / booli try a direct fetch and switch to the bridge only when
+  // Cloudflare walls it, so at registration time there may be no bridge at
+  // all, and the probe itself is what flips the fallback. `path()` reports
+  // which leg serves calls NOW (read after the probe); `transport` may be a
+  // getter returning the bridge once it exists.
+  function fakeBridge(state: 'linked' | 'no_session'): Pick<FetchproxyTransport, 'runProbe' | 'status'> {
+    return {
+      async runProbe() {
+        throw new Error('runProbe must not be used on the path-aware route');
+      },
+      status() {
+        return {
+          role: 'host',
+          port: 37150,
+          serverVersion: '2.5.0',
+          fetchTimeoutMs: 30000,
+          lastSuccessAt: 1,
+          lastFailureAt: null,
+          lastFailureReason: null,
+          consecutiveFailures: 0,
+          lastExtensionMessageAt: 42,
+          session: { state, pairCode: null, extensionConnected: true },
+        } as never;
+      },
+    };
+  }
+
+  type Body = {
+    ok: boolean;
+    transport?: Record<string, unknown>;
+    bridge?: Record<string, unknown>;
+    probe: { url: string; elapsed_ms: number; status?: number; body_length?: number };
+    error?: { kind: string; message: string };
+    hint: string;
+  };
+
+  it('direct path, ok: reports the path, no bridge block, and a direct-fetch hint', async () => {
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'hemnet',
+        probePath: '/graphql',
+        hostLabel: 'www.hemnet.se',
+        transport: () => undefined,
+        path: () => ({ transport: 'direct', mode: 'auto' }),
+        probeFn: async () => '{"data":{}}',
+      }),
+    );
+    const body = parseToolResult<Body>(await harness.callTool('hemnet_healthcheck', {}));
+    await harness.close();
+    expect(body.ok).toBe(true);
+    expect(body.transport).toEqual({ transport: 'direct', mode: 'auto' });
+    expect(body.bridge).toBeUndefined();
+    expect(body.probe).toMatchObject({ url: 'https://www.hemnet.se/graphql', status: 200, body_length: 11 });
+    expect(body.hint).toMatch(/direct fetch/i);
+  });
+
+  it('direct path, failing: classifies via classifyThrown and keeps its hint', async () => {
+    class WallError extends Error {}
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'hemnet',
+        probePath: '/graphql',
+        hostLabel: 'www.hemnet.se',
+        transport: () => undefined,
+        path: () => ({ transport: 'direct', mode: 'direct' }),
+        probeFn: async () => {
+          throw new WallError('HTTP 403 — Cloudflare bot challenge');
+        },
+        classifyThrown: (e) =>
+          e instanceof WallError ? { kind: 'cloudflare_challenge', hint: 'set HEMNET_TRANSPORT=fetchproxy' } : undefined,
+      }),
+    );
+    const body = parseToolResult<Body>(await harness.callTool('hemnet_healthcheck', {}));
+    await harness.close();
+    expect(body.ok).toBe(false);
+    expect(body.error).toMatchObject({ kind: 'cloudflare_challenge', message: 'HTTP 403 — Cloudflare bot challenge' });
+    expect(body.hint).toBe('set HEMNET_TRANSPORT=fetchproxy');
+    expect(body.bridge).toBeUndefined();
+  });
+
+  it('direct path, failing without a classifier: an unknown kind and a direct-path hint', async () => {
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'hemnet',
+        probePath: '/graphql',
+        hostLabel: 'www.hemnet.se',
+        transport: () => undefined,
+        path: () => ({ transport: 'direct', mode: 'direct' }),
+        probeFn: async () => {
+          throw new Error('fetch failed');
+        },
+      }),
+    );
+    const body = parseToolResult<Body>(await harness.callTool('hemnet_healthcheck', {}));
+    await harness.close();
+    expect(body.error).toMatchObject({ kind: 'unknown', message: 'fetch failed' });
+    expect(body.hint).toMatch(/direct fetch/i);
+    expect(body.hint).toMatch(/no browser bridge/i);
+  });
+
+  it('fetchproxy path (after the fallback flipped mid-probe): projects the bridge from status()', async () => {
+    let walled = false;
+    const bridge = fakeBridge('linked');
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'hemnet',
+        probePath: '/graphql',
+        hostLabel: 'www.hemnet.se',
+        transport: () => (walled ? bridge : undefined),
+        path: () => ({ transport: walled ? 'fetchproxy' : 'direct', mode: 'auto' }),
+        probeFn: async () => {
+          walled = true; // the probe is what flips the fallback
+          return 'ok';
+        },
+      }),
+    );
+    const body = parseToolResult<Body>(await harness.callTool('hemnet_healthcheck', {}));
+    await harness.close();
+    expect(body.ok).toBe(true);
+    expect(body.transport).toEqual({ transport: 'fetchproxy', mode: 'auto' });
+    expect(body.bridge).toEqual({
+      role: 'host',
+      port: 37150,
+      server_version: '2.5.0',
+      fetch_timeout_ms: 30000,
+      last_success_at: 1,
+      last_failure_at: null,
+      last_failure_reason: null,
+      consecutive_failures: 0,
+      last_extension_message_at: 42,
+      session_state: 'linked',
+      pending_pair_code: null,
+      extension_connected: true,
+    });
+  });
+
+  it('fetchproxy path, session never confirmed: the session hint ladder applies', async () => {
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'hemnet',
+        probePath: '/graphql',
+        hostLabel: 'www.hemnet.se',
+        transport: () => fakeBridge('no_session'),
+        path: () => ({ transport: 'fetchproxy', mode: 'auto' }),
+        probeFn: async () => {
+          throw new FetchproxySessionNotReadyError({ mcpId: 'hemnet-mcp:0.4.0:abc', pairCode: null });
+        },
+      }),
+    );
+    const body = parseToolResult<Body>(await harness.callTool('hemnet_healthcheck', {}));
+    await harness.close();
+    expect(body.error?.kind).toBe('session_not_ready');
+    expect(body.bridge?.session_state).toBe('no_session');
+    expect(body.hint).toMatch(/never confirmed a session for hemnet-mcp/);
+  });
+
+  it('direct path: redacts and truncates the thrown message before it reaches the result', async () => {
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'hemnet',
+        probePath: '/graphql',
+        hostLabel: 'www.hemnet.se',
+        transport: () => undefined,
+        path: () => ({ transport: 'direct', mode: 'direct' }),
+        probeFn: async () => {
+          throw new Error(`HTTP 401 with Authorization: Bearer sk-live-secret-token-value ${'x'.repeat(5000)}`);
+        },
+      }),
+    );
+    const body = parseToolResult<Body>(await harness.callTool('hemnet_healthcheck', {}));
+    await harness.close();
+    expect(body.error?.message).not.toContain('sk-live-secret-token-value');
+    expect(body.error?.message).toMatch(/\[truncated\]$/);
+  });
+
+  it('names no port when no bridge exists yet — never the 37149 default', async () => {
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'hemnet',
+        probePath: '/graphql',
+        hostLabel: 'www.hemnet.se',
+        transport: () => undefined,
+        path: () => ({ transport: 'fetchproxy', mode: 'auto' }),
+        probeFn: async () => {
+          throw new FetchproxySessionNotReadyError({ mcpId: 'hemnet-mcp:0.4.0:abc', pairCode: null });
+        },
+      }),
+    );
+    const body = parseToolResult<Body>(await harness.callTool('hemnet_healthcheck', {}));
+    await harness.close();
+    expect(body.error?.kind).toBe('session_not_ready');
+    expect(body.hint).not.toContain('37149');
+    expect(body.hint).toMatch(/before it bound its port looks like/);
+  });
+
+  it('an eagerly-built bridge does not make a direct probe read as a bridge round-trip', async () => {
+    // mode=direct pin, or an auto consumer that built the bridge on an earlier
+    // call and rode direct this time: path() is the authority on the leg.
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'hemnet',
+        probePath: '/graphql',
+        hostLabel: 'www.hemnet.se',
+        transport: () => fakeBridge('linked'),
+        path: () => ({ transport: 'direct', mode: 'auto' }),
+        probeFn: async () => 'ok',
+      }),
+    );
+    const body = parseToolResult<Body>(await harness.callTool('hemnet_healthcheck', {}));
+    await harness.close();
+    expect(body.ok).toBe(true);
+    expect(body.transport).toEqual({ transport: 'direct', mode: 'auto' });
+    expect(body.bridge?.session_state).toBe('linked');
+    expect(body.hint).toMatch(/^Direct fetch round-tripped/);
+  });
+
+  it('refuses a transport getter that returns nothing when no path is supplied', async () => {
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'x',
+        probePath: '/',
+        hostLabel: 'x.test',
+        transport: () => undefined,
+        probeFn: async () => '',
+      }),
+    );
+    const res = await harness.callTool('x_healthcheck', {});
+    await harness.close();
+    expect(res.isError).toBe(true);
+    expect(JSON.stringify(res.content)).toMatch(/transport\(\) returned nothing/);
   });
 });
