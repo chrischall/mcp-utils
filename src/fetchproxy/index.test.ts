@@ -365,6 +365,48 @@ describe('createBootstrapOpts', () => {
     ]);
   });
 
+  /**
+   * Declaring a bootstrap must not COST you the fetch verb.
+   *
+   * `capabilities` replaces the server's default rather than extending it, so
+   * a fragment built from declarations alone shipped
+   * `capabilities: ['capture_request_header']` — and the transport that spread
+   * it lost `fetch` silently, surfacing only at runtime as
+   * `capability "fetch" not granted (declared: [capture_request_header])`.
+   * Found in resy-mcp, whose capture path worked and whose fallback request
+   * could not run. alltrails-mcp had already sidestepped it by listing
+   * capabilities by hand — i.e. by not using the helper written to stop
+   * exactly this class of mistake.
+   *
+   * Every fetchproxy transport has the fetch verbs on it, so `fetch` is not a
+   * capability a bootstrap declaration can imply the absence of.
+   */
+  it('keeps fetch alongside every derived capability', () => {
+    const opts = createBootstrapOpts({
+      domains: 'resy.com',
+      bootstrap: {
+        captureHeaders: [{ host: 'api.resy.com', path: '/*', headerName: 'x-resy-auth-token' }],
+      },
+    });
+    expect(opts.capabilities).toContain('fetch');
+    expect(opts.capabilities).toContain('capture_request_header');
+  });
+
+  it('lists fetch first, so the declared set reads default-then-additions', () => {
+    const opts = createBootstrapOpts({
+      domains: 'x.com',
+      bootstrap: { cookieKeys: ['session'] },
+    });
+    expect(opts.capabilities?.[0]).toBe('fetch');
+  });
+
+  it('does not duplicate fetch when a declaration set is empty', () => {
+    const opts = createBootstrapOpts({ domains: 'x.com', bootstrap: { cookieKeys: [] } });
+    // Nothing declared → still no capabilities key, so the server keeps its
+    // own default rather than being handed a one-element restatement of it.
+    expect(opts.capabilities).toBeUndefined();
+  });
+
   it('derives capabilities from each bootstrap declaration kind', () => {
     const opts = createBootstrapOpts({
       domains: ['honeybook.com', 'hbsplit.com'],
