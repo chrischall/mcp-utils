@@ -795,7 +795,7 @@ function healthcheckHint(args: {
   const portNote = port === null ? '' : ` (port ${port})`;
   if (args.ok) {
     if (args.direct) {
-      return `Direct fetch round-tripped ${probePath} successfully — no browser bridge in play. If real tools still fail, the problem is on the ${hostLabel} side (a bot wall answering some calls but not this one, a field that moved, …), not the transport.`;
+      return `Direct fetch round-tripped ${probePath} successfully — the browser bridge wasn't used for this probe. If real tools still fail, the problem is on the ${hostLabel} side (a bot wall answering some calls but not this one, a field that moved, …), not the transport.`;
     }
     return `Bridge round-tripped ${probePath} successfully. If real tools still fail, the problem is downstream of fetchproxy (${hostLabel} redirecting on login, a bot-wall / behavioral challenge, etc.) — not the bridge.`;
   }
@@ -814,7 +814,7 @@ function healthcheckHint(args: {
     return args.bridgeHint ? `${args.bridgeHint} ${base}` : base;
   }
   if (args.direct) {
-    return `The probe ran over the direct fetch — no browser bridge in play — and failed; see error.message. If ${hostLabel} is answering with a bot wall, pin the bridge (the consumer's transport env var) or leave the default fallback to switch on the next challenge.`;
+    return `The probe ran over the direct fetch — the browser bridge wasn't used for this probe — and failed; see error.message. If ${hostLabel} is answering with a bot wall, pin the bridge (the consumer's transport env var) or leave the default fallback to switch on the next challenge.`;
   }
   if (args.role === null) {
     return `The bridge never bound a role. listen() may have failed silently on startup. Check stderr from ${prefix}-mcp for an error during start, and confirm ${port === null ? 'the bridge port' : `port ${port}`} isn't blocked.`;
@@ -1002,9 +1002,9 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
           ? 'session_not_ready'
           : error?.kind === 'bridge_down'
             ? 'bridge_down'
-            : direct || bridge === undefined
+            : direct
               ? 'direct'
-              : bridge.role === null
+              : bridge === undefined || bridge.role === null
                 ? 'no_role'
                 : error?.kind === 'timeout'
                   ? 'timeout'
