@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.21.0](https://github.com/chrischall/mcp-utils/compare/v0.20.0...v0.21.0) (2026-09-04)
+
+
+### Features
+
+* **response:** a `view` vocabulary whose default is the cheap one ([#185](https://github.com/chrischall/mcp-utils/issues/185)) ([1a163bd](https://github.com/chrischall/mcp-utils/commit/1a163bd93553bed482daa16114ab6acba49ec0cb))
+
+
+### Documentation
+
+* **response:** docblock the view types, and document the API in the README ([#187](https://github.com/chrischall/mcp-utils/issues/187)) ([a26b7a1](https://github.com/chrischall/mcp-utils/commit/a26b7a1835487b4c7d317be83aa7134309d07670)), closes [#186](https://github.com/chrischall/mcp-utils/issues/186)
+* **skill:** make per-user connector credentials the fleet default ([#183](https://github.com/chrischall/mcp-utils/issues/183)) ([02992c5](https://github.com/chrischall/mcp-utils/commit/02992c58aa3cd67f874660ff06666e7e741b2a97))
+
 ## [0.20.0](https://github.com/chrischall/mcp-utils/compare/v0.19.4...v0.20.0) (2026-09-02)
 
 
