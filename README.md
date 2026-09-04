@@ -163,6 +163,12 @@ mutates its input. Do **not** apply it to a tool whose product IS the image —
 records are literally a `photoUrls` bundle) — where it empties the response
 rather than shrinking it.
 
+**Arrays of bare image URLs under a non-media key are kept** — `floorplan_urls:
+['a.jpg', 'b.jpg']` comes back whole. That is deliberate: removing a *key* is
+visible, removing *elements* is not, and a caller reading `.length` to report
+"4 floor plans" would be quietly wrong. Use `drop` for those. An array under a
+media-named key (`photos: [...]`) is already removed by the key rule.
+
 Two escape hatches, and they are symmetric: `keep` preserves a key that looks
 like media but is the thing the caller asked for; `drop` adds keys this pattern
 does not know, so a service with an unguessed naming convention can fix itself
