@@ -154,6 +154,33 @@ describe('the `drop` escape hatch', () => {
     expect(stripMediaUrls({ a: { b: { heroAsset: 1, n: 2 } } }, { drop: ['heroAsset'] })).toEqual({ a: { b: { n: 2 } } });
   });
 
+  it('keep accepts a RegExp, symmetrically with drop', () => {
+    // The gap this closes. A repo preserving several CONSTRUCTED media fields
+    // that share a prefix had to enumerate every one, while the opposite intent
+    // could already be a pattern — redfin-mcp keeps `image_url` +
+    // `thumbnail_url`, compass-mcp `primary_photo_url` + `primary_thumbnail_url`.
+    const v = { id: 1, primary_photo_url: 'a', primary_thumbnail_url: 'b', avatar_url: 'c' };
+    expect(stripMediaUrls(v, { keep: [/^primary_/] })).toEqual({
+      id: 1, primary_photo_url: 'a', primary_thumbnail_url: 'b',
+    });
+  });
+
+  it('a keep RegExp is immune to its own flags, like drop', () => {
+    // `test()` on a /g pattern advances lastIndex, so one rule object tested
+    // across a sequence of keys skips the next key whose length falls inside
+    // the advanced index. It fails toward DELETING a kept field here, which is
+    // the worse direction — hence the same copy-per-call fix #196 gave `drop`.
+    const v = { keepA: 'x', keepB: 'y', keepC: 'z', avatar: 'gone' };
+    expect(stripMediaUrls(v, { keep: [/^keep/g] })).toEqual({ keepA: 'x', keepB: 'y', keepC: 'z' });
+  });
+
+  it('does not mutate a caller-supplied keep RegExp', () => {
+    const rule = /^keep/g;
+    rule.lastIndex = 3;
+    stripMediaUrls({ keepA: 1, keepB: 2 }, { keep: [rule] });
+    expect(rule.lastIndex).toBe(3);
+  });
+
   it('keep wins over drop, so an explicit keep is never overridden', () => {
     expect(stripMediaUrls({ avatar: 'x', id: 1 }, { keep: ['avatar'], drop: ['avatar'] })).toEqual({ avatar: 'x', id: 1 });
   });
