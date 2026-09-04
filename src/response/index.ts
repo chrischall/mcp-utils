@@ -116,3 +116,4 @@ export function toArray<T>(value: T | T[] | null | undefined): T[] {
   return Array.isArray(value) ? value : [value];
 }
 export * from './view.js';
+export * from './media.js';
