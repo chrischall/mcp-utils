@@ -171,7 +171,7 @@ media-named key (`photos: [...]`) is already removed by the key rule.
 
 Two escape hatches, and they are symmetric: `keep` preserves a key that looks
 like media but is the thing the caller asked for; `drop` adds keys this pattern
-does not know, so a service with an unguessed naming convention can fix itself
+does not know. Both take `string | RegExp`, so a service with an unguessed naming convention can fix itself
 **without a library release** — which is what Google Workspace's
 `thumbnailLink`/`iconUri`/`photoUrl` cost the first time round. `keep` wins over
 `drop`.

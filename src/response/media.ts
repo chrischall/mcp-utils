@@ -120,8 +120,20 @@ export interface StripMediaOptions {
   /**
    * Keys to keep even when they look like media — for a payload that mixes a
    * decorative avatar with an image the caller actually asked for.
+   *
+   * Takes the same `string | RegExp` shapes as `drop`. It did not until this
+   * was noticed: `drop` gained RegExp support in #194 and `keep` was left on
+   * strings, so a repo preserving several CONSTRUCTED media fields that share a
+   * prefix — redfin-mcp's `image_url` + `thumbnail_url`, compass-mcp's
+   * `primary_photo_url` + `primary_thumbnail_url` — had to enumerate each one
+   * while the opposite intent could be a pattern.
+   *
+   * That was an oversight in the API rather than a judgement, and if either
+   * side deserved the expressiveness first it was this one: a missed `drop`
+   * entry leaves bytes in the response, while a missed `keep` entry silently
+   * deletes a field the caller asked for.
    */
-  keep?: readonly string[];
+  keep?: readonly (string | RegExp)[];
   /**
    * Extra keys to drop, for a service whose naming this pattern does not know.
    *
@@ -150,7 +162,9 @@ export interface StripMediaOptions {
  * The input is never mutated: several repos hand these helpers live cache rows.
  */
 export function stripMediaUrls<T>(value: T, opts: StripMediaOptions = {}): T {
-  const keep = new Set((opts.keep ?? []).map((k) => k.toLowerCase()));
+  // `keep` is normalised exactly like `drop` below — same copy-the-regex
+  // reasoning, same once-per-call lowercasing.
+  const keep = normalizeRules(opts.keep ?? []);
   // Every RegExp rule is COPIED, once per call, for two reasons.
   //
   // `test()` on a `g`- or `y`-flagged regex advances `lastIndex` on a match, so
@@ -165,15 +179,19 @@ export function stripMediaUrls<T>(value: T, opts: StripMediaOptions = {}): T {
   // caller's RegExp is input too. The docs invite hoisting `drop` as a shared
   // constant, which is exactly when someone else's `lastIndex` would be ours to
   // corrupt. Strings are lowercased here for the same once-per-call reason.
-  const drop: (string | RegExp)[] = (opts.drop ?? []).map((rule) =>
-    typeof rule === 'string' ? rule.toLowerCase() : new RegExp(rule.source, rule.flags));
+  const drop = normalizeRules(opts.drop ?? []);
   return walk(value, keep, drop) as T;
 }
 
-/** Does `key` match one of the caller's extra drop rules? */
-function alsoDrop(key: string, drop: readonly (string | RegExp)[]): boolean {
+/** Lowercase the strings and copy the regexes, once per call. See above. */
+function normalizeRules(rules: readonly (string | RegExp)[]): (string | RegExp)[] {
+  return rules.map((rule) => (typeof rule === 'string' ? rule.toLowerCase() : new RegExp(rule.source, rule.flags)));
+}
+
+/** Does `key` match one of the caller's rules? Used for both `keep` and `drop`. */
+function matchesRule(key: string, rules: readonly (string | RegExp)[]): boolean {
   const lower = key.toLowerCase();
-  for (const rule of drop) {
+  for (const rule of rules) {
     if (typeof rule === 'string') {
       if (rule === lower) return true;
       continue;
@@ -185,7 +203,7 @@ function alsoDrop(key: string, drop: readonly (string | RegExp)[]): boolean {
   return false;
 }
 
-function walk(value: unknown, keep: ReadonlySet<string>, drop: readonly (string | RegExp)[]): unknown {
+function walk(value: unknown, keep: readonly (string | RegExp)[], drop: readonly (string | RegExp)[]): unknown {
   // Array ELEMENTS are walked but never value-tested, so an array of bare image
   // URLs under a non-media key — homes-mcp's `floorplan_urls` — comes back
   // whole. That is deliberate, and it is the one place this helper knowingly
@@ -209,11 +227,11 @@ function walk(value: unknown, keep: ReadonlySet<string>, drop: readonly (string 
   if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return value;
   const out: Record<string, unknown> = {};
   for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
-    if (keep.has(key.toLowerCase())) {
+    if (matchesRule(key, keep)) {
       out[key] = v;
       continue;
     }
-    if (MEDIA_KEY.test(key) || alsoDrop(key, drop)) continue;
+    if (MEDIA_KEY.test(key) || matchesRule(key, drop)) continue;
     if (typeof v === 'string' && MEDIA_URL.test(v)) continue;
     out[key] = walk(v, keep, drop);
   }
