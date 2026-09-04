@@ -62,6 +62,55 @@ describe('plurals of the suffixed keys', () => {
   });
 });
 
+describe('snake_case and kebab-case media keys', () => {
+  /**
+   * The pattern was camelCase-only: `photoUrl` matched, `photo_url` did not,
+   * because the suffix group ran directly against the noun with no separator.
+   * ~513 such keys exist across the fleet — `image_url` alone 244 times.
+   *
+   * The consequence was not "some bytes survive". It was INCONSISTENCY, since
+   * `MEDIA_URL` then judged each value on its own. canvas-parent-mcp saw it
+   * live in one response: Canvas's DEFAULT avatar ends `.png` and was dropped,
+   * an UPLOADED one is an extension-less thumbnail id and survived — so one
+   * participant in an array kept their avatar and another lost theirs.
+   */
+  it('strips the snake_case forms that were previously missed entirely', () => {
+    const v = {
+      id: 1,
+      image_url: 'https://cdn/a', photo_url: 'https://cdn/b', avatar_url: 'https://cdn/c',
+      thumbnail_url: 'https://cdn/d', profile_picture_urls: ['x'], image_links: ['y'],
+      icon_url: 'https://cdn/e', logo_url: 'https://cdn/f', image_src: 'https://cdn/g',
+    };
+    expect(stripMediaUrls(v)).toEqual({ id: 1 });
+  });
+
+  it('strips a bounded qualifier prefix, and a media noun in that slot', () => {
+    // `primary_photo_url` (compass, redfin) and `avatar_image_url` (canvas).
+    const v = { id: 1, primary_photo_url: 'x', primary_thumbnail_url: 'y', avatar_image_url: 'z', rendered_image_url: 'w' };
+    expect(stripMediaUrls(v)).toEqual({ id: 1 });
+  });
+
+  it('strips kebab-case too', () => {
+    expect(stripMediaUrls({ id: 1, 'hero-image-url': 'x', 'photo-url': 'y' })).toEqual({ id: 1 });
+  });
+
+  it('does NOT strip an unqualified word that merely starts with a listed qualifier', () => {
+    // The qualifier list is closed AND still requires a media noun after it.
+    // These are the snake_case traps the widening could plausibly have broken.
+    const keep = {
+      primary_key: 1, main_content: 2, cover_letter: 3, default_currency: 'USD',
+      full_name: 'A', original_price: 9, medium_name: 'm', profile_id: 7,
+      photo_count: 3, has_photo: true, photo_index: 0, image_media_metadata: {}, logo_text: 'x',
+    };
+    expect(stripMediaUrls(keep)).toEqual(keep);
+  });
+
+  it('still keeps everything #192 promised would survive', () => {
+    const keep = { hasThumbnail: false, thumbnailWidth: 220, imageMediaMetadata: {}, webViewLink: 'https://docs.google.com/d/1/edit' };
+    expect(stripMediaUrls(keep)).toEqual(keep);
+  });
+});
+
 describe('the `drop` escape hatch', () => {
   it('drops an extra key a service names in its own way', () => {
     // The symmetric half of `keep`. It exists so a repo does not need a LIBRARY

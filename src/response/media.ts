@@ -65,7 +65,23 @@
  */
 const MEDIA_NOUN = '(?:avatar|tall_avatar|cover_photo|cover_image|picture|photo|thumbnail|thumb|image|icon|banner|profile_pic(?:ture)?|logo)';
 
-const MEDIA_KEY = new RegExp(`^${MEDIA_NOUN}s?(?:(?:link|uri|url)s?)?$`, 'i');
+/**
+ * A bounded set of qualifiers that may precede the noun in a snake_case or
+ * kebab-case key: `primary_photo_url`, `profile_image_url`, `hero-banner`.
+ *
+ * CLOSED on purpose, never `\w+`. That is the whole difference between this
+ * and the two clauses removed in #191 — a bare `\bavatar\b` and an
+ * `/avatars?/` path segment — which were open-ended, stripped genuine page
+ * URLs, and (measured) removed zero bytes. A media noun is also allowed here,
+ * for `avatar_image_url`.
+ */
+const MEDIA_QUALIFIER =
+  '(?:primary|secondary|main|default|cover|hero|profile|master|rendered|small|medium|large|full|original)';
+
+const MEDIA_KEY = new RegExp(
+  `^(?:(?:${MEDIA_QUALIFIER}|${MEDIA_NOUN})[_-])?${MEDIA_NOUN}s?(?:[_-]?(?:link|uri|url|src)s?)?$`,
+  'i',
+);
 
 /**
  * A URL that points at an image rather than at a page: a known image extension
