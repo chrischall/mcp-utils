@@ -49,7 +49,7 @@ describe('what it removes', () => {
 
 describe('plurals of the suffixed keys', () => {
   it('strips imageUrls / photoUrls / avatarUrls, not just their singulars', () => {
-    // Not hypothetical: those three appear 33 times across groupon-mcp and
+    // Not hypothetical: imageUrls and photoUrls appear 22 times across groupon-mcp and
     // redfin-mcp. A rule that catches `imageUrl` and misses `imageUrls` is the
     // kind of half-cover that reads as working.
     const v = { id: 1, imageUrls: ['https://cdn/a'], photoUrls: { small: 'x' }, avatarUrls: [], thumbnailLinks: ['y'] };
@@ -161,6 +161,37 @@ describe('what it must NOT remove', () => {
   it('keeps empty strings, zeroes and false — falsy is not absent', () => {
     const v = { a: '', b: 0, c: false, d: [] };
     expect(stripMediaUrls(v)).toEqual(v);
+  });
+
+  // A g/y-flagged RegExp is STATEFUL: test() advances lastIndex on a match, so
+  // the same rule object silently skips the next key whose length falls inside
+  // the advanced index. It fails OPEN — the key survives — and the result
+  // depends on key ORDER, so it reads as "the rule just didn't match" rather
+  // than as a bug. `drop` takes caller-supplied regexes and nothing in the type
+  // forbids a /g, which is a natural thing to write.
+  it('honours a drop rule whatever flags the caller put on it', () => {
+    for (const rule of [/^blur/g, /^blur/gi, /^blur/y, /^blur/]) {
+      expect(stripMediaUrls({ blurA: 1, blurB: 2, blurC: 3, keepMe: 4 }, { drop: [rule] }))
+        .toEqual({ keepMe: 4 });
+    }
+  });
+
+  // The drop array is documented as something a repo hoists as a shared
+  // constant, which is exactly when cross-CALL lastIndex leakage would bite.
+  it('does not let one call leak regex state into the next', () => {
+    const shared = [/^blur/g];
+    const row = { blurA: 1, keepMe: 2 };
+    expect(stripMediaUrls(row, { drop: shared })).toEqual({ keepMe: 2 });
+    expect(stripMediaUrls(row, { drop: shared })).toEqual({ keepMe: 2 });
+  });
+
+  // "never mutates its input" is a promise this helper already makes about the
+  // payload; a caller's RegExp is input too.
+  it('never mutates a caller-supplied regex', () => {
+    const rule = /^blur/g;
+    rule.lastIndex = 3;
+    stripMediaUrls({ blurA: 1 }, { drop: [rule] });
+    expect(rule.lastIndex).toBe(3);
   });
 
   it('keeps a receipt/attachment URL when the caller asks to keep that key', () => {

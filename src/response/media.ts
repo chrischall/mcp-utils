@@ -56,10 +56,12 @@
  *
  * The trailing `s?` after the suffix closes a gap the suffix opened: the
  * pattern matched `imageUrl` and `images`, but not `imageUrls`. Those plurals
- * are not hypothetical — `imageUrls`, `photoUrls` and `avatarUrls` appear 33
- * times across groupon-mcp and redfin-mcp — and a rule that catches the
- * singular while missing the plural of the same field is the kind of half-cover
- * that reads as working.
+ * are not hypothetical — `imageUrls` appears 5 times in groupon-mcp and
+ * `photoUrls` 17 times in redfin-mcp — and a rule that catches the singular
+ * while missing the plural of the same field is the kind of half-cover that
+ * reads as working. (Counted with `grep -rhoE` over both repos excluding
+ * node_modules. An earlier draft said 33 across the two and named `avatarUrls`
+ * as a third form; neither reproduced.)
  */
 const MEDIA_NOUN = '(?:avatar|tall_avatar|cover_photo|cover_image|picture|photo|thumbnail|thumb|image|icon|banner|profile_pic(?:ture)?|logo)';
 
@@ -102,7 +104,8 @@ export interface StripMediaOptions {
    * change at leisure.
    *
    * A string matches a key exactly, case-insensitively; a RegExp is tested
-   * against the key as given.
+   * against the key as given, whatever flags it carries — see `stripMediaUrls`
+   * for why a `g` or `y` rule needs care.
    */
   drop?: readonly (string | RegExp)[];
 }
@@ -118,14 +121,36 @@ export interface StripMediaOptions {
  */
 export function stripMediaUrls<T>(value: T, opts: StripMediaOptions = {}): T {
   const keep = new Set((opts.keep ?? []).map((k) => k.toLowerCase()));
-  const drop = opts.drop ?? [];
+  // Every RegExp rule is COPIED, once per call, for two reasons.
+  //
+  // `test()` on a `g`- or `y`-flagged regex advances `lastIndex` on a match, so
+  // one rule object tested across a sequence of keys silently skips the next key
+  // whose length falls inside the advanced index. It fails OPEN — the key
+  // survives — and which key survives depends on the ORDER they are walked in,
+  // so it reads as "the rule did not match" rather than as a bug. Nothing in the
+  // type forbids a `/g`, and `/^blur/gi` is a natural thing to write.
+  //
+  // Copying rather than resetting the caller's own regex keeps the promise this
+  // helper already makes about payloads: it never mutates its input, and a
+  // caller's RegExp is input too. The docs invite hoisting `drop` as a shared
+  // constant, which is exactly when someone else's `lastIndex` would be ours to
+  // corrupt. Strings are lowercased here for the same once-per-call reason.
+  const drop: (string | RegExp)[] = (opts.drop ?? []).map((rule) =>
+    typeof rule === 'string' ? rule.toLowerCase() : new RegExp(rule.source, rule.flags));
   return walk(value, keep, drop) as T;
 }
 
 /** Does `key` match one of the caller's extra drop rules? */
 function alsoDrop(key: string, drop: readonly (string | RegExp)[]): boolean {
+  const lower = key.toLowerCase();
   for (const rule of drop) {
-    if (typeof rule === 'string' ? rule.toLowerCase() === key.toLowerCase() : rule.test(key)) return true;
+    if (typeof rule === 'string') {
+      if (rule === lower) return true;
+      continue;
+    }
+    // Our own copy, so resetting is free and invisible to the caller.
+    rule.lastIndex = 0;
+    if (rule.test(key)) return true;
   }
   return false;
 }
