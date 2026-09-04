@@ -42,6 +42,30 @@ describe('what it must NOT remove', () => {
     expect(stripMediaUrls(page)).toEqual(page);
   });
 
+  it('keeps a page whose PATH merely contains the word avatar', () => {
+    // The rule is an image extension ending the path, and nothing looser.
+    // `…/users/avatar-collection` and `…/v1/avatar/settings` are pages, and
+    // earlier drafts stripped both while removing zero additional bytes from
+    // the payload that motivated this helper.
+    const pages = {
+      a: 'https://example.com/users/avatar-collection',
+      b: 'https://api.example.com/v1/avatar/settings',
+      c: 'https://example.com/photos',
+    };
+    expect(stripMediaUrls(pages)).toEqual(pages);
+  });
+
+  it('keeps a signed URL whose QUERY happens to contain an image extension', () => {
+    // Splitwise's receipt link. That one is content a caller asked for.
+    const v = { receipt: 'https://www.splitwise.com/api/v4.0/expenses/466/receipt?cachebust=29f.jpeg&size=large' };
+    expect(stripMediaUrls(v)).toEqual(v);
+  });
+
+  it('still strips an avatar under a media KEY however the URL is shaped', () => {
+    // The key check does the work the loose URL clauses were reaching for.
+    expect(stripMediaUrls({ avatar: 'https://cdn.example.com/u/9', id: 1 })).toEqual({ id: 1 });
+  });
+
   it('keeps empty strings, zeroes and false — falsy is not absent', () => {
     const v = { a: '', b: 0, c: false, d: [] };
     expect(stripMediaUrls(v)).toEqual(v);
