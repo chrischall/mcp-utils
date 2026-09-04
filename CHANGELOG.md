@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.23.2](https://github.com/chrischall/mcp-utils/compare/v0.23.1...v0.23.2) (2026-09-04)
+
+
+### Bug Fixes
+
+* **response:** let `keep` take a RegExp, symmetrically with `drop` ([#204](https://github.com/chrischall/mcp-utils/issues/204)) ([b008350](https://github.com/chrischall/mcp-utils/commit/b00835016683c32f82ba6e330d3ae63ddc2cf82a))
+
+
+### Documentation
+
+* **response:** make the array-element behaviour deliberate and explain it ([#202](https://github.com/chrischall/mcp-utils/issues/202)) ([e4de527](https://github.com/chrischall/mcp-utils/commit/e4de527f5a13a5c4353a18c63306d0de899acb97))
+
 ## [0.23.1](https://github.com/chrischall/mcp-utils/compare/v0.23.0...v0.23.1) (2026-09-04)
 
 
