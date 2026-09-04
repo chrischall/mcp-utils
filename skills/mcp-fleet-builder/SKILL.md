@@ -264,6 +264,11 @@ mcp-host register --slug splitwise --npm splitwise-mcp \
 # -> prints connectUrl: https://mcp.nullnet.app/c/chris/splitwise/mcp
 ```
 
+**That example is the EXCEPTION, not the pattern.** `--secret-env` stores one
+operator's credential and every caller acts as that account. Use it only for a
+credential that is genuinely not the caller's; when the MCP signs in as a person, use
+`identity.perUserChild` + `auth.fields` instead — see *Per-user credentials* below.
+
 Then in claude.ai: Settings → Connectors → Add custom connector → paste the `connectUrl`, sign in on the authorize page, press Connect. Each hosted MCP is its own connector with its own grant; revoking one never touches another.
 
 ### Ship a `mint.yaml` — the registration writes itself
@@ -286,9 +291,67 @@ That is a complete file. Add only what is true of this MCP:
 - `command: { bin: <name> }` — **required when package.json declares more than one bin**, or the install refuses (canvas-parent-mcp shipped broken on exactly this).
 - `dependencies:` — a binary the server shells out to, as a GitHub release asset (`repo`, `tag`, `asset` glob, `bin: [name]`), or extra npm packages. This is the gogcli case.
 - `state: { dataDir: true, reason: <why> }` — **the reason is required**: it is what an owner judges. Say what is kept and what breaks without it ("keeps its device id under `$HOME`; without it every cold start re-enrols").
-- `identity: { perUserChild: true }` + `auth: { fields | flow }` — only for an MCP that authenticates as its CALLER. `auth` requires `perUserChild`.
+- `identity: { perUserChild: true }` + `auth: { fields | flow }` — **the default whenever the MCP signs in as a person.** See *Per-user credentials* below; `auth` requires `perUserChild`.
 - `egress: { allow: [host, …] }` — enforced only on the isolated tier, a proposal everywhere. **Deriving this correctly is the hard part — see below.**
 - `tools: { enable: [...] }`, `build:`, `subdir:`.
+
+### Per-user credentials are the DEFAULT — `--secret-env` is the exception
+
+If the credential belongs to a **person**, declare `identity.perUserChild: true` and
+`auth.fields`, and let each connector user type their own on the authorize page. Do NOT
+reach for `mcp-host secret set` + `--secret-env`: that stores ONE operator's credential
+and every caller then acts as that account. For anything personal — health records, a
+mailbox, a bank, a co-parenting log — that is a data-leak shape, not a configuration
+choice, and `perUserChild` is right on its own merits before you even get to auth: two
+callers sharing one child share one signed-in session.
+
+Reach for `--secret-env` only when the credential is genuinely **not** the caller's: an
+org-wide API key the operator owns, a partner/vendor token, a public API's rate-limit
+key. `splitwise`-style personal API keys are the caller's, so they are `auth.fields`.
+
+Two constraints that bite at save time:
+
+- **An auth field may NOT name a host-set variable.** If `MAH_USERNAME` is in `env`, it
+  cannot also be an `auth.field` — the write is refused. Move it out of `env` and say in
+  a comment that it stays the way a local single-user install is configured.
+- `perUserChild` needs a runtime whose runner keys a child per principal. Both Fly tiers
+  honour it; `macos-vm` and `cf-container` do not.
+
+### Does it also need `auth.flow`?
+
+`auth.fields` collects values ONCE, before any tool runs. That is enough only if those
+values alone establish a session. Ask: **after the form is submitted, can the server
+reach a working state without asking the human anything else?**
+
+- **No flow** — a bearer token, an API key, a username/password the service accepts
+  outright. The fields are the whole login.
+- **Flow** — anything that answers back: MFA/OTP, a device challenge, a "choose where to
+  send the code", a second exchange that mints the durable credential. Without a flow the
+  connection finishes in a half-authenticated state and every tool fails, which reads to
+  the user as "the connector is broken".
+
+A flow is up to 6 steps of `{tool, args, prompt, carry}`, where `args` may reference
+earlier values as `{from: <name>}` and `carry` threads a step's result forward — nothing
+is carried implicitly. Prompts are `text | password | choice` and default to `password`.
+**Every step names a tool the child actually exposes and passes only args it accepts; a
+mismatch fails at CONNECT time, in front of the person signing in.** Pin it with a test
+that drives the real registrars and asserts the flow against their input schemas
+(`myatriumhealth-mcp/tests/mint.test.ts`) — and mutation-test that test, because an
+arg-name check written as `[a-z]+` passes a camelCase wrong name vacuously.
+
+**`capture` or not** is a separate question from whether you need a flow:
+
+- **No `capture`** when the child persists its own session under its per-user
+  `dataDir` — there is no durable credential to hand back. This is the common case for a
+  cookie-session MCP (myatriumhealth).
+- **`capture: {tool, args, path, into}`** when one more call yields a long-lived token
+  worth storing as a principal secret — kiaaccess exports its remember-me token that way,
+  which is what lets it skip MFA on later starts.
+
+Worked examples: `mcp-host/docs/examples/kiaaccess-auth-flow.json` (password → channel
+choice → OTP → capture), and `myatriumhealth-mcp/mint.yaml` (sign-in → channel → code,
+no capture). Read `docs/MINT-MANIFEST.md` on `origin/main` for the current schema rather
+than trusting this summary — `authFlowSchema` is in `packages/core/src/auth-flow.ts`.
 
 **There is NO `bridge` / `bridgePortEnv` / `runtime` field.** Those are *registration* fields, set over the control API (§*Browser-bridge MCPs CAN be hosted*) — the manifest schema has no column for them, so a bridge repo cannot declare itself bridged. State the requirement in a **comment** and declare `state.dataDir: true` (which the API requires for `bridge`) with its reason. Do NOT put it in `summary`: that is user-facing wizard text, and folding an internal hosting note into it fails review.
 
