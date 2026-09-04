@@ -105,6 +105,48 @@ return textResult(flattenJsonApi(payload));   // collapse JSON:API envelopes
 deepMapStringField(payload, 'eventDate', dmyToIso);
 ```
 
+#### The `view` vocabulary — read tools answer in the cheap shape by default
+
+`VIEWS`, `DEFAULT_VIEW`, `View`, `viewParam`, `resolveView`, `viewResult`,
+`minifiedResult`, `projectOrRaw`. See `docs/fleet-conventions.md`
+("Response shape") for the convention these implement.
+
+`view: 'compact' | 'full' | 'raw'`, defaulting to **`compact`** — a projection
+that has to be requested is one that usually is not.
+
+```ts
+import { viewParam, resolveView, viewResult, projectOrRaw } from '@chrischall/mcp-utils';
+
+const VIEWS_HERE = ['compact', 'full'] as const;   // only the rungs you honour
+
+server.registerTool('svc_list_things', {
+  inputSchema: {
+    view: viewParam(VIEWS_HERE, { note: 'compact omits the upstream `meta` echo.' }),
+  },
+}, async (args) => {
+  const view = resolveView(args.view, VIEWS_HERE);
+  const rows = await client.list();
+  // Project the ARRAY, so one odd record cannot half-answer, and fall back to
+  // the whole payload (warning to stderr) if the upstream shape has drifted.
+  const items = view === 'compact'
+    ? projectOrRaw(rows, (rs) => rs.map(compactThing), { label: 'svc-mcp', context: 'GET /things' })
+    : rows;
+  return viewResult(view, { count: rows.length, items });
+});
+```
+
+`viewParam` refuses a rung list without `compact` (a tool with no cheap answer
+has nothing to default to) and refuses a single-rung list (a parameter that
+decides nothing). Register only the rungs you honour: `raw` is meaningless
+where a record is *assembled* from several endpoints rather than passed through
+from one, and a value that silently aliases to another is a lie in the schema.
+`raw` means "no projection" — never "no normalisation".
+
+`viewResult` minifies `compact` and `full` and leaves `raw` indented (that rung
+exists to be read by a person); `minifiedResult` is the same rule with no view
+to hand. Formatting whitespace only — whitespace *inside* a value is content
+and is never touched.
+
 ### `errors` — helpful errors
 
 `McpToolError` and its subclasses (`SessionNotAuthenticatedError`,

@@ -34,6 +34,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
  */
 export const VIEWS = ['compact', 'full', 'raw'] as const;
 
+/** One of {@link VIEWS}: the shape a read tool answers in. */
 export type View = (typeof VIEWS)[number];
 
 /** Efficiency is not something a caller should have to ask for. */
@@ -45,6 +46,7 @@ const BLURB: Record<View, string> = {
   raw: '"raw" returns the upstream payload unprojected',
 };
 
+/** Per-tool tuning for {@link viewParam}. */
 export interface ViewParamOptions {
   /**
    * What THIS tool's compact rung leaves out, in the tool's own words.
@@ -134,6 +136,7 @@ export function viewResult(view: View, data: unknown): CallToolResult {
   return view === 'raw' ? { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] } : minifiedResult(data);
 }
 
+/** Who is projecting what, for the stderr line {@link projectOrRaw} writes on a fallback. */
 export interface ProjectOptions {
   /** The MCP's own name, for the stderr line. */
   label: string;
