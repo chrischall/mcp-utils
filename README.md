@@ -108,7 +108,7 @@ deepMapStringField(payload, 'eventDate', dmyToIso);
 #### The `view` vocabulary — read tools answer in the cheap shape by default
 
 `VIEWS`, `DEFAULT_VIEW`, `View`, `viewParam`, `resolveView`, `viewResult`,
-`minifiedResult`, `projectOrRaw`. See `docs/fleet-conventions.md`
+`minifiedResult`, `projectOrRaw`, `stripMediaUrls`. See `docs/fleet-conventions.md`
 ("Response shape") for the convention these implement.
 
 `view: 'compact' | 'full' | 'raw'`, defaulting to **`compact`** — a projection
@@ -141,6 +141,17 @@ decides nothing). Register only the rungs you honour: `raw` is meaningless
 where a record is *assembled* from several endpoints rather than passed through
 from one, and a value that silently aliases to another is a lie in the schema.
 `raw` means "no projection" — never "no normalisation".
+
+`stripMediaUrls(payload)` is the highest-value projection that needs no
+knowledge of the API: it drops `avatar` / `picture` / `cover_photo` /
+`thumbnail` keys and bare image URLs. Measured on a real 187.6 KB
+`splitwise-mcp` groups response — which does not fit in a tool result at all —
+minifying alone is −25%, minifying **and** stripping media is **−73%**. It
+deliberately keeps `null` (an absent key and a null one are different facts;
+`ofw-mcp`'s `viewedAt: null` means "never opened"), keeps page URLs, and never
+mutates its input. Do **not** apply it to a tool whose product IS the image —
+`alltrails_get_trail_photos`, `sw_get_receipt` — where it empties the response
+rather than shrinking it; `keep` is the escape hatch for a mixed payload.
 
 `viewResult` minifies `compact` and `full` and leaves `raw` indented (that rung
 exists to be read by a person); `minifiedResult` is the same rule with no view
