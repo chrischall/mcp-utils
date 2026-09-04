@@ -37,8 +37,24 @@
 const MEDIA_KEY =
   /^(avatar|tall_avatar|cover_photo|cover_image|picture|photo|thumbnail|thumb|image|icon|banner|profile_pic(ture)?|logo)s?$/i;
 
-/** A URL that points at an image rather than at a page. */
-const MEDIA_URL = /^https?:\/\/[^\s]+?(\.(png|jpe?g|gif|webp|svg|avif|bmp|ico)(\?|#|$)|\/avatars?\/|_avatars?\/|\bavatar\b)/i;
+/**
+ * A URL that points at an image rather than at a page: a known image extension
+ * ending the PATH.
+ *
+ * Nothing looser. Earlier drafts also matched an `avatar` path segment and a
+ * bare `avatar` word, and both were false positives waiting to happen —
+ * `…/users/avatar-collection` and `…/v1/avatar/settings` are pages, and this
+ * helper's whole promise is that it keeps pages. Measured on the payload that
+ * motivated the helper, the extra clauses removed exactly ZERO additional
+ * bytes: every avatar in a real Splitwise response is either under a media KEY
+ * (caught by `MEDIA_KEY`, whatever the URL looks like) or ends in `.png`/`.jpg`.
+ * A rule that adds risk and removes nothing is not a rule.
+ *
+ * The extension must END the path, so a signed URL whose query happens to
+ * contain `.jpeg` — Splitwise's `…/receipt?cachebust=29f.jpeg&size=large` — is
+ * KEPT. That one is content a caller asked for, not decoration.
+ */
+const MEDIA_URL = /^https?:\/\/[^\s]+?\.(png|jpe?g|gif|webp|svg|avif|bmp|ico)([?#]|$)/i;
 
 export interface StripMediaOptions {
   /**
