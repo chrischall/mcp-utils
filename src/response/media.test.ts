@@ -159,6 +159,35 @@ describe('the `drop` escape hatch', () => {
   });
 });
 
+describe('arrays of bare image URLs', () => {
+  /**
+   * The one place this helper knowingly leaves bytes on the table, and it is a
+   * decision rather than an oversight.
+   *
+   * Removing a KEY is visible — the field is gone and a reader can see it.
+   * Removing ELEMENTS is invisible: the array is merely shorter, and a caller
+   * reading `floorplan_urls.length` to say "this listing has 4 floor plans"
+   * would be quietly wrong. Same class of harm as the dropped-nulls rule this
+   * helper also refuses.
+   *
+   * Found in homes-mcp, whose `floorplan_urls` holds an array of `.jpg` links
+   * under a key no media rule matches. `drop` is the answer there.
+   */
+  it('keeps an array of image URLs under a non-media key', () => {
+    const v = { id: 1, floorplan_urls: ['https://cdn/a.jpg', 'https://cdn/b.png'] };
+    expect(stripMediaUrls(v)).toEqual(v);
+  });
+
+  it('but the KEY rule still removes an array under a media-named key', () => {
+    expect(stripMediaUrls({ id: 1, photos: ['https://cdn/a.jpg'] })).toEqual({ id: 1 });
+  });
+
+  it('and `drop` removes the key outright, which is the intended fix', () => {
+    const v = { id: 1, floorplan_urls: ['https://cdn/a.jpg'] };
+    expect(stripMediaUrls(v, { drop: ['floorplan_urls'] })).toEqual({ id: 1 });
+  });
+});
+
 describe('what it must NOT remove', () => {
   it('keeps null — an absent key and a null one are not the same fact', () => {
     // ofw-mcp emits `viewedAt: null` to say "never opened", which is evidence

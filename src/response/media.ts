@@ -25,6 +25,10 @@
  * answered. Three points is not worth a payload that can no longer distinguish
  * "no value" from "not reported".
  *
+ * **Arrays of bare image URLs under a non-media key are KEPT** — see the note
+ * in `walk`. Use `drop` for those; the key rule already covers an array under
+ * a media-named key (`photos: [...]`).
+ *
  * **Never apply this to a tool whose PRODUCT is the image.**
  * `alltrails_get_trail_photos`, `zillow_get_property_photos`,
  * `sw_get_receipt`, `musescore_fetch_svgs` exist to return exactly these URLs,
@@ -182,6 +186,20 @@ function alsoDrop(key: string, drop: readonly (string | RegExp)[]): boolean {
 }
 
 function walk(value: unknown, keep: ReadonlySet<string>, drop: readonly (string | RegExp)[]): unknown {
+  // Array ELEMENTS are walked but never value-tested, so an array of bare image
+  // URLs under a non-media key — homes-mcp's `floorplan_urls` — comes back
+  // whole. That is deliberate, and it is the one place this helper knowingly
+  // leaves bytes on the table.
+  //
+  // Removing a KEY is visible: the field is gone and a reader can see that it
+  // is. Removing ELEMENTS is invisible — the array is merely shorter, and a
+  // caller reading `floorplan_urls.length` to say "this listing has 4 floor
+  // plans" would be quietly wrong. That is the same class of harm as the
+  // dropped-nulls rule this helper also refuses (see the docblock above):
+  // a silently altered count reads as fact.
+  //
+  // The fix for such a field is `drop: ['floorplan_urls']` at the call site,
+  // which removes the key outright and stays legible in the response.
   if (Array.isArray(value)) return value.map((v) => walk(v, keep, drop));
   // `null` is data here, not an empty object — see the docblock.
   if (value === null || typeof value !== 'object') return value;
