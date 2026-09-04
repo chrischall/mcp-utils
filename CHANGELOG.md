@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.23.0](https://github.com/chrischall/mcp-utils/compare/v0.22.0...v0.23.0) (2026-09-04)
+
+
+### Features
+
+* **response:** match suffixed-key PLURALS, and let a repo add its own drop keys ([#194](https://github.com/chrischall/mcp-utils/issues/194)) ([a03f50b](https://github.com/chrischall/mcp-utils/commit/a03f50ba53b2233f0fab6854aa59fe00935f839b))
+* **response:** match the suffixed media keys Google Workspace APIs use ([#192](https://github.com/chrischall/mcp-utils/issues/192)) ([7a4fab3](https://github.com/chrischall/mcp-utils/commit/7a4fab31828934804660f3fc69f22bc976494841))
+
+
+### Bug Fixes
+
+* **response:** make a drop rule immune to its own regex flags ([#196](https://github.com/chrischall/mcp-utils/issues/196)) ([46cfdc1](https://github.com/chrischall/mcp-utils/commit/46cfdc1a1b5cea12372efabd4a28fdfafb2fc156))
+
 ## [0.22.0](https://github.com/chrischall/mcp-utils/compare/v0.21.0...v0.22.0) (2026-09-04)
 
 
