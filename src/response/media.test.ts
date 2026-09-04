@@ -105,6 +105,31 @@ describe('snake_case and kebab-case media keys', () => {
     expect(stripMediaUrls(keep)).toEqual(keep);
   });
 
+  it('treats a qualifier the same in camelCase and snake_case', () => {
+    // Removing the redundant `cover_photo`/`cover_image`/`tall_avatar` entries
+    // exposed an asymmetry they had been masking: with the separator REQUIRED,
+    // `cover_photo` was stripped and `coverPhoto` was kept — same field, same
+    // meaning, different answer decided by an API's casing convention. That is
+    // the bug #197 was about, one level up.
+    const v = {
+      id: 1,
+      cover_photo: 'a', coverPhoto: 'b', cover_image: 'c', coverImage: 'd',
+      tall_avatar: 'e', tallAvatar: 'f', coverPhotoUrl: 'g', cover_photo_url: 'h',
+      primaryPhotoUrl: 'i', primary_photo_url: 'j', avatarImageUrl: 'k', avatar_image_url: 'l',
+    };
+    expect(stripMediaUrls(v)).toEqual({ id: 1 });
+  });
+
+  it('does not let the optional separator swallow ordinary words', () => {
+    // The qualifier list is closed and a media noun must still follow it, which
+    // is what keeps these safe once the separator is optional.
+    const keep = {
+      coverage: 1, mainframe: 2, profileId: 3, coverNote: 4, mainAccount: 5,
+      imagemap: 6, photographer: 7, iconic: 8, bannerless: 9, logout: 10, profiler: 11,
+    };
+    expect(stripMediaUrls(keep)).toEqual(keep);
+  });
+
   it('still keeps everything #192 promised would survive', () => {
     const keep = { hasThumbnail: false, thumbnailWidth: 220, imageMediaMetadata: {}, webViewLink: 'https://docs.google.com/d/1/edit' };
     expect(stripMediaUrls(keep)).toEqual(keep);
