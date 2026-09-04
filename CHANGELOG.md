@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.3](https://github.com/chrischall/mcp-utils/compare/v0.23.2...v0.23.3) (2026-09-04)
+
+
+### Documentation
+
+* **skill:** the fleet builder still taught opt-in compact and pretty-printed results ([#205](https://github.com/chrischall/mcp-utils/issues/205)) ([8694330](https://github.com/chrischall/mcp-utils/commit/8694330804ac4fef23514e1c3364d4a5a326ce98))
+
 ## [0.23.2](https://github.com/chrischall/mcp-utils/compare/v0.23.1...v0.23.2) (2026-09-04)
 
 
