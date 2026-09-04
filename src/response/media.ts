@@ -53,9 +53,17 @@
  * reference suffixes are added, so `thumbnailWidth` (a number) and
  * `imageMediaMetadata` (EXIF) stay too — and so does `webViewLink`, whose noun
  * is not media and which sits in the same object as `thumbnailLink`.
+ *
+ * The trailing `s?` after the suffix closes a gap the suffix opened: the
+ * pattern matched `imageUrl` and `images`, but not `imageUrls`. Those plurals
+ * are not hypothetical — `imageUrls`, `photoUrls` and `avatarUrls` appear 33
+ * times across groupon-mcp and redfin-mcp — and a rule that catches the
+ * singular while missing the plural of the same field is the kind of half-cover
+ * that reads as working.
  */
-const MEDIA_KEY =
-  /^(avatar|tall_avatar|cover_photo|cover_image|picture|photo|thumbnail|thumb|image|icon|banner|profile_pic(ture)?|logo)s?(link|uri|url)?$/i;
+const MEDIA_NOUN = '(?:avatar|tall_avatar|cover_photo|cover_image|picture|photo|thumbnail|thumb|image|icon|banner|profile_pic(?:ture)?|logo)';
+
+const MEDIA_KEY = new RegExp(`^${MEDIA_NOUN}s?(?:(?:link|uri|url)s?)?$`, 'i');
 
 /**
  * A URL that points at an image rather than at a page: a known image extension
@@ -82,6 +90,21 @@ export interface StripMediaOptions {
    * decorative avatar with an image the caller actually asked for.
    */
   keep?: readonly string[];
+  /**
+   * Extra keys to drop, for a service whose naming this pattern does not know.
+   *
+   * The symmetric half of `keep`, and the point is that a repo should not need
+   * a LIBRARY RELEASE to strip its own noise. That is exactly what happened
+   * once already: Google Workspace names every picture `thumbnailLink` /
+   * `iconUri` / `photoUrl`, none of which the original pattern matched, and
+   * closing it took a version bump across every consumer. The next service with
+   * an unguessed convention can now fix itself locally and propose the pattern
+   * change at leisure.
+   *
+   * A string matches a key exactly, case-insensitively; a RegExp is tested
+   * against the key as given.
+   */
+  drop?: readonly (string | RegExp)[];
 }
 
 /**
@@ -95,11 +118,20 @@ export interface StripMediaOptions {
  */
 export function stripMediaUrls<T>(value: T, opts: StripMediaOptions = {}): T {
   const keep = new Set((opts.keep ?? []).map((k) => k.toLowerCase()));
-  return walk(value, keep) as T;
+  const drop = opts.drop ?? [];
+  return walk(value, keep, drop) as T;
 }
 
-function walk(value: unknown, keep: ReadonlySet<string>): unknown {
-  if (Array.isArray(value)) return value.map((v) => walk(v, keep));
+/** Does `key` match one of the caller's extra drop rules? */
+function alsoDrop(key: string, drop: readonly (string | RegExp)[]): boolean {
+  for (const rule of drop) {
+    if (typeof rule === 'string' ? rule.toLowerCase() === key.toLowerCase() : rule.test(key)) return true;
+  }
+  return false;
+}
+
+function walk(value: unknown, keep: ReadonlySet<string>, drop: readonly (string | RegExp)[]): unknown {
+  if (Array.isArray(value)) return value.map((v) => walk(v, keep, drop));
   // `null` is data here, not an empty object — see the docblock.
   if (value === null || typeof value !== 'object') return value;
   // Anything with a prototype of its own (Date, Map, a class instance) is left
@@ -112,9 +144,9 @@ function walk(value: unknown, keep: ReadonlySet<string>): unknown {
       out[key] = v;
       continue;
     }
-    if (MEDIA_KEY.test(key)) continue;
+    if (MEDIA_KEY.test(key) || alsoDrop(key, drop)) continue;
     if (typeof v === 'string' && MEDIA_URL.test(v)) continue;
-    out[key] = walk(v, keep);
+    out[key] = walk(v, keep, drop);
   }
   return out;
 }
