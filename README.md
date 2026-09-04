@@ -144,7 +144,14 @@ from one, and a value that silently aliases to another is a lie in the schema.
 
 `stripMediaUrls(payload)` is the highest-value projection that needs no
 knowledge of the API: it drops `avatar` / `picture` / `cover_photo` /
-`thumbnail` keys and bare image URLs. Measured on a real 187.6 KB
+`thumbnail` keys — including the `…Link` / `…Uri` / `…Url` suffixed forms every
+Google Workspace API uses (`thumbnailLink`, `iconUri`, `photoUrl`) — and bare
+image URLs. The suffix is load-bearing outside consumer-social APIs: without it
+the rule matched none of Google's media fields, and `thumbnailLink` alone is 32%
+of a `gog drive ls` listing. Its key rule stays anchored at the START, so a key
+that merely contains a media noun survives — Drive's `hasThumbnail: false` is a
+fact about the file, and `webViewLink` sits in the same object as
+`thumbnailLink`. Measured on a real 187.6 KB
 `splitwise-mcp` groups response — which does not fit in a tool result at all —
 minifying alone is −25%, minifying **and** stripping media is **−73%**. It
 deliberately keeps `null` (an absent key and a null one are different facts;

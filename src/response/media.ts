@@ -33,9 +33,29 @@
  * mixes both.
  */
 
-/** Keys whose value is a picture, whatever it holds. */
+/**
+ * Keys whose value is a picture, whatever it holds.
+ *
+ * The optional `Link|Uri|Url` suffix is what makes this work outside
+ * consumer-social APIs. Splitwise names a picture `avatar`; every Google
+ * Workspace API names it `thumbnailLink`, `iconUri`, `photoUrl`. Without the
+ * suffix this rule matched NONE of them — measured on a real `gog drive ls`
+ * listing of 25 rows, `thumbnailLink` alone was 4,973 bytes of 15,698 (32% of
+ * the payload) and this helper removed zero of it. Nor does MEDIA_URL cover the
+ * gap: Google's media URLs are extension-less signed URLs. Adding the suffix
+ * takes that listing down 31%, and `drive search` — which supports no field
+ * mask at all, so nothing else can shrink it — down 30%.
+ *
+ * The anchor stays at the START, which is the whole safety property. A key that
+ * merely CONTAINS a media noun is untouched, so Drive's `hasThumbnail: false`
+ * survives: it is a fact about the file, and a caller filtering on it would
+ * otherwise see the key vanish and read that as "not reported". Only the three
+ * reference suffixes are added, so `thumbnailWidth` (a number) and
+ * `imageMediaMetadata` (EXIF) stay too — and so does `webViewLink`, whose noun
+ * is not media and which sits in the same object as `thumbnailLink`.
+ */
 const MEDIA_KEY =
-  /^(avatar|tall_avatar|cover_photo|cover_image|picture|photo|thumbnail|thumb|image|icon|banner|profile_pic(ture)?|logo)s?$/i;
+  /^(avatar|tall_avatar|cover_photo|cover_image|picture|photo|thumbnail|thumb|image|icon|banner|profile_pic(ture)?|logo)s?(link|uri|url)?$/i;
 
 /**
  * A URL that points at an image rather than at a page: a known image extension

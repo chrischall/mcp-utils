@@ -19,6 +19,24 @@ describe('what it removes', () => {
     });
   });
 
+  it('drops the SUFFIXED media keys every Google Workspace API uses', () => {
+    // Google names a media reference `<noun>Link` / `<noun>Uri` / `<noun>Url`
+    // rather than the bare noun, so the anchored key rule matched none of them.
+    // Measured on a real `gog drive ls` listing of 25 rows: thumbnailLink alone
+    // was 4,973 bytes of 15,698 — 32% of the payload, and this helper removed
+    // ZERO of it. Nor is the URL rule a fallback there: Google's media URLs are
+    // extension-less signed URLs, so MEDIA_URL misses them too.
+    const file = {
+      id: 'f1',
+      name: 'Budget.xlsx',
+      thumbnailLink: 'https://lh3.googleusercontent.com/drive-storage/AAbc123=s220',
+      iconLink: 'https://drive-thirdparty.googleusercontent.com/16/type/application/pdf',
+      iconUri: 'https://ssl.gstatic.com/calendar/images/i.png',
+      photoUrl: 'https://lh3.googleusercontent.com/a/AAcHT=s100',
+    };
+    expect(stripMediaUrls(file)).toEqual({ id: 'f1', name: 'Budget.xlsx' });
+  });
+
   it('drops a bare image URL under a key that does not look like media', () => {
     expect(stripMediaUrls({ href: 'https://cdn.example.com/x/photo-9.jpg', id: 3 })).toEqual({ id: 3 });
   });
@@ -64,6 +82,42 @@ describe('what it must NOT remove', () => {
   it('still strips an avatar under a media KEY however the URL is shaped', () => {
     // The key check does the work the loose URL clauses were reaching for.
     expect(stripMediaUrls({ avatar: 'https://cdn.example.com/u/9', id: 1 })).toEqual({ id: 1 });
+  });
+
+  it('keeps a key that merely CONTAINS a media noun rather than starting with one', () => {
+    // The anchor stays at the start, so a predicate about a picture survives
+    // while the picture itself goes. `hasThumbnail: false` is a fact about the
+    // file — a caller filtering on it would otherwise see the key vanish and
+    // read that as "not reported". Drive emits it on every row.
+    const v = {
+      hasThumbnail: false,
+      isImage: true,
+      profileIconVisible: true,
+    };
+    expect(stripMediaUrls(v)).toEqual(v);
+  });
+
+  it('keeps a media noun followed by anything that is not a URL suffix', () => {
+    // thumbnailWidth is a NUMBER, imageMediaMetadata is EXIF. Only the three
+    // reference suffixes are added; everything else stays as it was.
+    const v = {
+      thumbnailWidth: 220,
+      imageMediaMetadata: { width: 4032, height: 3024 },
+      photoCount: 12,
+    };
+    expect(stripMediaUrls(v)).toEqual(v);
+  });
+
+  it('keeps webViewLink and other page links, whose noun is not media', () => {
+    // Drive's own `webViewLink` is the link a caller acts on, and it sits in the
+    // same object as thumbnailLink. Getting this wrong would empty the response
+    // of the one URL that matters.
+    const v = {
+      webViewLink: 'https://docs.google.com/spreadsheets/d/abc/edit',
+      webContentLink: 'https://drive.google.com/uc?id=abc&export=download',
+      htmlLink: 'https://www.google.com/calendar/event?eid=xyz',
+    };
+    expect(stripMediaUrls(v)).toEqual(v);
   });
 
   it('keeps empty strings, zeroes and false — falsy is not absent', () => {
