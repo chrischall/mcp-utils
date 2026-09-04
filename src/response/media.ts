@@ -63,7 +63,7 @@
  * node_modules. An earlier draft said 33 across the two and named `avatarUrls`
  * as a third form; neither reproduced.)
  */
-const MEDIA_NOUN = '(?:avatar|tall_avatar|cover_photo|cover_image|picture|photo|thumbnail|thumb|image|icon|banner|profile_pic(?:ture)?|logo)';
+const MEDIA_NOUN = '(?:avatar|picture|photo|thumbnail|thumb|image|icon|banner|profile_pic(?:ture)?|logo)';
 
 /**
  * A bounded set of qualifiers that may precede the noun in a snake_case or
@@ -74,12 +74,22 @@ const MEDIA_NOUN = '(?:avatar|tall_avatar|cover_photo|cover_image|picture|photo|
  * `/avatars?/` path segment — which were open-ended, stripped genuine page
  * URLs, and (measured) removed zero bytes. A media noun is also allowed here,
  * for `avatar_image_url`.
+ *
+ * `cover` and `tall` live here rather than as `cover_photo` / `cover_image` /
+ * `tall_avatar` entries in MEDIA_NOUN. Those three were redundant once this
+ * list existed — `cover` + `photo` already composes — and keeping both spellings
+ * meant the snake_case form matched while the camelCase one silently did not.
+ *
+ * The separator is OPTIONAL for the same reason. With `[_-]` required,
+ * `cover_photo` was stripped and `coverPhoto` was kept: the same field, the
+ * same meaning, a different answer decided by an API's casing convention. That
+ * asymmetry is the exact shape of the bug #197 was about, one level up.
  */
 const MEDIA_QUALIFIER =
-  '(?:primary|secondary|main|default|cover|hero|profile|master|rendered|small|medium|large|full|original)';
+  '(?:primary|secondary|main|default|cover|hero|profile|master|rendered|small|medium|large|full|original|tall)';
 
 const MEDIA_KEY = new RegExp(
-  `^(?:(?:${MEDIA_QUALIFIER}|${MEDIA_NOUN})[_-])?${MEDIA_NOUN}s?(?:[_-]?(?:link|uri|url|src)s?)?$`,
+  `^(?:(?:${MEDIA_QUALIFIER}|${MEDIA_NOUN})[_-]?)?${MEDIA_NOUN}s?(?:[_-]?(?:link|uri|url|src)s?)?$`,
   'i',
 );
 
