@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.22.0](https://github.com/chrischall/mcp-utils/compare/v0.21.0...v0.22.0) (2026-09-04)
+
+
+### Features
+
+* **response:** strip media URLs — the projection that needs no API knowledge ([#188](https://github.com/chrischall/mcp-utils/issues/188)) ([d27a905](https://github.com/chrischall/mcp-utils/commit/d27a905374fa70d8f072d367f20da6f8902ea062))
+
+
+### Bug Fixes
+
+* **response:** tighten MEDIA_URL to an image extension ending the path ([#191](https://github.com/chrischall/mcp-utils/issues/191)) ([cba9407](https://github.com/chrischall/mcp-utils/commit/cba9407a2d3d85b9a3d80acb2293ba613b4bcf5b)), closes [#189](https://github.com/chrischall/mcp-utils/issues/189)
+
 ## [0.21.0](https://github.com/chrischall/mcp-utils/compare/v0.20.0...v0.21.0) (2026-09-04)
 
 
