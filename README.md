@@ -157,8 +157,16 @@ minifying alone is −25%, minifying **and** stripping media is **−73%**. It
 deliberately keeps `null` (an absent key and a null one are different facts;
 `ofw-mcp`'s `viewedAt: null` means "never opened"), keeps page URLs, and never
 mutates its input. Do **not** apply it to a tool whose product IS the image —
-`alltrails_get_trail_photos`, `sw_get_receipt` — where it empties the response
-rather than shrinking it; `keep` is the escape hatch for a mixed payload.
+`alltrails_get_trail_photos`, `sw_get_receipt`, `redfin`'s photo tools (whose
+records are literally a `photoUrls` bundle) — where it empties the response
+rather than shrinking it.
+
+Two escape hatches, and they are symmetric: `keep` preserves a key that looks
+like media but is the thing the caller asked for; `drop` adds keys this pattern
+does not know, so a service with an unguessed naming convention can fix itself
+**without a library release** — which is what Google Workspace's
+`thumbnailLink`/`iconUri`/`photoUrl` cost the first time round. `keep` wins over
+`drop`.
 
 `viewResult` minifies `compact` and `full` and leaves `raw` indented (that rung
 exists to be read by a person); `minifiedResult` is the same rule with no view

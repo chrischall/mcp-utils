@@ -47,6 +47,44 @@ describe('what it removes', () => {
   });
 });
 
+describe('plurals of the suffixed keys', () => {
+  it('strips imageUrls / photoUrls / avatarUrls, not just their singulars', () => {
+    // Not hypothetical: those three appear 33 times across groupon-mcp and
+    // redfin-mcp. A rule that catches `imageUrl` and misses `imageUrls` is the
+    // kind of half-cover that reads as working.
+    const v = { id: 1, imageUrls: ['https://cdn/a'], photoUrls: { small: 'x' }, avatarUrls: [], thumbnailLinks: ['y'] };
+    expect(stripMediaUrls(v)).toEqual({ id: 1 });
+  });
+
+  it('still keeps the near-miss keys the plural could have swept up', () => {
+    const v = { photoCount: 3, thumbnailWidth: 220, urls: ['https://example.com/a'], links: [] };
+    expect(stripMediaUrls(v)).toEqual(v);
+  });
+});
+
+describe('the `drop` escape hatch', () => {
+  it('drops an extra key a service names in its own way', () => {
+    // The symmetric half of `keep`. It exists so a repo does not need a LIBRARY
+    // RELEASE to strip its own noise — which is what Google Workspace's
+    // thumbnailLink/iconUri naming cost the first time.
+    const v = { id: 1, heroAsset: 'https://cdn/x', blurHash: 'LEHV6n' };
+    expect(stripMediaUrls(v, { drop: ['heroAsset', /^blur/i] })).toEqual({ id: 1 });
+  });
+
+  it('matches a string rule case-insensitively and a RegExp as given', () => {
+    expect(stripMediaUrls({ HeroAsset: 1, keep: 2 }, { drop: ['heroasset'] })).toEqual({ keep: 2 });
+    expect(stripMediaUrls({ heroAsset: 1, HeroAsset: 2 }, { drop: [/^heroAsset$/] })).toEqual({ HeroAsset: 2 });
+  });
+
+  it('recurses, so a nested occurrence goes too', () => {
+    expect(stripMediaUrls({ a: { b: { heroAsset: 1, n: 2 } } }, { drop: ['heroAsset'] })).toEqual({ a: { b: { n: 2 } } });
+  });
+
+  it('keep wins over drop, so an explicit keep is never overridden', () => {
+    expect(stripMediaUrls({ avatar: 'x', id: 1 }, { keep: ['avatar'], drop: ['avatar'] })).toEqual({ avatar: 'x', id: 1 });
+  });
+});
+
 describe('what it must NOT remove', () => {
   it('keeps null — an absent key and a null one are not the same fact', () => {
     // ofw-mcp emits `viewedAt: null` to say "never opened", which is evidence
