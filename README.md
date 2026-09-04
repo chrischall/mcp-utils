@@ -145,7 +145,9 @@ from one, and a value that silently aliases to another is a lie in the schema.
 `stripMediaUrls(payload)` is the highest-value projection that needs no
 knowledge of the API: it drops `avatar` / `picture` / `cover_photo` /
 `thumbnail` keys — including the `…Link` / `…Uri` / `…Url` suffixed forms every
-Google Workspace API uses (`thumbnailLink`, `iconUri`, `photoUrl`) — and bare
+Google Workspace API uses (`thumbnailLink`, `iconUri`, `photoUrl`), and the
+snake_case and kebab-case forms most other APIs use (`image_url`,
+`primary_photo_url`, `avatar_image_url`) — and bare
 image URLs. The suffix is load-bearing outside consumer-social APIs: without it
 the rule matched none of Google's media fields, and `thumbnailLink` alone is 32%
 of a `gog drive ls` listing. Its key rule stays anchored at the START, so a key
