@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.23.1](https://github.com/chrischall/mcp-utils/compare/v0.23.0...v0.23.1) (2026-09-04)
+
+
+### Bug Fixes
+
+* **response:** drop the redundant media nouns, and stop casing deciding the answer ([#201](https://github.com/chrischall/mcp-utils/issues/201)) ([82d8664](https://github.com/chrischall/mcp-utils/commit/82d8664d1eaec45a4dfd69279cfc95608994dadd)), closes [#199](https://github.com/chrischall/mcp-utils/issues/199)
+* **response:** match snake_case media keys, which the pattern missed entirely ([#198](https://github.com/chrischall/mcp-utils/issues/198)) ([f48c6d7](https://github.com/chrischall/mcp-utils/commit/f48c6d7eaeb71d4c9c3dced11a323a6aa6feca8a))
+
 ## [0.23.0](https://github.com/chrischall/mcp-utils/compare/v0.22.0...v0.23.0) (2026-09-04)
 
 
