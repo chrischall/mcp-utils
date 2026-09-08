@@ -75,7 +75,7 @@
   "devDependencies": {
     "@fetchproxy/server": "^2.0.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@types/node": "^24.0.0",
+    "@types/node": "^26.4.1",
     "@vitest/coverage-v8": "^5.0.0",
     "node-html-parser": "^7.1.0",
     "typescript": "^7.0.2",
