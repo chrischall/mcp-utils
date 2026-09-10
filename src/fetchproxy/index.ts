@@ -243,6 +243,16 @@ export interface FetchproxyTransport {
  *
  * 15 s, matching the value `resy-mcp` arrived at independently.
  */
+/**
+ * `FetchproxyServer`'s own default deadline, mirrored from
+ * `fetchTimeoutMs: opts.fetchTimeoutMs ?? 30_000` at its construction.
+ *
+ * Mirrored because an omitted `fetchTimeoutMs` is not "unbounded" — it is a
+ * bounded 30 s decided downstream — so this is the number a declared window has
+ * to clear when the caller named none.
+ */
+export const SERVER_DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+
 export const CAPTURE_DEADLINE_MARGIN_MS = 15_000;
 
 /**
@@ -259,14 +269,20 @@ export function deadlineForCaptureWindow(
   captureWindowMs: number | undefined,
 ): number | undefined {
   if (captureWindowMs === undefined || captureWindowMs <= 0) return fetchTimeoutMs;
-  // `0`/unset on the transport is an explicit opt-out of bounding. A declared
-  // window must not switch bounding back ON — that would bound a call the
+  // `0` — and ONLY `0` — is an explicit opt-out of bounding: `_withVerbTimeout`
+  // returns the pending promise unraced when the deadline is `<= 0`. A declared
+  // window must not switch bounding back ON, or this would bound a call the
   // caller deliberately left unbounded.
+  //
+  // `undefined` is NOT that, which is the distinction worth spelling out
+  // because the two read alike at a call site: it means "say nothing and take
+  // the server's default", and `FetchproxyServer` resolves it to 30 s at
+  // construction (`fetchTimeoutMs: opts.fetchTimeoutMs ?? 30_000`). So an
+  // omitted deadline is a bounded 30 s, and 30 s is the number to compare the
+  // floor against — not "no deadline".
   if (fetchTimeoutMs === 0) return 0;
   const floor = captureWindowMs + CAPTURE_DEADLINE_MARGIN_MS;
-  // `undefined` means the server's own 30 s default applies, so it is the
-  // number to compare against — not "no deadline".
-  return Math.max(fetchTimeoutMs ?? 30_000, floor);
+  return Math.max(fetchTimeoutMs ?? SERVER_DEFAULT_FETCH_TIMEOUT_MS, floor);
 }
 
 /** Options for {@link createFetchproxyTransport}. */

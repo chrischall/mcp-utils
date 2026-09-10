@@ -3,6 +3,7 @@ import {
   createFetchproxyTransport,
   deadlineForCaptureWindow,
   CAPTURE_DEADLINE_MARGIN_MS,
+  SERVER_DEFAULT_FETCH_TIMEOUT_MS,
 } from './index.js';
 
 /**
@@ -47,6 +48,25 @@ describe('deadlineForCaptureWindow', () => {
 
   it('leaves an explicitly unbounded transport unbounded', () => {
     expect(deadlineForCaptureWindow(0, 120_000)).toBe(0);
+  });
+
+  /**
+   * `0` and `undefined` read alike at a call site and mean opposite things, and
+   * a comment here asserted they were the same until review caught it (#233).
+   *
+   * `0` is an opt-out: the server leaves the promise unraced. `undefined` is
+   * "say nothing", which the server resolves to a bounded 30 s. So one must
+   * survive untouched and the other must be raised to clear the window — the
+   * contrast is the property, which is why they are asserted together.
+   */
+  it('tells an opt-out apart from an omitted deadline', () => {
+    expect(deadlineForCaptureWindow(0, 120_000)).toBe(0);
+    expect(deadlineForCaptureWindow(undefined, 120_000))
+      .toBe(120_000 + CAPTURE_DEADLINE_MARGIN_MS);
+    // And the omitted case is bounded at the server's default when the window
+    // already fits inside it — not left unbounded.
+    expect(deadlineForCaptureWindow(undefined, 1_000))
+      .toBe(SERVER_DEFAULT_FETCH_TIMEOUT_MS);
   });
 
   it('is a no-op when no window is declared — every existing consumer', () => {
