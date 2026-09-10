@@ -40,6 +40,32 @@ describe('registerCredentialHealthcheckTool', () => {
     expect(r.error).toBeUndefined();
   });
 
+  it('renders a slashless probePath as a URL rather than gluing it to the host', async () => {
+    // The bridge arm has the same fix and its own test. This one guards the
+    // credential arm, where an MCP whose app root sits under the host passes a
+    // bare path and used to get `https://api.demo.comv1/me` back — a URL that
+    // reads as broken in the one output people paste into a bug report.
+    const r = await run({
+      ...base,
+      probePath: 'v1/me',
+      server: null as never,
+      resolveCredential: async () => ({ source: 'env' }),
+      probeFn: async () => ({ id: 1 }),
+    });
+    expect(r.probe.url).toBe('https://api.demo.com/v1/me');
+  });
+
+  it('does not double the separator on a probePath that already has one', async () => {
+    const r = await run({
+      ...base,
+      probePath: '/v1/me',
+      server: null as never,
+      resolveCredential: async () => ({ source: 'env' }),
+      probeFn: async () => ({ id: 1 }),
+    });
+    expect(r.probe.url).toBe('https://api.demo.com/v1/me');
+  });
+
   // The whole reason this helper exists: "no credential" and "credential
   // rejected" are different problems with different fixes, and today they both
   // surface as one opaque error.
