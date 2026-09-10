@@ -64,7 +64,11 @@ export interface RegisterCredentialHealthcheckToolArgs {
   prefix: string;
   /** Display host for the probe URL and hint copy, e.g. `'api.freshbooks.com'`. */
   hostLabel: string;
-  /** Optional path, for display only: the probe URL is `https://<hostLabel><probePath>`. */
+  /**
+   * Optional path, for display only: the probe URL is
+   * `https://<hostLabel>/<probePath>`, with the separator inserted only when
+   * `probePath` does not already begin with one.
+   */
   probePath?: string;
   /**
    * Resolve the credential the way the real tools do — same cache, same

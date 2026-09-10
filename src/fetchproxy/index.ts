@@ -730,7 +730,11 @@ export interface RegisterBridgeHealthcheckToolArgs {
   probePath: string;
   /**
    * Display host for the probe URL + hint copy, e.g. `'compass.com'` or
-   * `'www.redfin.com'`. The probe URL is `https://<hostLabel><probePath>`.
+   * `'www.redfin.com'`. The probe URL is `https://<hostLabel>/<probePath>`,
+   * with the separator inserted only when `probePath` does not already begin
+   * with one — a transport whose app root sits under the host takes a bare
+   * `Home`, and gluing that on rendered `https://my.atriumhealth.orgHome`.
+   * Display only: `probeFn` receives `probePath` verbatim.
    */
   hostLabel: string;
   /**
