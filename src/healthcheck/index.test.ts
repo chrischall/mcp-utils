@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   registerCredentialHealthcheckTool,
+  SessionNotLiveError,
   sessionClassifier,
   sessionProbe,
 } from './index.js';
@@ -426,8 +427,12 @@ describe('sessionProbe / sessionClassifier', () => {
       resolveCredential: async () => ({ source: 'env' }),
       probeFn: sessionProbe({ request: async () => responses, signedOut }),
       classifyThrown: sessionClassifier({
-        prefix: 'demo',
         hostLabel: 'api.demo.com',
+        remedies: {
+          signIn: 'demo_sign_in',
+          sendCode: 'demo_send_verification_code',
+          verifyCode: 'demo_verify_code',
+        },
         verificationPending: () => flags.verificationPending === true,
         credentialsRejected: () => flags.credentialsRejected === true,
       }),
@@ -486,10 +491,88 @@ describe('sessionProbe / sessionClassifier', () => {
       probeFn: async () => {
         throw new Error('kaboom');
       },
-      classifyThrown: sessionClassifier({ prefix: 'demo', hostLabel: 'api.demo.com' }),
+      classifyThrown: sessionClassifier({ hostLabel: 'api.demo.com' }),
     });
     // sessionClassifier declines what it does not recognise, so the built-in
     // ladder still classifies it rather than being shadowed.
     expect(r.error?.kind).toBe('unknown');
+  });
+});
+
+describe('sessionClassifier remedy naming', () => {
+  const LOGIN = '<title>Login Page</title>';
+  const probe = sessionProbe({
+    request: async () => ({ status: 200, body: LOGIN }),
+    signedOut: (b) => b.includes('Login Page'),
+  });
+
+  async function withRemedies(remedies?: Parameters<typeof sessionClassifier>[0]['remedies']) {
+    return run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => ({ source: 'env' }),
+      probeFn: probe,
+      classifyThrown: sessionClassifier({
+        hostLabel: 'api.demo.com',
+        ...(remedies ? { remedies } : {}),
+      }),
+    });
+  }
+
+  it('names no tool at all when the connector named none', async () => {
+    // The trap this replaces: copy derived from the tool-name prefix produced
+    // `<prefix>_sign_in`, which exists in exactly ONE connector. simplepractice
+    // calls it simplepractice_request_sign_in_link and kiaaccess kia_start_login,
+    // so the healthcheck sent people to a tool that is not there — worse than
+    // generic advice, because the tool's whole job is to point at the fix.
+    const r = await withRemedies();
+    expect(r.error?.kind).toBe('session_expired');
+    expect(r.hint).toContain('Sign in again');
+    expect(r.hint).not.toMatch(/\b\w+_sign_in\b/);
+  });
+
+  it('uses the connector-s own tool names verbatim', async () => {
+    const r = await withRemedies({ signIn: 'simplepractice_request_sign_in_link' });
+    expect(r.hint).toContain('Call simplepractice_request_sign_in_link.');
+  });
+
+  it('keeps the verification copy generic unless BOTH code tools are named', async () => {
+    // Half a flow is not a flow: naming only the sender leaves the caller with
+    // a code and nowhere to put it.
+    const r = await run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => ({ source: 'env' }),
+      probeFn: probe,
+      classifyThrown: sessionClassifier({
+        hostLabel: 'api.demo.com',
+        remedies: { sendCode: 'kia_send_otp' },
+        verificationPending: () => true,
+      }),
+    });
+    expect(r.error?.kind).toBe('verification_pending');
+    expect(r.hint).not.toContain('kia_send_otp');
+    expect(r.hint).toContain('ACCOUNT HOLDER');
+  });
+
+  it('classifies a SessionNotLiveError thrown by a client-method probe', async () => {
+    // The other adoption path: a connector whose probe rides a client that
+    // already throws on non-2xx keeps its own probeFn and throws the exported
+    // class for the soft wall its client cannot see.
+    const r = await run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => ({ source: 'env' }),
+      probeFn: async () => {
+        throw new SessionNotLiveError('api.demo.com', 'sign-in page');
+      },
+      classifyThrown: sessionClassifier({
+        hostLabel: 'api.demo.com',
+        remedies: { signIn: 'demo_sign_in' },
+      }),
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error?.kind).toBe('session_expired');
+    expect(r.hint).toContain('Call demo_sign_in.');
   });
 });

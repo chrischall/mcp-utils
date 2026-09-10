@@ -461,11 +461,33 @@ export function sessionProbe(opts: SessionProbeOptions): () => Promise<string> {
   };
 }
 
+/**
+ * The tools that fix each signed-out state, named EXPLICITLY.
+ *
+ * Never derived from the tool-name prefix. That was the first design and it was
+ * wrong in a way that defeats the whole point of a healthcheck: it produced
+ * `<prefix>_sign_in`, which exists in exactly one connector. simplepractice
+ * calls it `simplepractice_request_sign_in_link`, kiaaccess `kia_start_login`
+ * and `kia_verify_otp` — so the copy sent people to a tool that does not exist,
+ * which is worse than saying nothing.
+ *
+ * Every field is optional. Omit one and the copy stays true but generic
+ * ("sign in again") rather than naming something that may not be there.
+ */
+export interface SessionRemedyTools {
+  /** Signs in from scratch, e.g. `'mah_sign_in'`. */
+  signIn?: string;
+  /** Asks the far side to send a code, e.g. `'mah_send_verification_code'`. */
+  sendCode?: string;
+  /** Submits the code the user received, e.g. `'mah_verify_code'`. */
+  verifyCode?: string;
+}
+
 export interface SessionClassifierOptions {
-  /** Tool-name prefix, used to name the remedy tools in the default copy. */
-  prefix: string;
   /** Display host named in the default copy, e.g. `'my.atriumhealth.org'`. */
   hostLabel: string;
+  /** What to tell the caller to call. See {@link SessionRemedyTools}. */
+  remedies?: SessionRemedyTools;
   /** A second factor is outstanding. Read at classification time, not captured. */
   verificationPending?: () => boolean;
   /** The far side refused this username and password. */
@@ -494,7 +516,11 @@ export interface SessionClassifierOptions {
 export function sessionClassifier(
   opts: SessionClassifierOptions,
 ): (err: unknown) => { kind: string; hint?: string } | undefined {
-  const { prefix, hostLabel, hints } = opts;
+  const { hostLabel, hints } = opts;
+  const remedies = opts.remedies ?? {};
+  /** `Call <tool>.` when the connector named one, else a plain instruction. */
+  const call = (tool: string | undefined, fallback: string): string =>
+    tool !== undefined ? `Call ${tool}.` : fallback;
   return (err: unknown) => {
     if (err instanceof ProbeHttpError) {
       return {
@@ -511,9 +537,9 @@ export function sessionClassifier(
         kind: 'credential_rejected',
         hint:
           hints?.credential_rejected ??
-          `${hostLabel} refused this username and password. Correct them, then call ` +
-            `${prefix}_sign_in. Nothing retries for you: repeated failures escalate to a ` +
-            'captcha or a lockout.',
+          `${hostLabel} refused this username and password. Correct them, then sign in ` +
+            `again. ${call(remedies.signIn, '')}`.trim() +
+            ' Nothing retries for you: repeated failures escalate to a captcha or a lockout.',
       };
     }
     if (opts.verificationPending?.() === true) {
@@ -522,8 +548,12 @@ export function sessionClassifier(
         hint:
           hints?.verification_pending ??
           `A verification code is outstanding, so ${hostLabel} is holding the sign-in rather ` +
-            `than refusing it. Call ${prefix}_send_verification_code, then pass the code the ` +
-            `ACCOUNT HOLDER receives to ${prefix}_verify_code.`,
+            'than refusing it. ' +
+            (remedies.sendCode !== undefined && remedies.verifyCode !== undefined
+              ? `Call ${remedies.sendCode}, then pass the code the ACCOUNT HOLDER receives to ` +
+                `${remedies.verifyCode}.`
+              : 'Supply the verification code the ACCOUNT HOLDER received; the credential ' +
+                'itself is not the problem, so changing it will not help.'),
       };
     }
     return {
@@ -531,8 +561,9 @@ export function sessionClassifier(
       hint:
         hints?.session_expired ??
         `The credentials are configured but no session is live — ${hostLabel} sessions are ` +
-          `short-lived, so this recurs between uses. Call ${prefix}_sign_in; expect a ` +
-          'verification code, which goes to the account holder.',
+          'short-lived, so this recurs between uses. ' +
+          call(remedies.signIn, 'Sign in again.') +
+          ' Expect a verification code, which goes to the account holder.',
     };
   };
 }
