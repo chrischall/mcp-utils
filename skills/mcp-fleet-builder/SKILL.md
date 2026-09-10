@@ -91,6 +91,12 @@ choice follows how the MCP actually reaches its upstream:
 - **Anything else** → `registerCredentialHealthcheckTool` (`/healthcheck`).
   That includes OAuth and API-key MCPs *and* the fetchproxy ones that only
   BOOTSTRAP a credential and then talk to an API directly.
+- **BOTH, chosen at boot from what is configured** → `registerAdaptiveHealthcheckTool`
+  (`/fetchproxy`). ONE tool whose identity never moves and whose body follows
+  `usingBridge()`, read per call. Registering one of the other two at boot
+  instead makes the tool's description depend on the environment the process
+  started in, which a host that enumerates tools from a credential-less child
+  then publishes as the truth. myatriumhealth.
 
 Do NOT classify by imports. `createFetchproxyTransport` in a repo does not mean
 the bridge is on the request path: resy constructs one EPHEMERALLY inside

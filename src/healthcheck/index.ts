@@ -183,19 +183,167 @@ function credentialHint(
  * produces a 401 that reads like a rejected credential and points at the wrong
  * fix.
  */
+/** The text result an MCP tool handler returns. */
+export type HealthcheckToolResult = { content: { type: 'text'; text: string }[] };
+
+/** The credential arm's one-line description, shared with the adaptive tool. */
+export function credentialHealthcheckDescription(hostLabel: string): string {
+  return `Resolves the credential the way real tools do, then makes one authenticated request to ${hostLabel}. Reports which source supplied the credential, whether ${hostLabel} accepted it, the round-trip time, and a plain-English hint distinguishing 'no credential' from 'credential rejected' from 'a ${hostLabel}-side problem'. Read-only; never returns the credential itself.`;
+}
+
+/**
+ * The credential healthcheck's whole body, without the registration.
+ *
+ * Split out so ONE tool can serve a server with two transports and choose
+ * between the arms per call (`registerAdaptiveHealthcheckTool`, in
+ * `../fetchproxy/`, which is where the bridge arm's optional peer dependency
+ * already lives). `registerCredentialHealthcheckTool` is unchanged and still
+ * the right choice for a server with only this arm.
+ */
+export async function runCredentialHealthcheck(
+  args: RegisterCredentialHealthcheckToolArgs,
+): Promise<HealthcheckToolResult> {
+  const { prefix, hostLabel, probePath, resolveCredential, probeFn, classifyThrown, hints } = args;
+  const probeUrl = probePath ? `https://${hostLabel}${probePath}` : undefined;
+  // Timed from just BEFORE the probe, never from the top: resolving a
+  // credential can mint a token or drive the browser bridge, and folding
+  // that into `probe.elapsed_ms` reports it as far-side latency.
+  let probeStarted = 0;
+
+  let state: CredentialState;
+  try {
+    state = await resolveCredential();
+  } catch (e) {
+    // A resolver can fail for reasons that are NOT "no credential": a
+    // browser bridge that is down, an upstream that rejected a password,
+    // a store that will not decrypt. Flattening those into
+    // `no_credential` hands out that arm's advice — set the variables —
+    // to someone whose variables are already set. So the consumer's
+    // classifier is consulted here as it already is for a probe failure;
+    // declining it (or not supplying one) keeps the old behaviour exactly.
+    const classified = classifyThrown?.(e);
+    const result: CredentialHealthcheckResult = {
+      ok: false,
+      // Still false, and still no source: a classification explains WHY
+      // nothing resolved, it does not invent a credential that did.
+      credential: { source: null, resolved: false },
+      // No `url`: nothing was probed, and naming one implies it was tried.
+      probe: { elapsed_ms: 0 },
+      error: {
+        kind: classified?.kind ?? 'no_credential',
+        message: truncateErrorMessage(messageOf(e)),
+        ...(classified?.detail !== undefined ? { detail: classified.detail } : {}),
+      },
+      // The hint must follow the KIND beside it. Falling back to
+      // `no_credential`'s copy under a classified kind would state a cause
+      // the kind contradicts — the same disagreement this path exists to
+      // remove. So: an inline hint wins; else the classified arm's own
+      // copy (consumer override first); else, for a kind this module has
+      // no copy for, the neutral `unknown` text rather than one that
+      // asserts a cause; else the unclassified `no_credential` default.
+      hint:
+        classified?.hint ??
+        (isArm(classified?.kind)
+          ? (hints?.[classified.kind] ??
+            credentialHint(classified.kind, prefix, hostLabel, null))
+          : classified !== undefined
+            ? credentialHint('unknown', prefix, hostLabel, null)
+            : (hints?.no_credential ??
+              credentialHint('no_credential', prefix, hostLabel, null))),
+    };
+    return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+  }
+
+  const credential = {
+    source: state.source,
+    resolved: state.source !== null,
+    ...(state.detail !== undefined ? { detail: state.detail } : {}),
+  };
+
+  // No credential: answer without probing. A probe here 401s and reads as
+  // "rejected", which points at re-authenticating a credential that does
+  // not exist.
+  if (!credential.resolved) {
+    const result: CredentialHealthcheckResult = {
+      ok: false,
+      credential,
+      probe: { elapsed_ms: 0 },
+      error: { kind: 'no_credential', message: 'no credential source resolved' },
+      hint: hints?.no_credential ?? credentialHint('no_credential', prefix, hostLabel, null),
+    };
+    return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+  }
+
+  let arm: CredentialHealthcheckArm = 'ok';
+  let error: CredentialHealthcheckResult['error'];
+  let status: number | undefined;
+  let customHint: string | undefined;
+
+  probeStarted = Date.now();
+  try {
+    await probeFn();
+  } catch (e) {
+    status = statusOf(e);
+    // `AbortError` is matched on `err.name`, as src/http/index.ts does — a
+    // bare AbortController abort carries it there and NOT in the message,
+    // so matching the text alone classified those as 'unknown'.
+    const aborted = e instanceof Error && e.name === 'AbortError';
+    arm =
+      status === 401 || status === 403
+        ? 'credential_rejected'
+        : status !== undefined
+          ? 'http'
+          : aborted || /timeout|timed out|ETIMEDOUT/i.test(messageOf(e))
+            ? 'timeout'
+            : /fetch failed|ENOTFOUND|ECONNREFUSED|ECONNRESET|network/i.test(messageOf(e))
+              ? 'transport'
+              : 'unknown';
+    let kind: string = arm;
+    let detail: Record<string, unknown> | undefined;
+    const custom = classifyThrown?.(e);
+    if (custom) {
+      kind = custom.kind;
+      customHint = custom.hint;
+      detail = custom.detail;
+    }
+    error = {
+      kind,
+      // Redacted AND bounded before it reaches the result: an upstream
+      // failure routinely quotes what it was sent, and a healthcheck is
+      // the tool people paste into a chat when something is broken.
+      message: truncateErrorMessage(messageOf(e)),
+      ...(detail !== undefined ? { detail } : {}),
+    };
+  }
+
+  const result: CredentialHealthcheckResult = {
+    ok: error === undefined,
+    credential,
+    probe: {
+      ...(probeUrl ? { url: probeUrl } : {}),
+      elapsed_ms: Date.now() - probeStarted,
+      ...(status !== undefined ? { status } : {}),
+    },
+    ...(error ? { error } : {}),
+    hint: customHint ?? hints?.[arm] ?? credentialHint(arm, prefix, hostLabel, state.source),
+  };
+
+  return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+}
+
+/**
+ * Register `${prefix}_healthcheck` for a connector whose health is about a
+ * CREDENTIAL rather than a browser bridge. The body is
+ * {@link runCredentialHealthcheck}.
+ */
 export function registerCredentialHealthcheckTool(
   args: RegisterCredentialHealthcheckToolArgs,
 ): void {
-  const { server, prefix, hostLabel, probePath, resolveCredential, probeFn, classifyThrown, hints } =
-    args;
-  const probeUrl = probePath ? `https://${hostLabel}${probePath}` : undefined;
-
-  server.registerTool(
-    `${prefix}_healthcheck`,
+  args.server.registerTool(
+    `${args.prefix}_healthcheck`,
     {
       title: 'Verify credentials and upstream reachability',
-      description:
-        `Resolves the credential the way real tools do, then makes one authenticated request to ${hostLabel}. Reports which source supplied the credential, whether ${hostLabel} accepted it, the round-trip time, and a plain-English hint distinguishing 'no credential' from 'credential rejected' from 'a ${hostLabel}-side problem'. Call this when a real tool fails and you want to know which hop broke. Read-only; never returns the credential itself.`,
+      description: `${credentialHealthcheckDescription(args.hostLabel)} Call this when a real tool fails and you want to know which hop broke.`,
       annotations: {
         title: 'Verify credentials and upstream reachability',
         readOnlyHint: true,
@@ -204,132 +352,7 @@ export function registerCredentialHealthcheckTool(
       },
       inputSchema: {},
     },
-    async () => {
-      // Timed from just BEFORE the probe, never from the top: resolving a
-      // credential can mint a token or drive the browser bridge, and folding
-      // that into `probe.elapsed_ms` reports it as far-side latency.
-      let probeStarted = 0;
-
-      let state: CredentialState;
-      try {
-        state = await resolveCredential();
-      } catch (e) {
-        // A resolver can fail for reasons that are NOT "no credential": a
-        // browser bridge that is down, an upstream that rejected a password,
-        // a store that will not decrypt. Flattening those into
-        // `no_credential` hands out that arm's advice — set the variables —
-        // to someone whose variables are already set. So the consumer's
-        // classifier is consulted here as it already is for a probe failure;
-        // declining it (or not supplying one) keeps the old behaviour exactly.
-        const classified = classifyThrown?.(e);
-        const result: CredentialHealthcheckResult = {
-          ok: false,
-          // Still false, and still no source: a classification explains WHY
-          // nothing resolved, it does not invent a credential that did.
-          credential: { source: null, resolved: false },
-          // No `url`: nothing was probed, and naming one implies it was tried.
-          probe: { elapsed_ms: 0 },
-          error: {
-            kind: classified?.kind ?? 'no_credential',
-            message: truncateErrorMessage(messageOf(e)),
-            ...(classified?.detail !== undefined ? { detail: classified.detail } : {}),
-          },
-          // The hint must follow the KIND beside it. Falling back to
-          // `no_credential`'s copy under a classified kind would state a cause
-          // the kind contradicts — the same disagreement this path exists to
-          // remove. So: an inline hint wins; else the classified arm's own
-          // copy (consumer override first); else, for a kind this module has
-          // no copy for, the neutral `unknown` text rather than one that
-          // asserts a cause; else the unclassified `no_credential` default.
-          hint:
-            classified?.hint ??
-            (isArm(classified?.kind)
-              ? (hints?.[classified.kind] ??
-                credentialHint(classified.kind, prefix, hostLabel, null))
-              : classified !== undefined
-                ? credentialHint('unknown', prefix, hostLabel, null)
-                : (hints?.no_credential ??
-                  credentialHint('no_credential', prefix, hostLabel, null))),
-        };
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
-      }
-
-      const credential = {
-        source: state.source,
-        resolved: state.source !== null,
-        ...(state.detail !== undefined ? { detail: state.detail } : {}),
-      };
-
-      // No credential: answer without probing. A probe here 401s and reads as
-      // "rejected", which points at re-authenticating a credential that does
-      // not exist.
-      if (!credential.resolved) {
-        const result: CredentialHealthcheckResult = {
-          ok: false,
-          credential,
-          probe: { elapsed_ms: 0 },
-          error: { kind: 'no_credential', message: 'no credential source resolved' },
-          hint: hints?.no_credential ?? credentialHint('no_credential', prefix, hostLabel, null),
-        };
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
-      }
-
-      let arm: CredentialHealthcheckArm = 'ok';
-      let error: CredentialHealthcheckResult['error'];
-      let status: number | undefined;
-      let customHint: string | undefined;
-
-      probeStarted = Date.now();
-      try {
-        await probeFn();
-      } catch (e) {
-        status = statusOf(e);
-        // `AbortError` is matched on `err.name`, as src/http/index.ts does — a
-        // bare AbortController abort carries it there and NOT in the message,
-        // so matching the text alone classified those as 'unknown'.
-        const aborted = e instanceof Error && e.name === 'AbortError';
-        arm =
-          status === 401 || status === 403
-            ? 'credential_rejected'
-            : status !== undefined
-              ? 'http'
-              : aborted || /timeout|timed out|ETIMEDOUT/i.test(messageOf(e))
-                ? 'timeout'
-                : /fetch failed|ENOTFOUND|ECONNREFUSED|ECONNRESET|network/i.test(messageOf(e))
-                  ? 'transport'
-                  : 'unknown';
-        let kind: string = arm;
-        let detail: Record<string, unknown> | undefined;
-        const custom = classifyThrown?.(e);
-        if (custom) {
-          kind = custom.kind;
-          customHint = custom.hint;
-          detail = custom.detail;
-        }
-        error = {
-          kind,
-          // Redacted AND bounded before it reaches the result: an upstream
-          // failure routinely quotes what it was sent, and a healthcheck is
-          // the tool people paste into a chat when something is broken.
-          message: truncateErrorMessage(messageOf(e)),
-          ...(detail !== undefined ? { detail } : {}),
-        };
-      }
-
-      const result: CredentialHealthcheckResult = {
-        ok: error === undefined,
-        credential,
-        probe: {
-          ...(probeUrl ? { url: probeUrl } : {}),
-          elapsed_ms: Date.now() - probeStarted,
-          ...(status !== undefined ? { status } : {}),
-        },
-        ...(error ? { error } : {}),
-        hint: customHint ?? hints?.[arm] ?? credentialHint(arm, prefix, hostLabel, state.source),
-      };
-
-      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
-    },
+    async () => runCredentialHealthcheck(args),
   );
 }
 
