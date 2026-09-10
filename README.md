@@ -831,9 +831,48 @@ registerCredentialHealthcheckTool({
 });
 ```
 
-Arms: `ok`, `no_credential`, `credential_rejected` (401/403), `timeout`,
-`http`, `transport`, `unknown` — with the same `classifyThrown` / `hints`
-hooks as the bridge factory.
+Arms: `ok`, `no_credential`, `credential_rejected` (401/403),
+`session_expired`, `verification_pending`, `timeout`, `http`, `transport`,
+`unknown` — with the same `classifyThrown` / `hints` hooks as the bridge
+factory.
+
+#### Cookie-session connectors: `sessionProbe` / `sessionClassifier`
+
+`probeFn` reports failure **only by throwing**, so a probe that resolves is
+reported healthy whatever it resolved to. Connectors whose probe rides a client
+that throws on non-2xx comply by accident — and that accident does not hold
+against a *soft* wall, where a dead session comes back `200` with a login page.
+One connector reported `ok: true` and "the credential works" on an account that
+could not load a single record.
+
+`sessionProbe` builds a compliant probe from the one closure only you can
+write:
+
+```ts
+probeFn: sessionProbe({
+  request: () => auth.request('Home'),       // must not sign in
+  signedOut: (body) => isAuthWall(body),     // the site-specific part
+  hostLabel: 'my.atriumhealth.org',
+}),
+classifyThrown: sessionClassifier({
+  prefix: 'mah',
+  hostLabel: 'my.atriumhealth.org',
+  verificationPending: () => auth.mfaPending,
+  credentialsRejected: () => auth.credentialsRejected,
+}),
+```
+
+The library owns the generic rules — a 3xx is signed out (a manual-redirect
+bounce has no body to judge), any other non-2xx is an upstream error carrying
+its status, a 2xx is signed out if your closure says so — and turns the three
+signed-out states into arms with distinct remedies. A refused credential
+outranks a pending verification: both flags can be set, and retrying a code
+against a password the far side refuses is futile.
+
+`signedOut` stays yours because getting it wrong is silent and specific. One
+portal links to two-factor setup from every signed-in page, so a body-wide
+match on `twoFactor` reports "signed out" for every request. A library that
+guessed this would be wrong in both directions.
 
 #### Two transports, one healthcheck
 
