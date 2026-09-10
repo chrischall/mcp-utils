@@ -835,6 +835,34 @@ Arms: `ok`, `no_credential`, `credential_rejected` (401/403), `timeout`,
 `http`, `transport`, `unknown` — with the same `classifyThrown` / `hints`
 hooks as the bridge factory.
 
+#### Two transports, one healthcheck
+
+A server that picks its transport from what is configured — credentials, so
+sign in directly; otherwise relay through the browser — must not register one
+of the two factories at boot. The tool NAME is the same either way, so no
+client ever sees two healthchecks, but its title, description and result shape
+then follow the environment the process happened to start in. A host that
+enumerates tools from a child spawned without credentials publishes a bridge
+tool for a server that will never use a bridge.
+
+`registerAdaptiveHealthcheckTool` (`/fetchproxy`, since it needs the bridge
+arm) fixes the identity and varies only the body:
+
+```ts
+registerAdaptiveHealthcheckTool({
+  server,
+  prefix: 'mah',
+  hostLabel: 'my.atriumhealth.org',
+  usingBridge: () => bridge !== undefined,
+  bridge: { probePath: 'Home', transport, probeFn: (p) => client.page(p) },
+  credential: { probePath: '/Home', resolveCredential, probeFn },
+});
+```
+
+`usingBridge()` is read per CALL, not captured at registration, so the answer
+follows the path requests are actually on. Both arms keep their own
+diagnostics verbatim — this dispatches, it does not reimplement.
+
 Two behaviours worth knowing. **The probe is skipped entirely when no
 credential resolved**, because probing without one returns 401 and reads as
 "rejected", sending people off to re-authenticate a credential that does not

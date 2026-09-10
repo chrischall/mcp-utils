@@ -26,6 +26,7 @@ import {
   extractImgTags,
   lastPathSegment,
   bridgeErrorInfo,
+  registerAdaptiveHealthcheckTool,
   registerBridgeHealthcheckTool,
   FetchproxySessionNotReadyError,
   type FetchproxyTransport,
@@ -230,10 +231,17 @@ describe('createFetchproxyTransport', () => {
     await t.start();
     expect(errSpy).toHaveBeenCalledTimes(1);
     const line = errSpy.mock.calls[0].join(' ');
-    // Canonical compass format: includes 127.0.0.1:<port>, role, version.
+    // Canonical format: names the port it WILL take, and says it has not taken
+    // it yet. `listening` was the old wording and it was false — @fetchproxy/
+    // server defers the bind to the first verb (0.5.3+), so a boot banner
+    // reading "listening on 127.0.0.1:<port>" described a socket that did not
+    // exist, and sent at least one maintainer hunting a bridge nobody opened.
     expect(line).toBe(
-      '[compass-mcp:bridge] listening on 127.0.0.1:40555 (role=unknown, version=1.2.3)',
+      '[compass-mcp:bridge] ready — 127.0.0.1:40555 binds on the first request (version=1.2.3)',
     );
+    // The role is deliberately absent: it is decided by the election the first
+    // request runs, so at boot there is nothing to report but `unknown`.
+    expect(line).not.toContain('role=');
     await t.close();
   });
 
@@ -253,7 +261,7 @@ describe('createFetchproxyTransport', () => {
     // The debug line is a strict subset of the canonical one, so only the
     // canonical (port-bearing) banner is emitted — not both.
     expect(errSpy).toHaveBeenCalledTimes(1);
-    expect(errSpy.mock.calls[0].join(' ')).toContain('listening on 127.0.0.1:40556');
+    expect(errSpy.mock.calls[0].join(' ')).toContain('127.0.0.1:40556 binds on the first request');
     await t.close();
   });
 
@@ -1270,5 +1278,132 @@ describe('registerBridgeHealthcheckTool — `path` for direct-first consumers', 
     await harness.close();
     expect(res.isError).toBe(true);
     expect(JSON.stringify(res.content)).toMatch(/transport\(\) returned nothing/);
+  });
+});
+
+describe('registerAdaptiveHealthcheckTool', () => {
+  const probe = (port: number): BridgeProbeResult => ({
+    ok: true,
+    elapsed_ms: 12,
+    bridge: {
+      role: 'host',
+      port,
+      server_version: '1.0.0',
+      fetch_timeout_ms: 30000,
+      last_success_at: Date.now(),
+      last_failure_at: null,
+      last_failure_reason: null,
+      consecutive_failures: 0,
+    },
+  });
+
+  const transport = {
+    async runProbe(fetchFn: (p: string) => Promise<unknown>, probePath: string) {
+      await fetchFn(probePath);
+      return probe(37149);
+    },
+    status() {
+      return {
+        role: 'host',
+        port: 37149,
+        serverVersion: '1.0.0',
+        fetchTimeoutMs: 30000,
+        bridgeReviveDelayMs: 2000,
+        lastSuccessAt: Date.now(),
+        lastFailureAt: null,
+        lastFailureReason: null,
+        consecutiveFailures: 0,
+        lastExtensionMessageAt: null,
+        keepAlive: {
+          enabled: true,
+          intervalMs: 20000,
+          maxIdleMs: 300000,
+          lastPingAt: null,
+          totalPings: 0,
+          idleSinceMs: null,
+        },
+        swEviction: { lazyReviveAttempts: 0, lazyReviveSuccesses: 0, lastEvictionDetectedAt: null },
+      };
+    },
+  } as unknown as FetchproxyTransport;
+
+  /** One registration whose arm is decided by a mutable flag, as a real server's is. */
+  async function harnessFor(usingBridge: () => boolean) {
+    return createTestHarness((server) =>
+      registerAdaptiveHealthcheckTool({
+        server,
+        prefix: 'mah',
+        hostLabel: 'my.atriumhealth.org',
+        usingBridge,
+        bridge: { probePath: 'Home', transport, probeFn: async () => 'body' },
+        credential: {
+          probePath: '/Home',
+          resolveCredential: async () => ({ source: 'env', detail: { sessionResumable: true } }),
+          probeFn: async () => undefined,
+        },
+      }),
+    );
+  }
+
+  it('registers exactly one healthcheck tool', async () => {
+    const harness = await harnessFor(() => true);
+    const names = (await harness.listTools()).map((t) => t.name);
+    expect(names.filter((n) => n.endsWith('_healthcheck'))).toEqual(['mah_healthcheck']);
+    await harness.close();
+  });
+
+  it('describes the same tool whichever arm is live', async () => {
+    const onBridge = await harnessFor(() => true);
+    const onCredentials = await harnessFor(() => false);
+    const pick = (ts: { name: string; description?: string }[]) =>
+      ts.find((t) => t.name === 'mah_healthcheck');
+    const a = pick(await onBridge.listTools());
+    const b = pick(await onCredentials.listTools());
+    // The point of the merge: a host enumerating tools from a child that
+    // happened to boot without credentials must publish the SAME tool a
+    // credential-configured child publishes.
+    expect(a?.description).toBe(b?.description);
+    expect(a?.description).toContain('signed-in browser tab');
+    expect(a?.description).toContain('configured credentials');
+    await onBridge.close();
+    await onCredentials.close();
+  });
+
+  it('answers from the bridge arm when the bridge is on the request path', async () => {
+    const harness = await harnessFor(() => true);
+    const result = parseToolResult<{ ok: boolean; bridge?: { role: string; port: number } }>(
+      await harness.callTool('mah_healthcheck'),
+    );
+    expect(result.ok).toBe(true);
+    expect(result.bridge?.port).toBe(37149);
+    await harness.close();
+  });
+
+  it('answers from the credential arm when it is not', async () => {
+    const harness = await harnessFor(() => false);
+    const result = parseToolResult<{
+      ok: boolean;
+      bridge?: unknown;
+      credential?: { source: string | null; resolved: boolean };
+    }>(await harness.callTool('mah_healthcheck'));
+    expect(result.ok).toBe(true);
+    expect(result.credential).toMatchObject({ source: 'env', resolved: true });
+    // No bridge diagnostics: nothing on this path went near one, and reporting
+    // a bridge here is the confusion the merge exists to remove.
+    expect(result.bridge).toBeUndefined();
+    await harness.close();
+  });
+
+  it('follows a transport that changes after registration', async () => {
+    let onBridge = true;
+    const harness = await harnessFor(() => onBridge);
+    expect(
+      parseToolResult<{ bridge?: unknown }>(await harness.callTool('mah_healthcheck')).bridge,
+    ).toBeDefined();
+    onBridge = false;
+    expect(
+      parseToolResult<{ bridge?: unknown }>(await harness.callTool('mah_healthcheck')).bridge,
+    ).toBeUndefined();
+    await harness.close();
   });
 });

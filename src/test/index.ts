@@ -33,7 +33,7 @@ export interface TestHarness {
   /** Call a registered tool by name; arguments default to `{}`. */
   callTool: (name: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
   /** List the tools the server advertises (name only). */
-  listTools: () => Promise<{ name: string }[]>;
+  listTools: () => Promise<{ name: string; description?: string }[]>;
   /** Tear down both ends of the transport. Safe to call more than once. */
   close: () => Promise<void>;
 }
@@ -65,7 +65,13 @@ export async function createTestHarness(registerFn: RegisterFn): Promise<TestHar
       client.callTool({ name, arguments: args ?? {} }) as Promise<CallToolResult>,
     listTools: async () => {
       const result = await client.listTools();
-      return result.tools.map((t) => ({ name: t.name }));
+      // `description` rides along so a test can assert the tool SURFACE, not
+      // just its names — a server whose description changes with its
+      // configuration is a real defect and was invisible here.
+      return result.tools.map((t) => ({
+        name: t.name,
+        ...(t.description !== undefined ? { description: t.description } : {}),
+      }));
     },
     close: async () => {
       if (closed) return;
