@@ -478,7 +478,7 @@ describe('sessionProbe / sessionClassifier', () => {
     expect(r.error?.kind).toBe('credential_rejected');
   });
 
-  it('passes a non-probe throw through to the caller-s own classifier', async () => {
+  it("passes a non-probe throw through to the caller's own classifier", async () => {
     const r = await run({
       ...base,
       server: null as never,
