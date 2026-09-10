@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.1](https://github.com/chrischall/mcp-utils/compare/v0.27.0...v0.27.1) (2026-09-10)
+
+
+### Documentation
+
+* **fetchproxy:** stop calling an omitted deadline an opt-out ([#235](https://github.com/chrischall/mcp-utils/issues/235)) ([52ac047](https://github.com/chrischall/mcp-utils/commit/52ac04704d566a095cef86e480e8f771c4360e02)), closes [#233](https://github.com/chrischall/mcp-utils/issues/233)
+
 ## [0.27.0](https://github.com/chrischall/mcp-utils/compare/v0.26.1...v0.27.0) (2026-09-10)
 
 
