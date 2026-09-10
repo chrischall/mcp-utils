@@ -21,6 +21,10 @@ export type CredentialHealthcheckArm =
   | 'ok'
   | 'no_credential'
   | 'credential_rejected'
+  /** Credentials are fine; no session is live. See {@link sessionProbe}. */
+  | 'session_expired'
+  /** A second factor is outstanding, so the far side is holding the sign-in. */
+  | 'verification_pending'
   | 'timeout'
   | 'http'
   | 'transport'
@@ -83,7 +87,16 @@ export interface RegisterCredentialHealthcheckToolArgs {
    * are already set.
    */
   resolveCredential: () => Promise<CredentialState>;
-  /** One authenticated round-trip. Only called when a credential resolved. */
+  /**
+   * One authenticated round-trip. Only called when a credential resolved.
+   *
+   * **It reports failure only by THROWING.** A probe that resolves is reported
+   * healthy, whatever it resolved to — so a 2xx is not, on its own, proof of a
+   * session. A cookie-session portal answers a dead session with a login page
+   * served 200, or a redirect to one; a probe that hands either back reports
+   * `ok: true` and tells the caller to go debug a tool. {@link sessionProbe}
+   * builds a compliant probe from the one closure only the consumer can write.
+   */
   probeFn: () => Promise<unknown>;
   /**
    * Classify a thrown error into an arm, and optionally override the hint and
@@ -136,6 +149,8 @@ const CREDENTIAL_ARMS = new Set<string>([
   'ok',
   'no_credential',
   'credential_rejected',
+  'session_expired',
+  'verification_pending',
   'timeout',
   'http',
   'transport',
@@ -160,6 +175,10 @@ function credentialHint(
       return `No credential resolved. Nothing was available to authenticate with — sign in and reconnect the connector so ${prefix} receives a token, or set the documented environment variable.`;
     case 'credential_rejected':
       return `${hostLabel} rejected the credential from '${source}'. It is present but no longer valid — most often expired or revoked upstream. Re-authenticate and reconnect; retrying will not fix it.`;
+    case 'session_expired':
+      return `The credential from '${source}' is configured, but no session is live — ${hostLabel} served a sign-in page rather than the data. Sign in again; a cookie-session portal expires these on its own, so this recurs between uses.`;
+    case 'verification_pending':
+      return `${hostLabel} is holding the sign-in on a second factor rather than refusing it. Supply the verification code the ACCOUNT HOLDER received — the credential itself is not the problem, so changing it will not help.`;
     case 'timeout':
       return `The credential from '${source}' resolved, but ${hostLabel} did not answer in time. Usually transient — retry. If it persists, ${hostLabel} is slow or unreachable from here.`;
     case 'http':
@@ -360,3 +379,159 @@ export function registerCredentialHealthcheckTool(
   );
 }
 
+
+/**
+ * The probe reached the far side and it declined to serve the data — a login
+ * page, or a redirect to one. Its own class so a classifier can tell it apart
+ * from a network failure.
+ */
+export class SessionNotLiveError extends Error {
+  constructor(
+    readonly hostLabel: string,
+    readonly detail: string,
+  ) {
+    super(`${hostLabel} served a sign-in page rather than the data (${detail}).`);
+    this.name = 'SessionNotLiveError';
+  }
+}
+
+/** A non-2xx from the far side, carrying the status the healthcheck reports. */
+export class ProbeHttpError extends Error {
+  constructor(
+    readonly hostLabel: string,
+    readonly status: number,
+  ) {
+    super(`${hostLabel} answered ${status}.`);
+    this.name = 'ProbeHttpError';
+  }
+}
+
+/** The minimum a {@link sessionProbe} request has to report. */
+export interface ProbeResponse {
+  status: number;
+  body: string;
+}
+
+export interface SessionProbeOptions {
+  /** Make the authenticated request. Must NOT sign in — a diagnostic observes. */
+  request: () => Promise<ProbeResponse>;
+  /**
+   * **The site-specific closure**, and the only part of this that cannot be
+   * generalised: does this body mean "not signed in"?
+   *
+   * It stays with the consumer because getting it wrong is silent and specific.
+   * One real portal links to two-factor setup from every signed-in page, so a
+   * body-wide match on `twoFactor` reports "signed out" for every request; the
+   * fix was to scope it to the `<title>`, which is knowable only next to the
+   * markup. A library that guessed this would be wrong in both directions.
+   */
+  signedOut: (body: string) => boolean;
+  /** Used in the thrown messages. Defaults to a neutral phrase. */
+  hostLabel?: string;
+}
+
+/**
+ * Build a `probeFn` that JUDGES its response instead of merely completing.
+ *
+ * `probeFn`'s contract is that it reports failure by throwing, so any probe
+ * that can resolve on a signed-out response silently reports healthy. Every
+ * connector whose probe rides a client that throws on non-2xx complies by
+ * accident — and that accident does not hold against a SOFT wall, where a dead
+ * session comes back 200 with a login page.
+ *
+ * The rules here are the generic ones:
+ *
+ *  - a 3xx is signed out, because under a manual-redirect fetch the bounce to
+ *    the login page arrives with no body to judge;
+ *  - any other non-2xx is an upstream error carrying its status;
+ *  - a 2xx is signed out if the consumer's closure says so.
+ *
+ * Pair with {@link sessionClassifier} to turn those into arms and remedies.
+ */
+export function sessionProbe(opts: SessionProbeOptions): () => Promise<string> {
+  const host = opts.hostLabel ?? 'the upstream';
+  return async () => {
+    const { status, body } = await opts.request();
+    if (status >= 300 && status < 400) {
+      throw new SessionNotLiveError(host, `redirected with ${status}`);
+    }
+    if (status < 200 || status >= 300) throw new ProbeHttpError(host, status);
+    if (opts.signedOut(body)) throw new SessionNotLiveError(host, 'sign-in or verification page');
+    return body;
+  };
+}
+
+export interface SessionClassifierOptions {
+  /** Tool-name prefix, used to name the remedy tools in the default copy. */
+  prefix: string;
+  hostLabel: string;
+  /** A second factor is outstanding. Read at classification time, not captured. */
+  verificationPending?: () => boolean;
+  /** The far side refused this username and password. */
+  credentialsRejected?: () => boolean;
+  /** Per-kind copy overrides, for a connector whose remedy is not a tool call. */
+  hints?: Partial<Record<'session_expired' | 'verification_pending' | 'credential_rejected' | 'http', string>>;
+}
+
+/**
+ * Build a `classifyThrown` that names WHICH signed-out state a
+ * {@link sessionProbe} failure is.
+ *
+ * All three arrive as the same login page and have three different remedies,
+ * so reporting them as one sends people to the wrong fix — telling somebody
+ * with an outstanding code to check their password sends them to change a
+ * credential that is already correct.
+ *
+ * **A refused credential outranks a pending verification.** Both flags can be
+ * set at once, and retrying a code against a password the far side refuses is
+ * futile. Two call sites in one repo disagreed about this order, which is the
+ * argument for the order living in exactly one place.
+ *
+ * Returns `undefined` for anything it does not recognise, so the built-in
+ * ladder still classifies a network failure rather than being shadowed.
+ */
+export function sessionClassifier(
+  opts: SessionClassifierOptions,
+): (err: unknown) => { kind: string; hint?: string } | undefined {
+  const { prefix, hostLabel, hints } = opts;
+  return (err: unknown) => {
+    if (err instanceof ProbeHttpError) {
+      return {
+        kind: 'http',
+        hint:
+          hints?.http ??
+          `${hostLabel} answered ${err.status}. The credential was never judged — that is an ` +
+            'upstream problem, so retry, and if it persists the far side is down.',
+      };
+    }
+    if (!(err instanceof SessionNotLiveError)) return undefined;
+    if (opts.credentialsRejected?.() === true) {
+      return {
+        kind: 'credential_rejected',
+        hint:
+          hints?.credential_rejected ??
+          `${hostLabel} refused this username and password. Correct them, then call ` +
+            `${prefix}_sign_in. Nothing retries for you: repeated failures escalate to a ` +
+            'captcha or a lockout.',
+      };
+    }
+    if (opts.verificationPending?.() === true) {
+      return {
+        kind: 'verification_pending',
+        hint:
+          hints?.verification_pending ??
+          `A verification code is outstanding, so ${hostLabel} is holding the sign-in rather ` +
+            `than refusing it. Call ${prefix}_send_verification_code, then pass the code the ` +
+            `ACCOUNT HOLDER receives to ${prefix}_verify_code.`,
+      };
+    }
+    return {
+      kind: 'session_expired',
+      hint:
+        hints?.session_expired ??
+        `The credentials are configured but no session is live — ${hostLabel} sessions are ` +
+          `short-lived, so this recurs between uses. Call ${prefix}_sign_in; expect a ` +
+          'verification code, which goes to the account holder.',
+    };
+  };
+}

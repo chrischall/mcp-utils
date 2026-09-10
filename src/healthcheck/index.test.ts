@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { registerCredentialHealthcheckTool } from './index.js';
+import {
+  registerCredentialHealthcheckTool,
+  sessionClassifier,
+  sessionProbe,
+} from './index.js';
 import { createTestHarness, parseToolResult } from '../test/index.js';
 
 interface Result {
@@ -403,5 +407,89 @@ describe('a classified resolver throw gets a hint matching its kind', () => {
       hints: { transport: 'override' },
     } as never);
     expect(r.hint).toBe('inline');
+  });
+});
+
+describe('sessionProbe / sessionClassifier', () => {
+  const LOGIN = '<title>Login Page</title>';
+  const HOME = '<title>Home</title>';
+  /** The one site-specific thing: what a signed-out body looks like here. */
+  const signedOut = (body: string) => body.includes('Login Page');
+
+  async function runSession(
+    responses: { status: number; body: string },
+    flags: { verificationPending?: boolean; credentialsRejected?: boolean } = {},
+  ) {
+    return run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => ({ source: 'env' }),
+      probeFn: sessionProbe({ request: async () => responses, signedOut }),
+      classifyThrown: sessionClassifier({
+        prefix: 'demo',
+        hostLabel: 'api.demo.com',
+        verificationPending: () => flags.verificationPending === true,
+        credentialsRejected: () => flags.credentialsRejected === true,
+      }),
+    });
+  }
+
+  it('accepts a 2xx body the closure does not call signed out', async () => {
+    const r = await runSession({ status: 200, body: HOME });
+    expect(r.ok).toBe(true);
+    expect(r.error).toBeUndefined();
+  });
+
+  it('rejects a 2xx body the closure calls signed out', async () => {
+    // The whole point: a resolved 200 is not proof of a session.
+    const r = await runSession({ status: 200, body: LOGIN });
+    expect(r.ok).toBe(false);
+    expect(r.error?.kind).toBe('session_expired');
+    expect(r.hint).toContain('demo_sign_in');
+  });
+
+  it('treats a redirect as signed out, with no body to judge', async () => {
+    const r = await runSession({ status: 302, body: '' });
+    expect(r.ok).toBe(false);
+    expect(r.error?.kind).toBe('session_expired');
+  });
+
+  it('reports a non-2xx as http, carrying its status', async () => {
+    const r = await runSession({ status: 503, body: '' });
+    expect(r.ok).toBe(false);
+    expect(r.error?.kind).toBe('http');
+    expect(r.probe.status).toBe(503);
+  });
+
+  it('names a pending verification rather than a dead session', async () => {
+    const r = await runSession({ status: 200, body: LOGIN }, { verificationPending: true });
+    expect(r.error?.kind).toBe('verification_pending');
+    expect(r.hint).toContain('code');
+  });
+
+  it('lets a rejected credential win over a pending verification', async () => {
+    // Both flags set. Retrying a code against a password the far side refuses
+    // is futile, so the credential is the one to report — and two call sites
+    // disagreeing about this order is exactly what putting it here removes.
+    const r = await runSession(
+      { status: 200, body: LOGIN },
+      { verificationPending: true, credentialsRejected: true },
+    );
+    expect(r.error?.kind).toBe('credential_rejected');
+  });
+
+  it('passes a non-probe throw through to the caller-s own classifier', async () => {
+    const r = await run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => ({ source: 'env' }),
+      probeFn: async () => {
+        throw new Error('kaboom');
+      },
+      classifyThrown: sessionClassifier({ prefix: 'demo', hostLabel: 'api.demo.com' }),
+    });
+    // sessionClassifier declines what it does not recognise, so the built-in
+    // ladder still classifies it rather than being shadowed.
+    expect(r.error?.kind).toBe('unknown');
   });
 });
