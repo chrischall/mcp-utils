@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.24.0](https://github.com/chrischall/mcp-utils/compare/v0.23.3...v0.24.0) (2026-09-10)
+
+
+### Features
+
+* **fetchproxy:** one healthcheck for a two-transport server, and a boot banner that stops claiming to listen ([#217](https://github.com/chrischall/mcp-utils/issues/217)) ([bc27c2d](https://github.com/chrischall/mcp-utils/commit/bc27c2dea7ee1ae3cbebecdcb354c595ba8dc87c))
+
+
+### Bug Fixes
+
+* **healthcheck:** render a slashless probe path as a URL, and clear the [#217](https://github.com/chrischall/mcp-utils/issues/217) review nits ([#220](https://github.com/chrischall/mcp-utils/issues/220)) ([e100864](https://github.com/chrischall/mcp-utils/commit/e1008646f4064c2c4644ea9ab7b9000b29951ac2))
+
+
+### Documentation
+
+* **healthcheck:** correct the probe-URL formula, and cover the credential arm ([#222](https://github.com/chrischall/mcp-utils/issues/222)) ([e0ef0d2](https://github.com/chrischall/mcp-utils/commit/e0ef0d25a365251eea6c44b4c78031c950413636)), closes [#221](https://github.com/chrischall/mcp-utils/issues/221)
+
 ## [0.23.3](https://github.com/chrischall/mcp-utils/compare/v0.23.2...v0.23.3) (2026-09-04)
 
 
