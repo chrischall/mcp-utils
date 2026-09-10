@@ -328,6 +328,20 @@ export async function runCredentialHealthcheck(
       kind = custom.kind;
       customHint = custom.hint;
       detail = custom.detail;
+      // The hint has to follow the KIND, exactly as it does on the
+      // resolveCredential path above. `arm` was derived from the HTTP status
+      // and, left alone, selected copy that the classified kind contradicts:
+      // resy-mcp printed `kind: 'credential_rejected'` beside "Unexpected
+      // failure — see error.message", because its auth error carries no status
+      // (419 and auth-shaped 500s are rewritten to a synthetic 401 for its
+      // replay, then thrown without one) and its own credential_rejected copy
+      // was therefore unreachable. A self-contradicting payload is worse than a
+      // vague one in the tool people paste into a chat when something breaks.
+      //
+      // A kind this module has no copy for lands on the neutral `unknown` text
+      // rather than keeping the status-derived arm, for the same reason: that
+      // copy asserts a cause the kind beside it denies.
+      arm = isArm(kind) ? kind : 'unknown';
     }
     error = {
       kind,

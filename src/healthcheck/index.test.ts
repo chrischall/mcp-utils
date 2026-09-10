@@ -576,3 +576,76 @@ describe('sessionClassifier remedy naming', () => {
     expect(r.hint).toContain('Call demo_sign_in.');
   });
 });
+
+describe('a classified kind selects the hint, on the probe path too', () => {
+  // The resolveCredential path already honoured a classified kind when picking
+  // copy. The probe path did not: `arm` was computed from the HTTP status and
+  // never moved, so a classifier that named an arm without supplying a hint got
+  // `error.kind: 'credential_rejected'` printed next to
+  // `hint: 'Unexpected failure — see error.message.'` — a payload that
+  // contradicts itself, in the tool people paste into a chat when something is
+  // broken. Found in resy-mcp, whose client throws an auth error carrying no
+  // status at all (it rewrites 419 and auth-shaped 500s into a synthetic 401
+  // for its replay, then throws without one), so its hand-written
+  // credential_rejected copy was unreachable.
+  class AuthRefused extends Error {}
+
+  it("uses the consumer's own copy for the classified arm", async () => {
+    const r = await run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => ({ source: 'env' }),
+      probeFn: async () => {
+        throw new AuthRefused('refused');
+      },
+      classifyThrown: (e) => (e instanceof AuthRefused ? { kind: 'credential_rejected' } : undefined),
+      hints: { credential_rejected: 'Check the three mint paths.' },
+    });
+    expect(r.error?.kind).toBe('credential_rejected');
+    expect(r.hint).toBe('Check the three mint paths.');
+  });
+
+  it("falls back to the classified arm's default copy, not the status-derived one", async () => {
+    const r = await run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => ({ source: 'env' }),
+      probeFn: async () => {
+        throw new AuthRefused('refused');
+      },
+      classifyThrown: (e) => (e instanceof AuthRefused ? { kind: 'credential_rejected' } : undefined),
+    });
+    expect(r.hint).not.toMatch(/Unexpected failure/);
+    expect(r.hint).toMatch(/rejected the credential/);
+  });
+
+  it('still prefers an explicit hint from the classifier', async () => {
+    const r = await run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => ({ source: 'env' }),
+      probeFn: async () => {
+        throw new AuthRefused('refused');
+      },
+      classifyThrown: () => ({ kind: 'credential_rejected', hint: 'Inline wins.' }),
+      hints: { credential_rejected: 'Should not be used.' },
+    });
+    expect(r.hint).toBe('Inline wins.');
+  });
+
+  it('keeps neutral copy for a kind this module has none for', async () => {
+    const r = await run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => ({ source: 'env' }),
+      probeFn: async () => {
+        throw Object.assign(new Error('teapot'), { status: 418 });
+      },
+      // A kind outside the arm set, and no hint: the status-derived `http` copy
+      // would now contradict it, so neither is asserted.
+      classifyThrown: () => ({ kind: 'brewing' }),
+    });
+    expect(r.error?.kind).toBe('brewing');
+    expect(r.hint).toMatch(/Unexpected failure/);
+  });
+});
