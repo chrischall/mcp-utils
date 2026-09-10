@@ -55,11 +55,11 @@
     "test:watch": "vitest"
   },
   "peerDependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "zod": "^4.5.4",
     "@fetchproxy/server": "*",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "node-html-parser": "*",
-    "vitest": "*"
+    "vitest": "*",
+    "zod": "^4.5.4"
   },
   "peerDependenciesMeta": {
     "@fetchproxy/server": {
@@ -73,7 +73,7 @@
     }
   },
   "devDependencies": {
-    "@fetchproxy/server": "^2.5.3",
+    "@fetchproxy/server": "^2.10.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@types/node": "^26.4.1",
     "@vitest/coverage-v8": "^5.0.0",
