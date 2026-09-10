@@ -855,11 +855,37 @@ probeFn: sessionProbe({
   hostLabel: 'my.atriumhealth.org',
 }),
 classifyThrown: sessionClassifier({
-  prefix: 'mah',
   hostLabel: 'my.atriumhealth.org',
+  remedies: {
+    signIn: 'mah_sign_in',
+    sendCode: 'mah_send_verification_code',
+    verifyCode: 'mah_verify_code',
+  },
   verificationPending: () => auth.mfaPending,
   credentialsRejected: () => auth.credentialsRejected,
 }),
+```
+
+**Name the remedy tools; never let them be derived.** `remedies` is explicit
+because connectors do not share a naming scheme: simplepractice signs in with
+`simplepractice_request_sign_in_link`, kiaaccess with `kia_start_login` and
+`kia_verify_otp`. Copy generated from the tool prefix produced
+`<prefix>_sign_in`, which exists in exactly one connector — so the hint sent
+people to a tool that was not there, which is worse than generic advice given
+that the tool's whole job is to point at the fix. Every field is optional and
+omitting one keeps the copy true but generic; the verification copy stays
+generic unless BOTH code tools are named, since half a flow leaves the caller
+with a code and nowhere to put it.
+
+**If your probe rides a client that already throws**, keep your own `probeFn`
+and throw the exported class for the soft wall your client cannot see:
+
+```ts
+probeFn: async () => {
+  const html = await client.page('Home');   // throws on non-2xx already
+  if (isAuthWall(html)) throw new SessionNotLiveError(HOST, 'sign-in page');
+  return html;
+},
 ```
 
 The library owns the generic rules — a 3xx is signed out (a manual-redirect
