@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.0](https://github.com/chrischall/mcp-utils/compare/v0.26.1...v0.27.0) (2026-09-10)
+
+
+### Features
+
+* **fetchproxy:** derive the transport deadline from a declared capture window ([#232](https://github.com/chrischall/mcp-utils/issues/232)) ([5f45026](https://github.com/chrischall/mcp-utils/commit/5f45026cea6b200e2eed8ebadf41998775a54e46))
+
 ## [0.26.1](https://github.com/chrischall/mcp-utils/compare/v0.26.0...v0.26.1) (2026-09-10)
 
 
