@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.26.0](https://github.com/chrischall/mcp-utils/compare/v0.25.0...v0.26.0) (2026-09-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* **healthcheck:** `sessionClassifier` takes `remedies` instead of `prefix`. Shipped in 0.25.0 half an hour ago with one consumer, whose adoption PR is still open — fixing the shape now beats layering an override onto a default that is wrong for the whole fleet.
+
+### Bug Fixes
+
+* **healthcheck:** name the remedy tools explicitly, never from the prefix ([#227](https://github.com/chrischall/mcp-utils/issues/227)) ([c8da68c](https://github.com/chrischall/mcp-utils/commit/c8da68c72ffecc00c4ae3d4a6221237de41afe8d))
+
 ## [0.25.0](https://github.com/chrischall/mcp-utils/compare/v0.24.0...v0.25.0) (2026-09-10)
 
 
