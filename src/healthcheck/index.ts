@@ -167,22 +167,6 @@ function credentialHint(
   }
 }
 
-/**
- * Register `${prefix}_healthcheck` for a connector whose health is about a
- * CREDENTIAL rather than a browser bridge — OAuth connectors, API-key
- * connectors, and the fetchproxy MCPs that only BOOTSTRAP a token and then
- * talk to an API directly.
- *
- * It exists because those three failures are indistinguishable today and have
- * different fixes: nothing minted a credential, something minted one the far
- * side rejects, and the far side is simply down. The bridge helper
- * (`registerBridgeHealthcheckTool`, in `../fetchproxy/`) answers the equivalent question for
- * MCPs where every request rides the bridge.
- *
- * The probe is SKIPPED when no credential resolved — probing without one
- * produces a 401 that reads like a rejected credential and points at the wrong
- * fix.
- */
 /** The text result an MCP tool handler returns. */
 export type HealthcheckToolResult = { content: { type: 'text'; text: string }[] };
 
@@ -192,13 +176,27 @@ export function credentialHealthcheckDescription(hostLabel: string): string {
 }
 
 /**
- * The credential healthcheck's whole body, without the registration.
+ * The credential healthcheck's whole body, without the registration: what a
+ * connector reports when its health is about a CREDENTIAL rather than a browser
+ * bridge — OAuth connectors, API-key connectors, and the fetchproxy MCPs that
+ * only BOOTSTRAP a token and then talk to an API directly.
  *
- * Split out so ONE tool can serve a server with two transports and choose
- * between the arms per call (`registerAdaptiveHealthcheckTool`, in
- * `../fetchproxy/`, which is where the bridge arm's optional peer dependency
- * already lives). `registerCredentialHealthcheckTool` is unchanged and still
- * the right choice for a server with only this arm.
+ * It exists because those three failures are indistinguishable today and have
+ * different fixes: nothing minted a credential, something minted one the far
+ * side rejects, and the far side is simply down. The bridge helper
+ * ({@link runBridgeHealthcheck}, in `../fetchproxy/`) answers the equivalent
+ * question for MCPs where every request rides the bridge.
+ *
+ * The probe is SKIPPED when no credential resolved — probing without one
+ * produces a 401 that reads like a rejected credential and points at the wrong
+ * fix.
+ *
+ * Split out from the registration so ONE tool can serve a server with two
+ * transports and choose between the arms per call
+ * (`registerAdaptiveHealthcheckTool`, in `../fetchproxy/`, which is where the
+ * bridge arm's optional peer dependency already lives).
+ * `registerCredentialHealthcheckTool` is unchanged and still the right choice
+ * for a server with only this arm.
  */
 export async function runCredentialHealthcheck(
   args: RegisterCredentialHealthcheckToolArgs,

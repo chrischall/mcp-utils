@@ -962,7 +962,7 @@ export async function runBridgeHealthcheck(
     const transport = resolveTransport();
     if (!transport) {
       throw new Error(
-        'registerBridgeHealthcheckTool: transport() returned nothing and no `path` was supplied — a bridge-only healthcheck needs its bridge.',
+        'bridge healthcheck: transport() returned nothing and no `path` was supplied — a bridge-only healthcheck needs its bridge.',
       );
     }
     const probeResult = await transport.runProbe(wrappedProbe, probePath);
@@ -1095,6 +1095,23 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
 }
 
 /**
+ * The credential-arm types this subpath's OWN API is expressed in, so a caller
+ * of `registerAdaptiveHealthcheckTool` or `runBridgeHealthcheck` can name every
+ * type it hands over or gets back without a second import.
+ *
+ * Deliberately NOT in the `@deprecated` block below, and deliberately not
+ * duplicated into it: `RegisterCredentialHealthcheckToolArgs` used to be
+ * reachable from here only as a 0.19-era compatibility re-export slated for
+ * removal, which would have taken `RegisterAdaptiveHealthcheckToolArgs['credential']`
+ * with it — an export whose removal breaks a NON-deprecated API is not a
+ * compatibility shim.
+ */
+export type {
+  HealthcheckToolResult,
+  RegisterCredentialHealthcheckToolArgs,
+} from '../healthcheck/index.js';
+
+/**
  * @deprecated Import from `@chrischall/mcp-utils/healthcheck` instead.
  *
  * `registerCredentialHealthcheckTool` shipped here in 0.19.0–0.19.1 and moved
@@ -1105,7 +1122,6 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
  */
 export {
   registerCredentialHealthcheckTool,
-  type RegisterCredentialHealthcheckToolArgs,
   type CredentialHealthcheckResult,
   type CredentialHealthcheckArm,
   type CredentialState,
