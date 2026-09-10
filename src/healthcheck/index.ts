@@ -464,6 +464,7 @@ export function sessionProbe(opts: SessionProbeOptions): () => Promise<string> {
 export interface SessionClassifierOptions {
   /** Tool-name prefix, used to name the remedy tools in the default copy. */
   prefix: string;
+  /** Display host named in the default copy, e.g. `'my.atriumhealth.org'`. */
   hostLabel: string;
   /** A second factor is outstanding. Read at classification time, not captured. */
   verificationPending?: () => boolean;
