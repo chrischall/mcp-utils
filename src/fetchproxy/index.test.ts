@@ -1407,3 +1407,46 @@ describe('registerAdaptiveHealthcheckTool', () => {
     await harness.close();
   });
 });
+
+describe('probe URL rendering', () => {
+  it('joins a slashless probePath without gluing it to the host', async () => {
+    const transport = {
+      async runProbe(fetchFn: (p: string) => Promise<unknown>, probePath: string) {
+        // The probe receives the path VERBATIM — a client with an app root
+        // under the host wants the bare form it was given.
+        expect(probePath).toBe('Home');
+        await fetchFn(probePath);
+        return {
+          ok: true,
+          elapsed_ms: 1,
+          bridge: {
+            role: 'host' as const,
+            port: 37149,
+            server_version: '1.0.0',
+            fetch_timeout_ms: 30000,
+            last_success_at: Date.now(),
+            last_failure_at: null,
+            last_failure_reason: null,
+            consecutive_failures: 0,
+          },
+        };
+      },
+      status: () => ({ lastExtensionMessageAt: null }),
+    } as unknown as FetchproxyTransport;
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'mah',
+        probePath: 'Home',
+        hostLabel: 'my.atriumhealth.org',
+        transport,
+        probeFn: async () => 'body',
+      }),
+    );
+    const result = parseToolResult<{ probe: { url: string } }>(
+      await harness.callTool('mah_healthcheck'),
+    );
+    expect(result.probe.url).toBe('https://my.atriumhealth.org/Home');
+    await harness.close();
+  });
+});

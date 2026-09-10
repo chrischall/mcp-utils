@@ -890,6 +890,20 @@ function projectBridgeStatus(
  * });
  */
 /** The bridge arm's one-line description, shared with the adaptive tool. */
+/**
+ * The display URL for a probe path.
+ *
+ * `probePath` is dual-purpose on the bridge arm: it is shown to the caller AND
+ * handed to `probeFn`, which wants whatever form that consumer's client takes.
+ * A transport with an app root under the host takes a bare `Home`, and joining
+ * that on gave `https://my.atriumhealth.orgHome` — a URL that reads as broken
+ * in the one output people paste into a bug report. Only the display is
+ * normalised; the value the probe receives is untouched.
+ */
+function probeDisplayUrl(hostLabel: string, probePath: string): string {
+  return `https://${hostLabel}${probePath.startsWith('/') ? '' : '/'}${probePath}`;
+}
+
 export function bridgeHealthcheckDescription(hostLabel: string, probePath: string): string {
   return `Round-trips a small public ${hostLabel} URL (${probePath}) through the fetchproxy bridge and returns diagnostics: the bridge's role (host/peer/null), port, version, the extension link (linked / pair pending / not attached / never answered), the elapsed round-trip time, and a plain-English hint distinguishing 'bridge never came up' from 'extension not connected' from 'real ${hostLabel}-side problem'. Read-only, no auth required.`;
 }
@@ -905,7 +919,7 @@ export async function runBridgeHealthcheck(
   args: RegisterBridgeHealthcheckToolArgs,
 ): Promise<HealthcheckToolResult> {
   const { prefix, probePath, hostLabel, probeFn, classifyThrown, hints, path } = args;
-  const probeUrl = `https://${hostLabel}${probePath}`;
+  const probeUrl = probeDisplayUrl(hostLabel, probePath);
   const resolveTransport = (): BridgeHealthcheckTransport | undefined =>
     typeof args.transport === 'function' ? args.transport() : args.transport;
   let probeBody = '';
@@ -948,7 +962,7 @@ export async function runBridgeHealthcheck(
     const transport = resolveTransport();
     if (!transport) {
       throw new Error(
-        'registerBridgeHealthcheckTool: transport() returned nothing and no `path` was supplied — a bridge-only healthcheck needs its bridge.',
+        'bridge healthcheck: transport() returned nothing and no `path` was supplied — a bridge-only healthcheck needs its bridge.',
       );
     }
     const probeResult = await transport.runProbe(wrappedProbe, probePath);
@@ -1081,6 +1095,23 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
 }
 
 /**
+ * The credential-arm types this subpath's OWN API is expressed in, so a caller
+ * of `registerAdaptiveHealthcheckTool` or `runBridgeHealthcheck` can name every
+ * type it hands over or gets back without a second import.
+ *
+ * Deliberately NOT in the `@deprecated` block below, and deliberately not
+ * duplicated into it: `RegisterCredentialHealthcheckToolArgs` used to be
+ * reachable from here only as a 0.19-era compatibility re-export slated for
+ * removal, which would have taken `RegisterAdaptiveHealthcheckToolArgs['credential']`
+ * with it — an export whose removal breaks a NON-deprecated API is not a
+ * compatibility shim.
+ */
+export type {
+  HealthcheckToolResult,
+  RegisterCredentialHealthcheckToolArgs,
+} from '../healthcheck/index.js';
+
+/**
  * @deprecated Import from `@chrischall/mcp-utils/healthcheck` instead.
  *
  * `registerCredentialHealthcheckTool` shipped here in 0.19.0–0.19.1 and moved
@@ -1091,7 +1122,6 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
  */
 export {
   registerCredentialHealthcheckTool,
-  type RegisterCredentialHealthcheckToolArgs,
   type CredentialHealthcheckResult,
   type CredentialHealthcheckArm,
   type CredentialState,

@@ -45,6 +45,25 @@ describe('createTestHarness', () => {
     }
   });
 
+  it('carries each tool description, and omits the key when a tool has none', async () => {
+    const h = await createTestHarness((server) => {
+      registerEcho(server);
+      // A description is optional in the MCP schema; a harness that invented
+      // one would hide exactly the drift these assertions exist to catch.
+      server.registerTool('bare', {}, async () => ({
+        content: [{ type: 'text' as const, text: '"bare"' }],
+      }));
+    });
+    try {
+      const byName = new Map((await h.listTools()).map((t) => [t.name, t]));
+      expect(byName.get('echo')?.description).toBe('echo back json');
+      expect(byName.get('bare')).toBeDefined();
+      expect(byName.get('bare')).not.toHaveProperty('description');
+    } finally {
+      await h.close();
+    }
+  });
+
   it('callTool round-trips arguments through the in-memory transport', async () => {
     const h = await createTestHarness(registerEcho);
     try {
