@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.1](https://github.com/chrischall/mcp-utils/compare/v0.26.0...v0.26.1) (2026-09-10)
+
+
+### Bug Fixes
+
+* **healthcheck:** let a classified kind pick the hint on the probe path too ([#229](https://github.com/chrischall/mcp-utils/issues/229)) ([2e5b3d0](https://github.com/chrischall/mcp-utils/commit/2e5b3d013664f1c77586e9b83d92ef67f6152323))
+
 ## [0.26.0](https://github.com/chrischall/mcp-utils/compare/v0.25.0...v0.26.0) (2026-09-10)
 
 
