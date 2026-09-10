@@ -228,6 +228,47 @@ export interface FetchproxyTransport {
   ): Promise<BridgeProbeResult>;
 }
 
+/**
+ * The margin between a waiting verb's window and the transport deadline that
+ * bounds its reply.
+ *
+ * It is not padding. It keeps the EXTENSION's timer the one that fires, which
+ * decides WHICH ERROR the caller sees: the extension answers a closed window
+ * with `{ok:false, error:'timeout'}`, which `@fetchproxy/server` types as
+ * `FetchproxyWaitedError` carrying the remedy ("a capture resolves on the next
+ * matching request the PAGE makes, so an idle tab times out"). Lose the race
+ * and the caller gets a bare transport deadline naming a number nobody chose,
+ * and — because it classifies as a protocol error — historically the advice to
+ * go update the extension.
+ *
+ * 15 s, matching the value `resy-mcp` arrived at independently.
+ */
+export const CAPTURE_DEADLINE_MARGIN_MS = 15_000;
+
+/**
+ * The transport deadline a declared capture window needs.
+ *
+ * One-directional by construction: it can only ever LENGTHEN a deadline. A
+ * caller that set a deliberately short `fetchTimeoutMs` and declares a window
+ * that already fits inside it keeps their own bound — otherwise "stop capping
+ * the caller" would become "ignore the caller", which is the same defect
+ * facing the other way.
+ */
+export function deadlineForCaptureWindow(
+  fetchTimeoutMs: number | undefined,
+  captureWindowMs: number | undefined,
+): number | undefined {
+  if (captureWindowMs === undefined || captureWindowMs <= 0) return fetchTimeoutMs;
+  // `0`/unset on the transport is an explicit opt-out of bounding. A declared
+  // window must not switch bounding back ON — that would bound a call the
+  // caller deliberately left unbounded.
+  if (fetchTimeoutMs === 0) return 0;
+  const floor = captureWindowMs + CAPTURE_DEADLINE_MARGIN_MS;
+  // `undefined` means the server's own 30 s default applies, so it is the
+  // number to compare against — not "no deadline".
+  return Math.max(fetchTimeoutMs ?? 30_000, floor);
+}
+
 /** Options for {@link createFetchproxyTransport}. */
 export type CreateFetchproxyTransportOptions = FetchproxyServerOpts & {
   /**
@@ -238,6 +279,39 @@ export type CreateFetchproxyTransportOptions = FetchproxyServerOpts & {
   debugEnvVar?: string;
   /** Env source for {@link debugEnvVar}. Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * The longest window this MCP will pass as `timeoutMs` to a WAITING verb —
+   * `captureRequestHeader`, `captureRedirect`, `download`.
+   *
+   * Declare it and the transport deadline is raised to clear it. Omit it and
+   * nothing changes.
+   *
+   * This exists because the two timeouts are not independent and the
+   * relationship is invisible at the call site. A waiting verb's `timeoutMs`
+   * is forwarded to the extension, but the reply is ALSO raced against this
+   * server's `fetchTimeoutMs` (default 30 s) — and a per-call value cannot
+   * raise that, so the shorter one wins silently. `@fetchproxy/server` says so
+   * in the timeout it throws ("raise fetchTimeoutMs on the transport to wait
+   * longer"); this is that instruction, applied once, here.
+   *
+   * Four callers got it wrong independently, which is why it is worth a named
+   * option rather than a line in a README:
+   *
+   * - `onehome-mcp` asks for 120 s and its own comment calls it "the 120s
+   *   user-interaction timeout". It receives 30 s — a quarter of the window it
+   *   believes it has, and the capture it exists to make is cut off.
+   * - `alltrails-mcp` and `remind-mcp` name no window, so the extension's 30 s
+   *   default ties with the transport's 30 s. The transport's timer starts
+   *   first, so it wins, and the extension's rejection — the one carrying the
+   *   remedy the user needs — is lost every time.
+   * - `resy-mcp` is the only one that gets it right, and only because it hit
+   *   the trap and hand-rolled `Math.max(CAPTURE_TIMEOUT_MS + 15_000, 30_000)`.
+   *   The `fpx` CLI shipped the same bug and the same hand-rolled fix.
+   *
+   * Set it to the largest window you will ask for, not the typical one — the
+   * deadline is per transport, and one long capture is enough to need it.
+   */
+  captureWindowMs?: number;
   /**
    * Subdomain the verb adapters (`fetch` / `requestJson`) apply per call unless
    * the caller overrides it. This is the ONE per-site bit of the verb surface:
@@ -314,7 +388,18 @@ export type CreateFetchproxyTransportOptions = FetchproxyServerOpts & {
 export function createFetchproxyTransport<T = FetchproxyTransport>(
   opts: CreateFetchproxyTransportOptions,
 ): T {
-  const { debugEnvVar, env, defaultSubdomain, logListening, createServer, ...serverOpts } = opts;
+  const {
+    debugEnvVar, env, defaultSubdomain, logListening, createServer, captureWindowMs, ...rest
+  } = opts;
+  // Raise the transport deadline to clear the declared capture window, so a
+  // waiting verb actually gets the window it asks for and the extension's
+  // informative rejection is the one that arrives. A no-op when
+  // `captureWindowMs` is absent, which is every existing consumer.
+  const derivedDeadline = deadlineForCaptureWindow(rest.fetchTimeoutMs, captureWindowMs);
+  const serverOpts: FetchproxyServerOpts = {
+    ...rest,
+    ...(derivedDeadline !== undefined ? { fetchTimeoutMs: derivedDeadline } : {}),
+  };
 
   if (!serverOpts.serverName || serverOpts.serverName.trim().length === 0) {
     throw new Error('createFetchproxyTransport: `serverName` is required.');
