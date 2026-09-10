@@ -204,7 +204,9 @@ export async function runCredentialHealthcheck(
   args: RegisterCredentialHealthcheckToolArgs,
 ): Promise<HealthcheckToolResult> {
   const { prefix, hostLabel, probePath, resolveCredential, probeFn, classifyThrown, hints } = args;
-  const probeUrl = probePath ? `https://${hostLabel}${probePath}` : undefined;
+  const probeUrl = probePath
+    ? `https://${hostLabel}${probePath.startsWith('/') ? '' : '/'}${probePath}`
+    : undefined;
   // Timed from just BEFORE the probe, never from the top: resolving a
   // credential can mint a token or drive the browser bridge, and folding
   // that into `probe.elapsed_ms` reports it as far-side latency.

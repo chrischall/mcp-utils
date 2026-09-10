@@ -890,6 +890,20 @@ function projectBridgeStatus(
  * });
  */
 /** The bridge arm's one-line description, shared with the adaptive tool. */
+/**
+ * The display URL for a probe path.
+ *
+ * `probePath` is dual-purpose on the bridge arm: it is shown to the caller AND
+ * handed to `probeFn`, which wants whatever form that consumer's client takes.
+ * A transport with an app root under the host takes a bare `Home`, and joining
+ * that on gave `https://my.atriumhealth.orgHome` — a URL that reads as broken
+ * in the one output people paste into a bug report. Only the display is
+ * normalised; the value the probe receives is untouched.
+ */
+function probeDisplayUrl(hostLabel: string, probePath: string): string {
+  return `https://${hostLabel}${probePath.startsWith('/') ? '' : '/'}${probePath}`;
+}
+
 export function bridgeHealthcheckDescription(hostLabel: string, probePath: string): string {
   return `Round-trips a small public ${hostLabel} URL (${probePath}) through the fetchproxy bridge and returns diagnostics: the bridge's role (host/peer/null), port, version, the extension link (linked / pair pending / not attached / never answered), the elapsed round-trip time, and a plain-English hint distinguishing 'bridge never came up' from 'extension not connected' from 'real ${hostLabel}-side problem'. Read-only, no auth required.`;
 }
@@ -905,7 +919,7 @@ export async function runBridgeHealthcheck(
   args: RegisterBridgeHealthcheckToolArgs,
 ): Promise<HealthcheckToolResult> {
   const { prefix, probePath, hostLabel, probeFn, classifyThrown, hints, path } = args;
-  const probeUrl = `https://${hostLabel}${probePath}`;
+  const probeUrl = probeDisplayUrl(hostLabel, probePath);
   const resolveTransport = (): BridgeHealthcheckTransport | undefined =>
     typeof args.transport === 'function' ? args.transport() : args.transport;
   let probeBody = '';
