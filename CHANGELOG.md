@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.25.0](https://github.com/chrischall/mcp-utils/compare/v0.24.0...v0.25.0) (2026-09-10)
+
+
+### Features
+
+* **healthcheck:** build a session probe from the one closure a library cannot write ([#223](https://github.com/chrischall/mcp-utils/issues/223)) ([d5d3d2a](https://github.com/chrischall/mcp-utils/commit/d5d3d2ab70501d0494ee69102b41cf220ad6661c))
+
+
+### Documentation
+
+* **healthcheck:** document hostLabel, and fix an apostrophe I dodged ([#226](https://github.com/chrischall/mcp-utils/issues/226)) ([4709829](https://github.com/chrischall/mcp-utils/commit/4709829828820ab5b13c6fbabdbad9fd4755c47f)), closes [#224](https://github.com/chrischall/mcp-utils/issues/224)
+
 ## [0.24.0](https://github.com/chrischall/mcp-utils/compare/v0.23.3...v0.24.0) (2026-09-10)
 
 
