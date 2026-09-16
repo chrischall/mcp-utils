@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.28.0](https://github.com/chrischall/mcp-utils/compare/v0.27.1...v0.28.0) (2026-09-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* migrate to MCP SDK v2 ([#241](https://github.com/chrischall/mcp-utils/issues/241))
+
+### Features
+
+* migrate to MCP SDK v2 ([#241](https://github.com/chrischall/mcp-utils/issues/241)) ([79b6994](https://github.com/chrischall/mcp-utils/commit/79b699431e994478d1c8d2cf18338e9575f395d1))
+
+
+### Bug Fixes
+
+* **server:** make MCP client peer optional ([#243](https://github.com/chrischall/mcp-utils/issues/243)) ([8aa7537](https://github.com/chrischall/mcp-utils/commit/8aa7537729dcd99fc3b0daa05ab75e1f5c910933))
+
+
+### Documentation
+
+* **skills:** two fetchproxy gotchas found building bridge-probe-mcp ([#239](https://github.com/chrischall/mcp-utils/issues/239)) ([f63ce98](https://github.com/chrischall/mcp-utils/commit/f63ce980ecd14585ab3874eb63e4c37133f8730d))
+
 ## [0.27.1](https://github.com/chrischall/mcp-utils/compare/v0.27.0...v0.27.1) (2026-09-10)
 
 
