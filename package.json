@@ -56,7 +56,8 @@
   },
   "peerDependencies": {
     "@fetchproxy/server": "*",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "node-html-parser": "*",
     "vitest": "*",
     "zod": "^4.6.2"
@@ -74,7 +75,8 @@
   },
   "devDependencies": {
     "@fetchproxy/server": "^2.11.3",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "@types/node": "^26.5.1",
     "@vitest/coverage-v8": "^5.0.0",
     "node-html-parser": "^9.0.4",

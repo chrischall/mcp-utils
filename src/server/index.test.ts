@@ -1,10 +1,8 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { Client } from '@modelcontextprotocol/client';
+import { McpServer, InMemoryTransport } from '@modelcontextprotocol/server';
+import type { Transport } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-
 import { createMcpServer, withGracefulShutdown, runMcp } from './index.js';
 import { McpToolError } from '../errors/index.js';
 import type { ToolRegistrar } from './index.js';
@@ -41,6 +39,15 @@ describe('createMcpServer', () => {
   it('returns an McpServer with the given name/version', async () => {
     const server = await createMcpServer({ name: 'x-mcp', version: '1.2.3', tools: [] });
     expect(server).toBeInstanceOf(McpServer);
+  });
+
+  it('advertises the 2026-07-28 protocol', async () => {
+    const server = await createMcpServer({ name: 'x-mcp', version: '1.2.3', tools: [] });
+    const discover = (server.server as unknown as {
+      _ondiscover(): { supportedVersions: string[] };
+    })._ondiscover();
+
+    expect(discover.supportedVersions).toContain('2026-07-28');
   });
 
   it('runs every ToolRegistrar with the server and deps', async () => {
@@ -80,7 +87,7 @@ describe('createMcpServer', () => {
     const reg: ToolRegistrar = (server) => {
       server.registerTool(
         'echo',
-        { description: 'echo', inputSchema: { msg: z.string() } },
+        { description: 'echo', inputSchema: z.object({ msg: z.string() }) },
         async ({ msg }) => ({ content: [{ type: 'text', text: String(msg) }] }),
       );
     };
@@ -275,7 +282,7 @@ describe('tool error hints', () => {
 
   it('appends the hint of an McpToolError rejected asynchronously', async () => {
     const { client, close } = await harness((s) =>
-      s.registerTool('t', { inputSchema: { a: z.string() } }, async () => {
+      s.registerTool('t', { inputSchema: z.object({ a: z.string() }) }, async () => {
         throw new McpToolError('no such option 999', { hint: 'Available: 1 (Bus), 2 (Walker)' });
       }),
     );
@@ -308,7 +315,7 @@ describe('tool error hints', () => {
   it('passes a tool with an inputSchema its arguments unchanged', async () => {
     const seen: unknown[] = [];
     const { client, close } = await harness((s) =>
-      s.registerTool('t', { inputSchema: { a: z.string() } }, async (args) => {
+      s.registerTool('t', { inputSchema: z.object({ a: z.string() }) }, async (args) => {
         seen.push(args);
         return { content: [{ type: 'text' as const, text: 'ok' }] };
       }),

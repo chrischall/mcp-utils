@@ -47,7 +47,7 @@ import {
   type BridgeProbeResult,
 } from '@fetchproxy/server';
 import type { Capability } from '@fetchproxy/protocol';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { truncateErrorMessage, messageOf } from '../errors/index.js';
 
 // ---------------------------------------------------------------------------
@@ -1193,7 +1193,7 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
         idempotentHint: true,
         openWorldHint: true,
       },
-      inputSchema: {},
+      inputSchema: z.object({}),
     },
     async () => runBridgeHealthcheck(args),
   );
@@ -1238,7 +1238,7 @@ import {
   type HealthcheckToolResult,
   type RegisterCredentialHealthcheckToolArgs,
 } from '../healthcheck/index.js';
-
+import { z } from 'zod';
 
 /**
  * Arguments for {@link registerAdaptiveHealthcheckTool}.
@@ -1310,7 +1310,7 @@ export function registerAdaptiveHealthcheckTool(args: RegisterAdaptiveHealthchec
         idempotentHint: true,
         openWorldHint: true,
       },
-      inputSchema: {},
+      inputSchema: z.object({}),
     },
     async () =>
       usingBridge()

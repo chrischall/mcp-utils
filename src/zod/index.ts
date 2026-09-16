@@ -3,9 +3,9 @@
  * the MCP fleet. Intentionally small: atoms + annotations, not a schema
  * framework. Built on zod v4.
  *
- * The raw-shape style (`inputSchema: { foo: z.string() }`) used by
- * `server.registerTool` is preserved — these atoms are plain `ZodType`s you
- * drop straight into a shape object.
+ * MCP SDK v2 takes Standard Schema objects (`inputSchema: z.object({ ... })`).
+ * These atoms are plain `ZodType`s that compose directly inside those object
+ * schemas.
  */
 import { z } from 'zod';
 
@@ -92,6 +92,9 @@ export const schemaOrigin = z
  * The write-confirmation gate shared by mutating tools: without
  * `confirm: true` the tool returns a preview instead of performing the action.
  * (honeybook pay_invoice / sign_contract)
+ *
+ * @deprecated Use `requireConfirmation(ctx, options)` for stateless MCP
+ * multi-round-trip confirmation. Retained while older servers migrate.
  */
 export const schemaConfirm = z
   .boolean()
@@ -103,7 +106,8 @@ export const schemaConfirm = z
 // ---------------------------------------------------------------------------
 
 /**
- * Offset/limit pagination shape (raw, for spreading into an `inputSchema`).
+ * Offset/limit pagination shape for spreading into
+ * `inputSchema: z.object({ ...paginationSchema })`.
  * `offset` defaults to 0, `limit` is bounded `1..200` and defaults to 50 —
  * the bounds standardized across the fleet's search tools.
  */
@@ -119,8 +123,9 @@ export const paginationSchema = {
 } as const;
 
 /**
- * 1-based page pagination shape (`page_num` / `page_size`). `page_num`
- * defaults to 1, `page_size` is bounded `1..200` and defaults to 50.
+ * 1-based page pagination shape for spreading into
+ * `inputSchema: z.object({ ...pageSchema })`. `page_num` defaults to 1,
+ * `page_size` is bounded `1..200` and defaults to 50.
  * Mirrors onehome-mcp's search pagination, normalized to 1-based.
  */
 export const pageSchema = {
