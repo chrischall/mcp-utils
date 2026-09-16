@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from "@modelcontextprotocol/server";
 
 /**
  * The fleet's response-shape vocabulary (`docs/fleet-conventions.md`,

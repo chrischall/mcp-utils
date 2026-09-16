@@ -14,10 +14,9 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { vi } from 'vitest';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { Client } from "@modelcontextprotocol/client";
+import { McpServer, InMemoryTransport, SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/server";
+import type { CallToolResult, ElicitRequest, ElicitResult } from "@modelcontextprotocol/server";
 import type { Mock } from 'vitest';
 import { surfaceToolHints } from '../server/index.js';
 
@@ -38,6 +37,15 @@ export interface TestHarness {
   close: () => Promise<void>;
 }
 
+/** Optional client behavior for protocol features exercised by a test. */
+export interface TestHarnessOptions {
+  /**
+   * Handle form or URL elicitation. Registering this before connect advertises
+   * the client capability and lets the v2 client drive `input_required` rounds.
+   */
+  elicitation?: (request: ElicitRequest) => ElicitResult | Promise<ElicitResult>;
+}
+
 /**
  * Create a connected `McpServer` + `Client` pair wired over
  * `InMemoryTransport`. The byte-identical helper every MCP's `tests/helpers.ts`
@@ -47,12 +55,26 @@ export interface TestHarness {
  * Applies the same error-hint surfacing `createMcpServer` does, so a tool's
  * failure text under test is the text production returns.
  */
-export async function createTestHarness(registerFn: RegisterFn): Promise<TestHarness> {
-  const server = new McpServer({ name: 'test', version: '0.0.0' });
+export async function createTestHarness(
+  registerFn: RegisterFn,
+  options: TestHarnessOptions = {},
+): Promise<TestHarness> {
+  const server = new McpServer(
+    { name: 'test', version: '0.0.0' },
+    { supportedProtocolVersions: ['2026-07-28', ...SUPPORTED_PROTOCOL_VERSIONS] },
+  );
   surfaceToolHints(server);
   await registerFn(server);
 
-  const client = new Client({ name: 'test-client', version: '0.0.0' });
+  const client = new Client(
+    { name: 'test-client', version: '0.0.0' },
+    {
+      ...(options.elicitation ? { capabilities: { elicitation: {} } } : {}),
+    },
+  );
+  if (options.elicitation) {
+    client.setRequestHandler('elicitation/create', options.elicitation);
+  }
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

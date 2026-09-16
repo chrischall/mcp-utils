@@ -18,11 +18,9 @@
  * `deps`: both Pattern-A (fetchproxy bridge) and Pattern-B (direct/bearer) MCPs
  * build their client themselves and pass it through, so neither is coupled in.
  */
-
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { McpServer, SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/server";
+import type { Transport, CallToolResult } from "@modelcontextprotocol/server";
 import { McpToolError } from '../errors/index.js';
 import { errorResult } from '../response/index.js';
 
@@ -141,7 +139,10 @@ export function surfaceToolHints(server: McpServer): void {
 export async function createMcpServer<TDeps = unknown>(
   opts: CreateMcpServerOptions<TDeps>,
 ): Promise<McpServer> {
-  const server = new McpServer({ name: opts.name, version: opts.version });
+  const server = new McpServer(
+    { name: opts.name, version: opts.version },
+    { supportedProtocolVersions: ['2026-07-28', ...SUPPORTED_PROTOCOL_VERSIONS] },
+  );
 
   // Before the registrars run, so every tool they register is wrapped.
   if (opts.surfaceHints !== false) surfaceToolHints(server);

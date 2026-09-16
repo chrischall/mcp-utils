@@ -3,8 +3,12 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import {
+  acceptedContent,
+  inputRequired,
+  type McpServer,
+  type CallToolResult,
+} from '@modelcontextprotocol/server';
 import {
   createTestHarness,
   parseToolResult,
@@ -20,7 +24,7 @@ function registerEcho(server: McpServer): void {
     'echo',
     {
       description: 'echo back json',
-      inputSchema: { value: z.string() },
+      inputSchema: z.object({ value: z.string() }),
     },
     async (args) => ({
       content: [{ type: 'text', text: JSON.stringify({ echoed: args.value }, null, 2) }],
@@ -79,6 +83,39 @@ describe('createTestHarness', () => {
     try {
       const res = await h.callTool('ping');
       expect(parseToolResult<string>(res)).toBe('pong');
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('drives an input_required elicitation with the configured response handler', async () => {
+    const confirmation = z.object({ confirmed: z.boolean() });
+    const h = await createTestHarness(
+      (server) => {
+        server.registerTool('confirm', { inputSchema: z.object({}) }, async (_args, ctx) => {
+          const answer = acceptedContent(ctx.mcpReq.inputResponses, 'confirmation', confirmation);
+          if (answer?.confirmed !== true) {
+            return inputRequired({
+              inputRequests: {
+                confirmation: inputRequired.elicit({
+                  message: 'Send this message?',
+                  requestedSchema: confirmation,
+                }),
+              },
+            });
+          }
+          return { content: [{ type: 'text', text: JSON.stringify(answer) }] };
+        });
+      },
+      {
+        elicitation: async (request) => {
+          expect(request.params.message).toBe('Send this message?');
+          return { action: 'accept', content: { confirmed: true } };
+        },
+      },
+    );
+    try {
+      expect(parseToolResult(await h.callTool('confirm'))).toEqual({ confirmed: true });
     } finally {
       await h.close();
     }
