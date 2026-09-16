@@ -12,6 +12,7 @@ import { textResult } from '../response/index.js';
 const DEFAULT_REQUEST_KEY = 'confirmation';
 const DEFAULT_CONFIRMATION_LABEL = 'Confirm this action should proceed.';
 
+/** Options for {@link requireConfirmation}. */
 export interface RequireConfirmationOptions {
   /** Stable identifier for the operation being confirmed. */
   action: string;

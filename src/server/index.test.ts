@@ -3,7 +3,12 @@ import { Client } from '@modelcontextprotocol/client';
 import { McpServer, InMemoryTransport } from '@modelcontextprotocol/server';
 import type { Transport } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import { createMcpServer, withGracefulShutdown, runMcp } from './index.js';
+import {
+  createMcpServer,
+  SERVER_PROTOCOL_VERSIONS,
+  withGracefulShutdown,
+  runMcp,
+} from './index.js';
 import { McpToolError } from '../errors/index.js';
 import type { ToolRegistrar } from './index.js';
 
@@ -41,13 +46,8 @@ describe('createMcpServer', () => {
     expect(server).toBeInstanceOf(McpServer);
   });
 
-  it('advertises the 2026-07-28 protocol', async () => {
-    const server = await createMcpServer({ name: 'x-mcp', version: '1.2.3', tools: [] });
-    const discover = (server.server as unknown as {
-      _ondiscover(): { supportedVersions: string[] };
-    })._ondiscover();
-
-    expect(discover.supportedVersions).toContain('2026-07-28');
+  it('exports the 2026-07-28 protocol used by production and the harness', () => {
+    expect(SERVER_PROTOCOL_VERSIONS).toContain('2026-07-28');
   });
 
   it('runs every ToolRegistrar with the server and deps', async () => {

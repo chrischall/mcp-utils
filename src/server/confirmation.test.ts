@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { CallToolResult, ServerContext } from '@modelcontextprotocol/server';
+import { z } from 'zod';
+import { createTestHarness, parseToolResult } from '../test/index.js';
+import { textResult } from '../response/index.js';
 import { requireConfirmation } from './confirmation.js';
 
 function context(inputResponses?: unknown): ServerContext {
@@ -81,5 +84,54 @@ describe('requireConfirmation', () => {
         },
       },
     });
+  });
+
+  it('drives an accepted confirmation through the real client/server path before writing', async () => {
+    const write = vi.fn(() => textResult({ deleted: true }));
+    const harness = await createTestHarness(
+      (server) => {
+        server.registerTool('delete_event', { inputSchema: z.object({}) }, async (_args, ctx) => {
+          const confirmation = requireConfirmation(ctx, {
+            action: 'calendar.delete',
+            message: 'Review and confirm this deletion',
+          });
+          return confirmation ?? write();
+        });
+      },
+      { elicitation: async () => ({ action: 'accept', content: { confirmed: true } }) },
+    );
+
+    try {
+      expect(parseToolResult(await harness.callTool('delete_event'))).toEqual({ deleted: true });
+      expect(write).toHaveBeenCalledOnce();
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('drives a declined confirmation through the real path without writing', async () => {
+    const write = vi.fn(() => textResult({ deleted: true }));
+    const harness = await createTestHarness(
+      (server) => {
+        server.registerTool('delete_event', { inputSchema: z.object({}) }, async (_args, ctx) => {
+          const confirmation = requireConfirmation(ctx, {
+            action: 'calendar.delete',
+            message: 'Review and confirm this deletion',
+          });
+          return confirmation ?? write();
+        });
+      },
+      { elicitation: async () => ({ action: 'decline' }) },
+    );
+
+    try {
+      expect(parseToolResult(await harness.callTool('delete_event'))).toMatchObject({
+        confirmed: false,
+        cancelled: true,
+      });
+      expect(write).not.toHaveBeenCalled();
+    } finally {
+      await harness.close();
+    }
   });
 });

@@ -14,10 +14,10 @@ auth resolver skeletons, an in-memory test harness, and opt-in HTML helpers.
 npm install @chrischall/mcp-utils
 ```
 
-Peer dependencies: `@modelcontextprotocol/server`, `@modelcontextprotocol/client`,
-and `zod`. The `@fetchproxy/server`
-and `node-html-parser` peers are **optional** — only needed if you import the
-`/fetchproxy` or `/html` subpaths respectively. Their declared range is `*` so a
+Peer dependencies: `@modelcontextprotocol/server` and `zod`.
+`@modelcontextprotocol/client`, `@fetchproxy/server`, and `node-html-parser` are
+**optional** — only needed if you import the `/test`, `/fetchproxy`, or `/html`
+subpaths respectively. The latter two use a declared range of `*` so a
 consumer pinning any version installs cleanly; the real requirement is enforced
 at the subpath: **`/fetchproxy` needs `@fetchproxy/server` >= 0.11** (it
 re-exports APIs added there — `withDeadline`, `backoffDelayMs`, `BRIDGE_CONCURRENCY`,
