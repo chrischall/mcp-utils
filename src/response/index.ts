@@ -1,4 +1,4 @@
-import type { CallToolResult } from "@modelcontextprotocol/server";
+import type { CallToolResult } from '@modelcontextprotocol/server';
 import { redactSecrets } from '../errors/index.js';
 
 /**

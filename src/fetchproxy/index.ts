@@ -47,7 +47,7 @@ import {
   type BridgeProbeResult,
 } from '@fetchproxy/server';
 import type { Capability } from '@fetchproxy/protocol';
-import type { McpServer } from "@modelcontextprotocol/server";
+import type { McpServer } from '@modelcontextprotocol/server';
 import { truncateErrorMessage, messageOf } from '../errors/index.js';
 
 // ---------------------------------------------------------------------------
@@ -1238,7 +1238,7 @@ import {
   type HealthcheckToolResult,
   type RegisterCredentialHealthcheckToolArgs,
 } from '../healthcheck/index.js';
-import { z } from "zod";
+import { z } from 'zod';
 
 /**
  * Arguments for {@link registerAdaptiveHealthcheckTool}.

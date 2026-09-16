@@ -50,7 +50,8 @@ import { createFetchproxyTransport } from '@chrischall/mcp-utils/fetchproxy';
 
 ### `server` — bootstrap & lifecycle
 
-`createMcpServer`, `runMcp`, `withGracefulShutdown`, `surfaceToolHints`.
+`createMcpServer`, `runMcp`, `withGracefulShutdown`, `surfaceToolHints`,
+`requireConfirmation`.
 
 ```ts
 import { runMcp, textResult } from '@chrischall/mcp-utils';
@@ -83,6 +84,30 @@ Anything that is not an `McpToolError`, or has no `hint`, propagates untouched,
 so a genuine bug still reads as one. Opt out with `surfaceHints: false`.
 `createTestHarness` applies the same wrapper, so a tool's failure text under
 test is the text production returns.
+
+For a mutating tool, `requireConfirmation` uses the 2026-07-28 stateless
+multi-round-trip flow instead of a caller-supplied `confirm` argument. Return
+its result when defined; `undefined` means the client accepted the elicitation
+and checked the schema-validated confirmation box.
+
+```ts
+import { requireConfirmation, textResult } from '@chrischall/mcp-utils';
+
+server.registerTool('calendar_delete', config, async ({ eventId }, ctx) => {
+  const confirmation = requireConfirmation(ctx, {
+    action: 'calendar.delete',
+    message: 'Review and confirm this deletion.',
+    details: { eventId },
+  });
+  if (confirmation) return confirmation;
+
+  await calendar.delete(eventId);
+  return textResult({ deleted: true, eventId });
+});
+```
+
+The details are a preview, not trusted retry state. Recompute authorization and
+the write from the tool's original validated arguments each round.
 
 ### `response` — tool-result formatting
 
@@ -117,13 +142,14 @@ that has to be requested is one that usually is not.
 
 ```ts
 import { viewParam, resolveView, viewResult, projectOrRaw } from '@chrischall/mcp-utils';
+import { z } from 'zod';
 
 const VIEWS_HERE = ['compact', 'full'] as const;   // only the rungs you honour
 
 server.registerTool('svc_list_things', {
-  inputSchema: {
+  inputSchema: z.object({
     view: viewParam(VIEWS_HERE, { note: 'compact omits the upstream `meta` echo.' }),
-  },
+  }),
 }, async (args) => {
   const view = resolveView(args.view, VIEWS_HERE);
   const rows = await client.list();
@@ -452,7 +478,7 @@ the string/escape-aware bracket walker regex can't replace.
 
 Reusable schemas (`PositiveInt`, `NonNegInt`, `NonEmptyString`, `IsoDate`,
 `IsoTime`, `NumericIdString`, `SafePathSegment`, `schemaOrigin`,
-`schemaConfirm`), pagination helpers
+`schemaConfirm` (deprecated in favor of `requireConfirmation`), pagination helpers
 (`paginationSchema`, `pageSchema`, `calculateOffset`), tool-annotation builders
 (`toolAnnotations`), time normalizers (`extractTime`, `normalizeTime`), and the
 lenient response validator `parseLenient`.
@@ -464,9 +490,15 @@ on drift it warns to **stderr** with the precise issue paths and returns the
 RAW response (or throws an `McpToolError` in `mode: 'strict'` for write paths).
 
 ```ts
-import { paginationSchema, calculateOffset, toolAnnotations } from '@chrischall/mcp-utils';
+import {
+  NonEmptyString,
+  paginationSchema,
+  calculateOffset,
+  toolAnnotations,
+} from '@chrischall/mcp-utils';
+import { z } from 'zod';
 
-const inputSchema = { ...paginationSchema, q: NonEmptyString };
+const inputSchema = z.object({ ...paginationSchema, q: NonEmptyString });
 const offset = calculateOffset(page, size);
 const annotations = toolAnnotations({ readOnly: true });
 ```
@@ -957,11 +989,23 @@ Requires the optional `node-html-parser` peer. Also provides `urlToPath`,
 ```ts
 import { createTestHarness, parseToolResult } from '@chrischall/mcp-utils/test';
 
-const harness = createTestHarness();
-register(harness.server);
-const result = await harness.call('ping', {});
-expect(parseToolResult(result)).toEqual({ ok: true });
+const harness = await createTestHarness(register, {
+  elicitation: async (request) => {
+    expect(request.params.message).toContain('Confirm');
+    return { action: 'accept', content: { confirmed: true } };
+  },
+});
+try {
+  const result = await harness.callTool('ping', {});
+  expect(parseToolResult(result)).toEqual({ ok: true });
+} finally {
+  await harness.close();
+}
 ```
+
+`TestHarnessOptions.elicitation` advertises the client capability and handles
+form or URL elicitation requests, so tests can drive stateless
+`input_required` retry rounds through the real client/server path.
 
 Also includes `versionSyncTest`, `mockFetchproxyBootstrap`, `setupClientMocks`,
 and `makeBootstrapResult`.

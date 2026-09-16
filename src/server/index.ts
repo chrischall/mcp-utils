@@ -18,11 +18,13 @@
  * `deps`: both Pattern-A (fetchproxy bridge) and Pattern-B (direct/bearer) MCPs
  * build their client themselves and pass it through, so neither is coupled in.
  */
-import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
-import { McpServer, SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/server";
-import type { Transport, CallToolResult } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
+import { McpServer, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/server';
+import type { Transport, CallToolResult } from '@modelcontextprotocol/server';
 import { McpToolError } from '../errors/index.js';
 import { errorResult } from '../response/index.js';
+
+export * from './confirmation.js';
 
 /**
  * Registers one or more tools onto a fresh {@link McpServer}. `deps` is whatever
@@ -36,6 +38,12 @@ export type ToolRegistrar<TDeps = unknown> = (
   server: McpServer,
   deps: TDeps,
 ) => void | Promise<void>;
+
+/** Protocol revisions supported by servers and the shared test harness. */
+export const SERVER_PROTOCOL_VERSIONS = Object.freeze([
+  '2026-07-28',
+  ...SUPPORTED_PROTOCOL_VERSIONS,
+]);
 
 /** Either the literal `'stdio'` (the default) or any SDK {@link Transport}. */
 export type TransportSpec = 'stdio' | Transport;
@@ -141,7 +149,7 @@ export async function createMcpServer<TDeps = unknown>(
 ): Promise<McpServer> {
   const server = new McpServer(
     { name: opts.name, version: opts.version },
-    { supportedProtocolVersions: ['2026-07-28', ...SUPPORTED_PROTOCOL_VERSIONS] },
+    { supportedProtocolVersions: [...SERVER_PROTOCOL_VERSIONS] },
   );
 
   // Before the registrars run, so every tool they register is wrapped.

@@ -45,7 +45,7 @@ import {
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes, createHmac } from 'node:crypto';
-import type { McpServer } from "@modelcontextprotocol/server";
+import type { McpServer } from '@modelcontextprotocol/server';
 import { textResult } from '../response/index.js';
 import { readEnvVar } from '../config/index.js';
 import { ApiError, RateLimitedError, RequestTimeoutError } from '../http/index.js';
@@ -250,20 +250,20 @@ export function registerSessionTools(
         openWorldHint: false,
       },
       inputSchema: z.object({
-              account_identity: z
-                .string()
-                .min(1)
-                .describe('Caller-supplied identifier for the signed-in account (typically the saved-account email).'),
-              auth_expires_at: z
-                .string()
-                .optional()
-                .describe('Optional ISO timestamp at which the session expires.'),
-              mark_active: z
-                .boolean()
-                .optional()
-                .default(false)
-                .describe('When true, immediately make the newly-registered session the active one.'),
-            }),
+        account_identity: z
+          .string()
+          .min(1)
+          .describe('Caller-supplied identifier for the signed-in account (typically the saved-account email).'),
+        auth_expires_at: z
+          .string()
+          .optional()
+          .describe('Optional ISO timestamp at which the session expires.'),
+        mark_active: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe('When true, immediately make the newly-registered session the active one.'),
+      }),
     },
     async ({ account_identity, auth_expires_at, mark_active }) => {
       // Pass `auth_expires_at` through as-is: `undefined` means "keep existing",
@@ -291,8 +291,8 @@ export function registerSessionTools(
         openWorldHint: false,
       },
       inputSchema: z.object({
-              session_id: z.string().min(1).describe('Session id to make active.'),
-            }),
+        session_id: z.string().min(1).describe('Session id to make active.'),
+      }),
     },
     async ({ session_id }) => {
       if (!registry.setActive(session_id)) {

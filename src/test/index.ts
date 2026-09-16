@@ -14,11 +14,11 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { vi } from 'vitest';
-import { Client } from "@modelcontextprotocol/client";
-import { McpServer, InMemoryTransport, SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/server";
-import type { CallToolResult, ElicitRequest, ElicitResult } from "@modelcontextprotocol/server";
+import { Client } from '@modelcontextprotocol/client';
+import { McpServer, InMemoryTransport } from '@modelcontextprotocol/server';
+import type { CallToolResult, ElicitRequest, ElicitResult } from '@modelcontextprotocol/server';
 import type { Mock } from 'vitest';
-import { surfaceToolHints } from '../server/index.js';
+import { SERVER_PROTOCOL_VERSIONS, surfaceToolHints } from '../server/index.js';
 
 /** A function that registers one or more tools onto a fresh `McpServer`. */
 export type RegisterFn = (server: McpServer) => void | Promise<void>;
@@ -61,7 +61,7 @@ export async function createTestHarness(
 ): Promise<TestHarness> {
   const server = new McpServer(
     { name: 'test', version: '0.0.0' },
-    { supportedProtocolVersions: ['2026-07-28', ...SUPPORTED_PROTOCOL_VERSIONS] },
+    { supportedProtocolVersions: [...SERVER_PROTOCOL_VERSIONS] },
   );
   surfaceToolHints(server);
   await registerFn(server);

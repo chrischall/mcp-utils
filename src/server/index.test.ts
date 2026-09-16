@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { Client } from "@modelcontextprotocol/client";
-import { McpServer, InMemoryTransport } from "@modelcontextprotocol/server";
-import type { Transport } from "@modelcontextprotocol/server";
+import { Client } from '@modelcontextprotocol/client';
+import { McpServer, InMemoryTransport } from '@modelcontextprotocol/server';
+import type { Transport } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { createMcpServer, withGracefulShutdown, runMcp } from './index.js';
 import { McpToolError } from '../errors/index.js';
@@ -39,6 +39,15 @@ describe('createMcpServer', () => {
   it('returns an McpServer with the given name/version', async () => {
     const server = await createMcpServer({ name: 'x-mcp', version: '1.2.3', tools: [] });
     expect(server).toBeInstanceOf(McpServer);
+  });
+
+  it('advertises the 2026-07-28 protocol', async () => {
+    const server = await createMcpServer({ name: 'x-mcp', version: '1.2.3', tools: [] });
+    const discover = (server.server as unknown as {
+      _ondiscover(): { supportedVersions: string[] };
+    })._ondiscover();
+
+    expect(discover.supportedVersions).toContain('2026-07-28');
   });
 
   it('runs every ToolRegistrar with the server and deps', async () => {

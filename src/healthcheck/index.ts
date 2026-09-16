@@ -9,9 +9,9 @@
  * importing it from `/fetchproxy` failed at runtime with
  * `Cannot find package '@fetchproxy/server'`. Nothing here touches fetchproxy.
  */
-import type { McpServer } from "@modelcontextprotocol/server";
+import type { McpServer } from '@modelcontextprotocol/server';
 import { truncateErrorMessage, messageOf } from '../errors/index.js';
-import { z } from "zod";
+import { z } from 'zod';
 
 /**
  * Ladder arms for {@link registerCredentialHealthcheckTool}. Ordered by the
