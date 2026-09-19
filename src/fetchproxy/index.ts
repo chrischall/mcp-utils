@@ -1204,32 +1204,15 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
  * of `registerAdaptiveHealthcheckTool` or `runBridgeHealthcheck` can name every
  * type it hands over or gets back without a second import.
  *
- * Deliberately NOT in the `@deprecated` block below, and deliberately not
- * duplicated into it: `RegisterCredentialHealthcheckToolArgs` used to be
- * reachable from here only as a 0.19-era compatibility re-export slated for
- * removal, which would have taken `RegisterAdaptiveHealthcheckToolArgs['credential']`
- * with it — an export whose removal breaks a NON-deprecated API is not a
- * compatibility shim.
+ * These are NOT the 0.19-era compatibility re-export that used to sit below
+ * them and was removed in 1.0.0: `RegisterCredentialHealthcheckToolArgs` is
+ * what `RegisterAdaptiveHealthcheckToolArgs['credential']` is expressed in, so
+ * removing it would break a NON-deprecated API. An export whose removal breaks
+ * a live API is not a compatibility shim, which is why it stayed.
  */
 export type {
   HealthcheckToolResult,
   RegisterCredentialHealthcheckToolArgs,
-} from '../healthcheck/index.js';
-
-/**
- * @deprecated Import from `@chrischall/mcp-utils/healthcheck` instead.
- *
- * `registerCredentialHealthcheckTool` shipped here in 0.19.0–0.19.1 and moved
- * out because this module imports the optional `@fetchproxy/server` peer,
- * which most of its callers do not install. Re-exported so those releases keep
- * working rather than breaking under a patch-level change; it will be removed
- * in the next minor.
- */
-export {
-  registerCredentialHealthcheckTool,
-  type CredentialHealthcheckResult,
-  type CredentialHealthcheckArm,
-  type CredentialState,
 } from '../healthcheck/index.js';
 
 import {

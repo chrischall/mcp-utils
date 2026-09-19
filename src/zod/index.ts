@@ -93,8 +93,25 @@ export const schemaOrigin = z
  * `confirm: true` the tool returns a preview instead of performing the action.
  * (honeybook pay_invoice / sign_contract)
  *
- * @deprecated Use `requireConfirmation(ctx, options)` for stateless MCP
- * multi-round-trip confirmation. Retained while older servers migrate.
+ * @deprecated Prefer `requireConfirmation` where the client supports it — the
+ * confirmation is then a protocol exchange rather than a tool argument, so a
+ * model cannot satisfy the gate itself by setting a boolean. The description
+ * below is the weakness made literal: it tells an attacker-controlled model
+ * how to proceed.
+ *
+ * NOT scheduled for removal, and do not migrate a fleet to
+ * `requireConfirmation` without checking the surfaces it is called from.
+ * Measured 2026-09-19 against real clients: claude.ai declares no
+ * `elicitation` capability at all — its envelope is UI-extension only — so a
+ * gated tool answers `-32021` and is INERT there; Claude Desktop does not
+ * support elicitation; and Cowork declares the capability then never services
+ * it, hanging the call for 180s and attributing the failure to the server
+ * (anthropics/claude-ai-mcp#1046). A conformant server cannot detect that
+ * case, because the declaration is its only signal. Claude Code is the one
+ * surface measured working.
+ *
+ * This parameter has no such dependency: it is an argument, so it works on
+ * every client. That is the whole trade — weaker gate, universal reach.
  */
 export const schemaConfirm = z
   .boolean()
