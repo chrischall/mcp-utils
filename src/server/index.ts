@@ -9,7 +9,7 @@
  * This module collapses that 30–120 lines/MCP into three calls:
  *  - {@link createMcpServer} — build the server and apply the registrars.
  *  - {@link withGracefulShutdown} — SIGINT/SIGTERM → cleanup → exit.
- *  - {@link runMcp} — bootstrap + banner + connect + shutdown, the whole boot.
+ *  - {@link runMcp} — bootstrap + banner + serve + shutdown, the whole boot.
  *
  * It is deliberately transport- and domain-agnostic. The
  * deferred-config-error pattern (server boots before creds exist, so the host's
@@ -17,14 +17,35 @@
  * error) is preserved by keeping client/transport construction in the caller's
  * `deps`: both Pattern-A (fetchproxy bridge) and Pattern-B (direct/bearer) MCPs
  * build their client themselves and pass it through, so neither is coupled in.
+ *
+ * ## Why {@link runMcp} SERVES rather than connects
+ *
+ * Under the v2 SDK the protocol era is *instance state*, and only a serving
+ * ENTRY — `serveStdio` here, `createMcpHandler` over HTTP — marks an instance
+ * modern at construction. A hand-wired
+ * `server.connect(new StdioServerTransport())` never marks one, so the
+ * instance stays 2025-era and the 2026-era `server/discover` is answered
+ * `-32601 Method not found`. That was true of every fleet MCP at once, since
+ * all of them boot through here; found by @bschrib in
+ * chrischall/skylight-mcp#182 and fixed here rather than in 35 repos.
+ * `stdio.test.ts` pins it over a real pipe to a real child process, because an
+ * in-memory transport cannot see this class of bug — the broken server answers
+ * an `InMemoryTransport` perfectly.
  */
-import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
+import { serveStdio } from '@modelcontextprotocol/server/stdio';
+import type { StdioServerHandle } from '@modelcontextprotocol/server/stdio';
 import { McpServer, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/server';
 import type { Transport, CallToolResult } from '@modelcontextprotocol/server';
 import { McpToolError } from '../errors/index.js';
 import { errorResult } from '../response/index.js';
 
 export * from './confirmation.js';
+
+/**
+ * The handle {@link runMcp} returns — re-exported so a caller can name the
+ * type without importing the SDK's `/stdio` subpath itself.
+ */
+export type { StdioServerHandle } from '@modelcontextprotocol/server/stdio';
 
 /**
  * Registers one or more tools onto a fresh {@link McpServer}. `deps` is whatever
@@ -67,8 +88,8 @@ export interface CreateMcpServerOptions<TDeps = unknown> {
   banner?: string;
   /**
    * Transport hint. Carried for API symmetry with {@link runMcp}; this function
-   * never connects, so it only matters that the value is accepted. Defaults to
-   * `'stdio'`.
+   * never connects or serves, so it only matters that the value is accepted.
+   * Defaults to `'stdio'`.
    */
   transport?: TransportSpec;
   /**
@@ -140,9 +161,17 @@ export function surfaceToolHints(server: McpServer): void {
 
 /**
  * Build an {@link McpServer}, print the optional stderr banner, and apply every
- * tool registrar (awaiting async ones) — but do **not** connect a transport.
- * Connecting is {@link runMcp}'s job (or the caller's), which keeps this usable
- * from tests and from custom boot sequences.
+ * tool registrar (awaiting async ones) — but do **not** serve it. Serving is
+ * {@link runMcp}'s job (or the caller's), which keeps this usable from tests
+ * and from custom boot sequences.
+ *
+ * This is the **factory body**, and that is how to hand it to a serving entry:
+ * `serveStdio(() => createMcpServer({…}))` over stdio,
+ * `createMcpHandler(() => createMcpServer({…}))` over HTTP. Do NOT
+ * `server.connect(new StdioServerTransport())` the result — an instance no
+ * entry constructed stays 2025-era and answers `server/discover` with
+ * `-32601 Method not found` (see this module's header). {@link runMcp} is that
+ * wiring for the stdio case.
  */
 export async function createMcpServer<TDeps = unknown>(
   opts: CreateMcpServerOptions<TDeps>,
@@ -173,6 +202,15 @@ export async function createMcpServer<TDeps = unknown>(
 /** Signals {@link withGracefulShutdown} listens for. */
 export type ShutdownSignal = 'SIGINT' | 'SIGTERM';
 
+/**
+ * Anything {@link withGracefulShutdown} can tear down. Both shapes it is handed
+ * in practice satisfy it identically: an {@link McpServer}, and the
+ * {@link StdioServerHandle} {@link runMcp} returns.
+ */
+export interface Closeable {
+  close(): Promise<void>;
+}
+
 /** Options for {@link withGracefulShutdown}. */
 export interface GracefulShutdownOptions {
   /**
@@ -191,13 +229,18 @@ export interface GracefulShutdownOptions {
 
 /**
  * Wire SIGINT/SIGTERM to a one-shot graceful shutdown: run `onSignal` (e.g.
- * close the client/transport), close the server, then `process.exit(0)` (unless
+ * close the client/transport), close `target`, then `process.exit(0)` (unless
  * `exit: false`). Idempotent — a second signal mid-shutdown is ignored, and a
  * throwing `onSignal`/`close` is logged but still exits cleanly so a wedged
  * cleanup can't hang the host.
+ *
+ * `target` is the {@link StdioServerHandle} when called from {@link runMcp} —
+ * closing the handle closes whichever instance the connection pinned *and* the
+ * transport under it, which is strictly more than closing a server was. A bare
+ * {@link McpServer} is still accepted and behaves as before.
  */
 export function withGracefulShutdown(
-  server: Pick<McpServer, 'close'>,
+  target: Closeable,
   opts: GracefulShutdownOptions = {},
 ): void {
   const shouldExit = opts.exit ?? true;
@@ -209,7 +252,7 @@ export function withGracefulShutdown(
     void (async () => {
       try {
         if (opts.onSignal) await opts.onSignal(signal);
-        await server.close();
+        await target.close();
       } catch (err) {
         console.error(
           `[mcp-utils] error during graceful shutdown on ${signal}: ${
@@ -230,34 +273,104 @@ export function withGracefulShutdown(
 export interface RunMcpOptions<TDeps = unknown> extends CreateMcpServerOptions<TDeps> {
   /**
    * Graceful-shutdown wiring. `true` (default) installs SIGINT/SIGTERM handlers
-   * that close the server. `false` skips them. An object is passed straight to
-   * {@link withGracefulShutdown} (e.g. `{ onSignal: () => client.close() }`).
+   * that close the {@link StdioServerHandle}. `false` skips them. An object is
+   * passed straight to {@link withGracefulShutdown}
+   * (e.g. `{ onSignal: () => client.close() }`).
    */
   shutdown?: boolean | GracefulShutdownOptions;
+  /**
+   * How a 2025-era opening (a claim-less `initialize`, or any claim-less
+   * message) is handled. Defaults to `'serve'` — the connection is pinned to a
+   * 2025-era instance from the same factory and served exactly as a hand-wired
+   * stdio server served it.
+   *
+   * The default is deliberate and should stay: `'reject'` answers such an
+   * opening with the unsupported-protocol-version error, which silently drops
+   * every host that has not moved to the 2026 revision. A fleet MCP is reached
+   * by hosts we do not control, so the cost of serving an old client is a
+   * second instance and the cost of rejecting one is an MCP that looks broken.
+   */
+  legacy?: 'serve' | 'reject';
+  /**
+   * Out-of-band errors from the stdio entry — a factory that threw, a wire
+   * failure, a malformed opening. Defaults to a one-line stderr log.
+   *
+   * There is a reason this has a default rather than being optional-and-silent:
+   * with the factory model a registrar no longer throws out of `runMcp` (there
+   * is no instance until a client connects), so without a sink a boot-time
+   * misconfiguration would be invisible on both channels.
+   *
+   * IT ALSO CHANGES WHAT A BOOT FAILURE LOOKS LIKE, and an operator needs to
+   * know which signal to watch. Under the old `await runMcp(...)` a throwing
+   * registrar rejected and the process exited non-zero — the host saw "server
+   * failed to start". Now the entry catches it, reports here, and KEEPS THE
+   * CONNECTION OPEN answering `-32603 Internal server error`, re-running the
+   * factory on every request. So a misconfigured server presents as connected
+   * and broken rather than as dead, and stderr is the only place that says so.
+   * The fleet's deferred-config-error pattern means registrars are not supposed
+   * to throw at boot, which is why this is a documented consequence and not a
+   * defect — but it is the failure mode to recognise.
+   */
+  onerror?: (error: Error) => void;
 }
 
 /**
- * The whole boot in one call: build the server, apply registrars, print the
- * banner, install graceful-shutdown handlers, and connect the transport
- * (defaulting to a {@link StdioServerTransport}). Returns the connected server.
+ * The whole boot in one call: print the banner, serve stdio through
+ * {@link serveStdio} with {@link createMcpServer} as the factory, and install
+ * graceful-shutdown handlers. Returns the {@link StdioServerHandle}.
  *
  * Pattern-A and Pattern-B MCPs both build their client/transport in `deps` and
  * pass `onSignal: () => client.close()` via `shutdown`, so this stays agnostic
  * to how creds are resolved.
+ *
+ * ## What callers must know about the factory
+ *
+ * The serving entry owns the era decision, so **the registrars run per served
+ * instance, not once at boot**: once for a connection, and a second time when
+ * a client probes with `server/discover` and then falls back to the 2025-era
+ * `initialize` (the probe instance is discarded). Anything expensive or
+ * credential-bearing therefore belongs in `deps`, built ONCE before this call,
+ * exactly as the deferred-config-error pattern already asks — a lazy
+ * `getClient` built outside and threaded through `deps` keeps resolving
+ * credentials once, while a client constructed inside a registrar would be
+ * rebuilt per instance. Registrars must also be side-effect-free beyond
+ * registering (no port binds, no `process.on`).
+ *
+ * `banner` is printed HERE, once, before anything is served — not inside the
+ * factory — so a two-instance connection still logs one line.
+ *
+ * Returns synchronously: there is no server instance yet to return, which is
+ * why the old `Promise<McpServer>` could not be kept honest. `await runMcp(…)`
+ * still compiles and still means "boot the server", which is what every fleet
+ * consumer writes.
  */
-export async function runMcp<TDeps = unknown>(
-  opts: RunMcpOptions<TDeps>,
-): Promise<McpServer> {
-  const server = await createMcpServer(opts);
-
-  const shutdown = opts.shutdown ?? true;
-  if (shutdown !== false) {
-    withGracefulShutdown(server, shutdown === true ? {} : shutdown);
+export function runMcp<TDeps = unknown>(opts: RunMcpOptions<TDeps>): StdioServerHandle {
+  // Hoisted out of the factory: one boot, one banner, however many instances
+  // the connection's opening exchange ends up constructing.
+  if (opts.banner !== undefined) {
+    // stderr only: stdout carries the JSON-RPC frames over stdio transport.
+    console.error(opts.banner);
   }
 
   const spec: TransportSpec = opts.transport ?? 'stdio';
-  const transport: Transport = spec === 'stdio' ? new StdioServerTransport() : spec;
-  await server.connect(transport);
 
-  return server;
+  const handle = serveStdio(() => createMcpServer({ ...opts, banner: undefined }), {
+    legacy: opts.legacy ?? 'serve',
+    onerror:
+      opts.onerror ??
+      ((error: Error) => {
+        console.error(`[mcp-utils] stdio server error: ${error.message}`);
+      }),
+    // `'stdio'` means "let the entry make its own StdioServerTransport over
+    // this process"; anything else is the caller's transport, which the entry
+    // then owns (it starts it, pumps it, and closes it with the handle).
+    ...(spec === 'stdio' ? {} : { transport: spec }),
+  });
+
+  const shutdown = opts.shutdown ?? true;
+  if (shutdown !== false) {
+    withGracefulShutdown(handle, shutdown === true ? {} : shutdown);
+  }
+
+  return handle;
 }

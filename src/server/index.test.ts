@@ -10,7 +10,7 @@ import {
   runMcp,
 } from './index.js';
 import { McpToolError } from '../errors/index.js';
-import type { ToolRegistrar } from './index.js';
+import type { RunMcpOptions, ToolRegistrar } from './index.js';
 
 /** A sp-able stub Transport that records start/close. */
 function makeStubTransport(): Transport & { started: number; closed: number } {
@@ -25,6 +25,29 @@ function makeStubTransport(): Transport & { started: number; closed: number } {
     },
     async close() {
       this.closed++;
+    },
+  };
+}
+
+/**
+ * Boot through `runMcp` over the server half of an in-memory pair and connect
+ * a real {@link Client} to the other half.
+ *
+ * In-memory is the right tool for "did the registrars see `deps`" and "does a
+ * client get served at all"; it is the WRONG tool for anything about the
+ * protocol era, which is why `stdio.test.ts` spawns a process instead.
+ */
+async function servedPair<TDeps>(opts: Omit<RunMcpOptions<TDeps>, 'transport'>) {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'c', version: '0' });
+  const handle = runMcp({ ...opts, transport: serverTransport } as RunMcpOptions<TDeps>);
+  await client.connect(clientTransport);
+  return {
+    client,
+    handle,
+    close: async () => {
+      await client.close();
+      await handle.close();
     },
   };
 }
@@ -187,78 +210,129 @@ describe('runMcp', () => {
     process.removeAllListeners('SIGTERM');
   });
 
-  it('connects the provided transport and returns the server', async () => {
+  it('starts the provided transport and returns the stdio handle', async () => {
     const transport = makeStubTransport();
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const server = await runMcp({
+    const handle = runMcp({
       name: 'x',
       version: '0',
       tools: [],
       transport,
       shutdown: false,
     });
-    expect(server).toBeInstanceOf(McpServer);
+    expect(typeof handle.close).toBe('function');
     expect(transport.started).toBe(1);
     expect(errSpy).not.toHaveBeenCalled();
-    await server.close();
+    await handle.close();
+    expect(transport.closed).toBe(1);
   });
 
-  it('prints the banner before connecting', async () => {
+  // `await` on a non-promise is legal, and every one of the 60 fleet
+  // consumers writes `await runMcp({...})` and discards the result — so the
+  // return-type change is source-compatible and this is the case that says so.
+  it('is still awaitable, as every fleet entrypoint writes it', async () => {
+    const transport = makeStubTransport();
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const handle = await runMcp({ name: 'x', version: '0', tools: [], transport, shutdown: false });
+    expect(transport.started).toBe(1);
+    await handle.close();
+  });
+
+  // The banner belongs to the BOOT, not to an instance: the factory can run
+  // more than once for one connection (probe → legacy fallback), and a banner
+  // inside it would print once per instance.
+  it('prints the banner once at boot, before any instance exists', async () => {
     const transport = makeStubTransport();
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const server = await runMcp({
+    const seen: unknown[] = [];
+    const handle = runMcp({
       name: 'x',
       version: '0',
-      tools: [],
+      tools: [() => void seen.push('registered')],
       banner: 'BANNER',
       transport,
       shutdown: false,
     });
-    expect(errSpy).toHaveBeenCalledWith('BANNER');
-    await server.close();
+    expect(errSpy).toHaveBeenCalledExactlyOnceWith('BANNER');
+    expect(seen).toEqual([]); // nothing opened the connection, so no factory run
+    await handle.close();
   });
 
-  it('passes deps through to registrars', async () => {
-    const transport = makeStubTransport();
+  it('passes deps through to the registrars of every instance it builds', async () => {
     const deps = { token: 'abc' };
     const seen: unknown[] = [];
     const reg: ToolRegistrar<typeof deps> = (_s, d) => {
       seen.push(d);
     };
-    const server = await runMcp({
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { client, handle, close } = await servedPair({
       name: 'x',
       version: '0',
       tools: [reg],
       deps,
-      transport,
       shutdown: false,
     });
+    await client.listTools();
     expect(seen).toEqual([deps]);
-    await server.close();
+    expect(handle).toBeDefined();
+    await close();
   });
 
   it('installs graceful shutdown handlers by default', async () => {
     const transport = makeStubTransport();
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const before = process.listenerCount('SIGTERM');
-    const server = await runMcp({ name: 'x', version: '0', tools: [], transport });
+    const handle = runMcp({ name: 'x', version: '0', tools: [], transport });
     expect(process.listenerCount('SIGTERM')).toBe(before + 1);
-    await server.close();
+    await handle.close();
   });
 
-  it("defaults transport to 'stdio' when none is given", async () => {
-    // Connecting a real StdioServerTransport would grab process stdio; we just
-    // assert the default is resolved without throwing by stubbing connect.
+  it("defaults transport to 'stdio' — a real stdio transport over this process", async () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const connectSpy = vi
-      .spyOn(McpServer.prototype, 'connect')
-      .mockResolvedValue(undefined);
-    const server = await runMcp({ name: 'x', version: '0', tools: [], shutdown: false });
-    expect(connectSpy).toHaveBeenCalledTimes(1);
-    // The argument should be a StdioServerTransport-shaped object (has start()).
-    const arg = connectSpy.mock.calls[0]![0] as Transport;
-    expect(typeof arg.start).toBe('function');
-    await server.close();
+    const before = process.stdin.listenerCount('data');
+    const handle = runMcp({ name: 'x', version: '0', tools: [], shutdown: false });
+    // serveStdio built and started a StdioServerTransport over process.stdio.
+    expect(process.stdin.listenerCount('data')).toBe(before + 1);
+    await handle.close();
+    expect(process.stdin.listenerCount('data')).toBe(before);
+  });
+
+  it('serves 2025-era openings by default, rather than rejecting them', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { client, close } = await servedPair({ name: 'x', version: '0', tools: [], shutdown: false });
+    // `Client.connect` performs the 2025 initialize handshake; under
+    // `legacy: 'reject'` it would be answered with the
+    // unsupported-protocol-version error instead.
+    expect(client.getServerVersion()).toEqual({ name: 'x', version: '0' });
+    await close();
+  });
+
+  it('reports an out-of-band error to onerror rather than swallowing it', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const errors: Error[] = [];
+    const transport = makeStubTransport();
+    const handle = runMcp({
+      name: 'x',
+      version: '0',
+      tools: [
+        () => {
+          throw new Error('registrar exploded');
+        },
+      ],
+      transport,
+      shutdown: false,
+      onerror: (err) => errors.push(err),
+    });
+    // Drive one opening message through the wire the entry is pumping.
+    transport.onmessage?.({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'c', version: '0' } },
+    });
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    expect(errors[0]!.message).toContain('registrar exploded');
+    await handle.close();
   });
 });
 
@@ -363,26 +437,20 @@ describe('tool error hints', () => {
   });
 
   it('is on by default through runMcp too', async () => {
-    // runMcp connects the transport itself, so hand it the server half of the
-    // pair rather than connecting a second one afterwards.
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: 'c', version: '0' });
-    const [server] = await Promise.all([
-      runMcp<undefined>({
-        name: 't',
-        version: '0',
-        transport: serverTransport,
-        shutdown: false,
-        tools: [
-          (s) =>
-            s.registerTool('t', {}, async () => {
-              throw new McpToolError('bad', { hint: 'do the thing' });
-            }),
-        ],
-      }),
-      client.connect(clientTransport),
-    ]);
+    // runMcp owns the transport, so hand it the server half of the pair rather
+    // than connecting a second one afterwards.
+    const { client, close } = await servedPair<undefined>({
+      name: 't',
+      version: '0',
+      shutdown: false,
+      tools: [
+        (s) =>
+          s.registerTool('t', {}, async () => {
+            throw new McpToolError('bad', { hint: 'do the thing' });
+          }),
+      ],
+    });
     expect(textOf(await client.callTool({ name: 't' }))).toContain('Hint: do the thing');
-    await Promise.all([client.close(), server.close()]);
+    await close();
   });
 });
