@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.0](https://github.com/chrischall/mcp-utils/compare/v0.28.0...v1.0.0) (2026-09-19)
+
+
+### Bug Fixes
+
+* **release:** recover the 1.0.0 the parser dropped ([#250](https://github.com/chrischall/mcp-utils/issues/250)) ([1ea2abf](https://github.com/chrischall/mcp-utils/commit/1ea2abf87cfd559e2805e41dca050ff8b4d385d4))
+* **server:** redact the default error sink, and test the half of `legacy` that refuses ([#247](https://github.com/chrischall/mcp-utils/issues/247)) ([4c9c533](https://github.com/chrischall/mcp-utils/commit/4c9c5336d8983b918bb210df4e8e1dedec6b139c))
+
 ## [0.28.0](https://github.com/chrischall/mcp-utils/compare/v0.27.1...v0.28.0) (2026-09-16)
 
 
