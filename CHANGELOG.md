@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.0](https://github.com/chrischall/mcp-utils/compare/v0.28.0...v1.0.0) (2026-09-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* three changes. First, `runMcp` returns a `StdioServerHandle` synchronously instead of a promise of an `McpServer`. That landed in #245 and belongs in the 1.0.0 notes, but release-please could not parse that commit and dropped it, so the release would otherwise describe two incidental fixes and never mention the change every consumer has to read. The migration cost is zero: consumers write `await runMcp` and discard the result, and awaiting a non-promise is legal. There is no server instance until a client connects, because the opening exchange picks the era and pins one instance from the factory, so the old return value could not be kept honest. Second, the peer ranges are now bounded and `engines.node` is declared, so an install that was silently accepted may now warn; the repos still on `@fetchproxy/server` 2.x are what this surfaces. Third, `registerCredentialHealthcheckTool` and its three companion types are no longer re-exported from the `/fetchproxy` subpath — import them from `@chrischall/mcp-utils/healthcheck` instead.
+
+### Bug Fixes
+
+* bound the wildcard peers, declare a node floor, and drop the drained re-export ([#251](https://github.com/chrischall/mcp-utils/issues/251)) ([9d67f13](https://github.com/chrischall/mcp-utils/commit/9d67f13cde1ee333ef594246fbb6caa9a4b8934a))
+* **release:** recover the 1.0.0 the parser dropped ([#250](https://github.com/chrischall/mcp-utils/issues/250)) ([1ea2abf](https://github.com/chrischall/mcp-utils/commit/1ea2abf87cfd559e2805e41dca050ff8b4d385d4))
+* **server:** redact the default error sink, and test the half of `legacy` that refuses ([#247](https://github.com/chrischall/mcp-utils/issues/247)) ([4c9c533](https://github.com/chrischall/mcp-utils/commit/4c9c5336d8983b918bb210df4e8e1dedec6b139c))
+
 ## [0.28.0](https://github.com/chrischall/mcp-utils/compare/v0.27.1...v0.28.0) (2026-09-16)
 
 
