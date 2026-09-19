@@ -56,19 +56,47 @@ import { createFetchproxyTransport } from '@chrischall/mcp-utils/fetchproxy';
 ```ts
 import { runMcp, textResult } from '@chrischall/mcp-utils';
 
+// Build anything expensive or credential-bearing ONCE, out here.
+const client = makeLazyClient();
+
 await runMcp({
   name: 'my-mcp',
   version: '1.0.0',
-  register: (server) => {
-    server.tool('ping', {}, async () => textResult({ ok: true }));
-  },
+  deps: client,
+  tools: [
+    (server, api) => {
+      server.registerTool('ping', {}, async () => textResult({ ok: api.ready }));
+    },
+  ],
   // shutdown: { onSignal: () => client.close() },
 });
 ```
 
-`runMcp` wires the server to a stdio transport and installs `SIGINT`/`SIGTERM`
-handlers via `withGracefulShutdown`. Use `createMcpServer` directly if you need
-the server instance without connecting a transport.
+`runMcp` serves stdio through the SDK's `serveStdio` entry and installs
+`SIGINT`/`SIGTERM` handlers via `withGracefulShutdown`. Use `createMcpServer`
+directly if you need the instance itself — but hand it to a serving entry
+(`serveStdio(() => createMcpServer({…}))` or
+`createMcpHandler(() => createMcpServer({…}))`) rather than calling
+`server.connect(new StdioServerTransport())`: under the v2 SDK the protocol era
+is instance state and only a serving entry marks an instance modern, so a
+hand-wired connect answers `server/discover` with `-32601 Method not found`.
+
+Two consequences of the factory model are worth knowing:
+
+- **The registrars run per served instance, not once at boot** — once per
+  connection, and twice when a client probes with `server/discover` and then
+  falls back to the 2025-era `initialize` (the probe instance is discarded).
+  Keep clients and sessions in `deps`, built once before the call; registrars
+  should only register.
+- **`runMcp` returns a `StdioServerHandle`, synchronously** — there is no
+  instance until a client connects, so `Promise<McpServer>` could not be kept
+  honest. `await runMcp({…})` still compiles and still reads as "boot the
+  server", and `handle.close()` is what graceful shutdown closes.
+
+A 2025-era client is still served: `legacy` defaults to `'serve'`, which pins a
+2025-era instance for a claim-less opening. `'reject'` would answer such an
+opening with the unsupported-protocol-version error, silently dropping every
+host that has not moved to the 2026 revision.
 
 Both render a thrown `McpToolError`'s `hint` into the failing tool's text:
 

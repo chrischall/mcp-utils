@@ -54,6 +54,16 @@ export interface TestHarnessOptions {
  *
  * Applies the same error-hint surfacing `createMcpServer` does, so a tool's
  * failure text under test is the text production returns.
+ *
+ * What it deliberately does NOT reproduce is the protocol ERA. This pair is
+ * hand-wired, so the instance is 2025-era and the 2026-era `server/discover`
+ * is not installed on it — which is exactly the shape that hid
+ * chrischall/skylight-mcp#182, where every fleet MCP answered
+ * `server/discover` with `-32601 Method not found` in production while every
+ * harness test stayed green. Tool behaviour belongs here; anything about the
+ * era or the boot path has to go through the real serving entry, the way
+ * `mcp-utils`' own `src/server/stdio.test.ts` spawns a process and speaks over
+ * a pipe.
  */
 export async function createTestHarness(
   registerFn: RegisterFn,
