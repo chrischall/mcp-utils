@@ -101,14 +101,25 @@ class StdioClient {
   kill(): void {
     this.#child.kill('SIGKILL');
   }
+
+  /** SIGTERM, i.e. the signal `withGracefulShutdown` is supposed to catch. */
+  terminate(): void {
+    this.#child.kill('SIGTERM');
+  }
+
+  /** The child itself, for awaiting its exit code. */
+  get child(): ChildProcessWithoutNullStreams {
+    return this.#child;
+  }
 }
 
 let client: StdioClient | undefined;
 
-function start(): StdioClient {
+function start(env: Record<string, string> = {}): StdioClient {
   const child = spawn(process.execPath, [FIXTURE], {
     cwd: REPO_ROOT,
     stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, ...env },
   });
   client = new StdioClient(child);
   return client;
@@ -209,12 +220,69 @@ describe('runMcp over real stdio', () => {
   // McpServer. A signal that reached default handling would exit with a null
   // code and the signal name, so `0` is the proof the handler ran.
   it('exits cleanly on SIGTERM, through the handle graceful shutdown closes', async () => {
-    const child = spawn(process.execPath, [FIXTURE], { cwd: REPO_ROOT, stdio: ['pipe', 'pipe', 'pipe'] });
-    child.stderr.resume();
-    child.stdout.resume();
-    await new Promise((r) => setTimeout(r, 300));
-    child.kill('SIGTERM');
-    const [code] = (await once(child, 'exit')) as [number | null, NodeJS.Signals | null];
+    // Wait for a marker the fixture prints once `runMcp` has RETURNED, which
+    // is the first moment `withGracefulShutdown` has installed its handlers.
+    // Two earlier shapes of this test were both races. A fixed 300ms sleep was
+    // the obvious one. The banner is the subtle one, and it is WORSE: `runMcp`
+    // prints the banner BEFORE calling `serveStdio` and installs the handlers
+    // after, so waiting on it synchronises on a point strictly earlier than
+    // the thing under test. Signal too early and SIGTERM reaches default
+    // handling, exiting with a null code and the signal name — which is why
+    // `0` below is the proof the handler ran, and why the marker has to come
+    // from after the call rather than from inside it.
+    const mcp = start();
+    await mcp.stderrSettles((lines) => lines.includes('fixture:handlers-installed'));
+    mcp.terminate();
+    const [code] = (await once(mcp.child, 'exit')) as [number | null, NodeJS.Signals | null];
     expect(code).toBe(0);
+  });
+
+  // `legacy` is a new public option and this is the branch that turns hosts
+  // away; the default `'serve'` is covered by the legacy-era cases above.
+  // Without this, half of a public option ships unexercised.
+  it("refuses a 2025-era opening when legacy is 'reject', and stays open after", async () => {
+    const mcp = start({ FIXTURE_LEGACY: 'reject' });
+    await mcp.stderrSettles((lines) => lines.includes('fixture-mcp banner'));
+
+    // `meta: null` is the claim-less (2025) opening, and is deliberate: an
+    // explicit `undefined` would take the modern default and quietly turn this
+    // into a second modern-path assertion.
+    const refused = await mcp.request(
+      'initialize',
+      { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'legacy-probe', version: '0' } },
+      null,
+    );
+    expect(refused.error).toBeDefined();
+    expect(refused.result).toBeUndefined();
+
+    // The documented half a refusal test usually forgets: the connection is
+    // supposed to STAY OPEN for a modern opening rather than being torn down.
+    const listed = await mcp.request('tools/list');
+    expect(listed.error).toBeUndefined();
+    expect((listed.result?.tools as unknown[]).length).toBeGreaterThan(0);
+  });
+  // The redaction added to the default `onerror` had no test: the existing
+  // onerror case passes its OWN handler, which bypasses the default entirely —
+  // so the one line that actually reaches an operator's log was unexercised.
+  // This drives a credential-shaped factory throw through the real default.
+  it('redacts a credential in the default onerror sink', async () => {
+    const secret = 'sk-live-ABCDEF0123456789ABCDEF';
+    const mcp = start({ FIXTURE_THROW_SECRET: secret });
+    await mcp.stderrSettles((lines) => lines.includes('fixture:handlers-installed'));
+
+    // Opening the connection runs the factory, which throws. The entry catches
+    // it, reports through `onerror`, and keeps serving -32603 rather than
+    // exiting — so the request below both triggers the sink and proves the
+    // documented "connected but broken" behaviour.
+    const answered = await mcp.request('tools/list');
+    expect(answered.error).toBeDefined();
+
+    const lines = await mcp.stderrSettles((l) => l.some((x) => x.includes('stdio server error')));
+    const reported = lines.filter((l) => l.includes('stdio server error'));
+    expect(reported.length).toBeGreaterThan(0);
+    // The point of the change: the secret must not survive into the log line,
+    // while the line still says enough to diagnose the failure.
+    expect(reported.join('\n')).not.toContain(secret);
+    expect(reported.join('\n')).toContain('boot failed');
   });
 }, 30_000);

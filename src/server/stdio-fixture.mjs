@@ -38,11 +38,23 @@ await runMcp({
   version: '9.9.9',
   banner: 'fixture-mcp banner',
   deps,
+  // Default `'serve'` unless a test asks for the other branch. `legacy` is a
+  // new public option and `'reject'` is the half that drops pre-2026 hosts, so
+  // it needs driving over a real pipe rather than trusting the pass-through.
+  ...(process.env.FIXTURE_LEGACY ? { legacy: process.env.FIXTURE_LEGACY } : {}),
   tools: [
     (server, d) => {
       // One line per constructed instance: the test counts these to see how
       // many times the factory ran.
       console.error('fixture:registrars-ran');
+      // A credential-shaped failure on demand, thrown from the FACTORY so it
+      // travels the entry's real error path — caught, handed to `reportError`,
+      // and printed by whatever `onerror` is in force. The fixture passes
+      // none, so that is the package default, `redactSecrets` and all. A timer
+      // throw would be an uncaught exception and never reach the sink.
+      if (process.env.FIXTURE_THROW_SECRET) {
+        throw new Error(`boot failed: token=${process.env.FIXTURE_THROW_SECRET}`);
+      }
       server.registerTool(
         'echo',
         { description: 'Echo a message back', inputSchema: z.object({ msg: z.string() }) },
@@ -51,3 +63,10 @@ await runMcp({
     },
   ],
 });
+
+// Printed only once `runMcp` has RETURNED, which is the first moment
+// `withGracefulShutdown` has installed its SIGINT/SIGTERM handlers. The banner
+// cannot stand in for this: `runMcp` prints it BEFORE calling `serveStdio`,
+// and installs the handlers after — so a test that signals on the banner is
+// still racing the boot, just at a different point.
+console.error('fixture:handlers-installed');
