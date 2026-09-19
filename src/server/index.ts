@@ -27,7 +27,8 @@
  * instance stays 2025-era and the 2026-era `server/discover` is answered
  * `-32601 Method not found`. That was true of every fleet MCP at once, since
  * all of them boot through here; found by @bschrib in
- * chrischall/skylight-mcp#182 and fixed here rather than in 35 repos.
+ * chrischall/skylight-mcp#182 and fixed here rather than in the 60 repos
+ * that call `runMcp`.
  * `stdio.test.ts` pins it over a real pipe to a real child process, because an
  * in-memory transport cannot see this class of bug — the broken server answers
  * an `InMemoryTransport` perfectly.
@@ -36,7 +37,7 @@ import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import type { StdioServerHandle } from '@modelcontextprotocol/server/stdio';
 import { McpServer, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/server';
 import type { Transport, CallToolResult } from '@modelcontextprotocol/server';
-import { McpToolError } from '../errors/index.js';
+import { McpToolError, redactSecrets } from '../errors/index.js';
 import { errorResult } from '../response/index.js';
 
 export * from './confirmation.js';
@@ -359,7 +360,14 @@ export function runMcp<TDeps = unknown>(opts: RunMcpOptions<TDeps>): StdioServer
     onerror:
       opts.onerror ??
       ((error: Error) => {
-        console.error(`[mcp-utils] stdio server error: ${error.message}`);
+        // Through `redactSecrets` like every other error this package formats.
+        // It matters more here than most: this sink is the only channel a
+        // boot-time failure has left (the entry no longer lets a throwing
+        // registrar exit the process), and the things that throw at boot are
+        // exactly the credential-shaped ones — a bad token, a malformed
+        // connection string — so the unredacted message is the likeliest to
+        // carry a secret into a log an operator then pastes somewhere.
+        console.error(`[mcp-utils] stdio server error: ${redactSecrets(error.message)}`);
       }),
     // `'stdio'` means "let the entry make its own StdioServerTransport over
     // this process"; anything else is the caller's transport, which the entry

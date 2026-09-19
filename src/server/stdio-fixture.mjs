@@ -38,6 +38,10 @@ await runMcp({
   version: '9.9.9',
   banner: 'fixture-mcp banner',
   deps,
+  // Default `'serve'` unless a test asks for the other branch. `legacy` is a
+  // new public option and `'reject'` is the half that drops pre-2026 hosts, so
+  // it needs driving over a real pipe rather than trusting the pass-through.
+  ...(process.env.FIXTURE_LEGACY ? { legacy: process.env.FIXTURE_LEGACY } : {}),
   tools: [
     (server, d) => {
       // One line per constructed instance: the test counts these to see how
