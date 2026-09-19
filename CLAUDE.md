@@ -92,3 +92,24 @@ why.
 ## Related
 
 `skills/mcp-fleet-builder/SKILL.md` documents how to build/modify a fleet MCP *on top of* this library (archetypes: bearer, cookie-session, fetchproxy, rate-limited-public-API+OAuth). Read it when changing an export that the fleet's bootstrap or client patterns depend on.
+
+<!-- release-message:v1 -->
+## Commit bodies and the release parser
+
+**Write nothing after a `BREAKING CHANGE:` footer.** release-please parses the
+squash message with `@conventional-commits/parser`, a strict PEG grammar, and
+DROPS a commit it cannot parse — no changelog entry, no version bump, and a
+green run. Once the grammar enters the footer section, every later paragraph
+must itself be a valid footer (`token: value`, where the token has no spaces).
+Ordinary prose after the footer therefore fails the whole commit.
+
+This is not hypothetical here: `21ef3f3` (`fix(server)!: boot through
+serveStdio`, #245) was silently dropped for exactly this reason — its body
+continued with `Also in this change, each with a test:` after the BREAKING
+CHANGE footer, which the grammar read as a malformed footer token. The
+breaking change vanished and release-please proposed 0.28.1 instead of 1.0.0.
+
+So: put every paragraph of explanation ABOVE the footer, and let
+`BREAKING CHANGE:` be the last thing in the message. When a release looks
+wrong, grep the release-please run log for `could not be parsed` before
+anything else — the failure is silent by design.
