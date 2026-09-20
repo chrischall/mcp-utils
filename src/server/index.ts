@@ -41,6 +41,7 @@ import { McpToolError, redactSecrets } from '../errors/index.js';
 import { errorResult } from '../response/index.js';
 
 export * from './confirmation.js';
+import { withCallSignal } from '../cancel/index.js';
 
 /**
  * The handle {@link runMcp} returns — re-exported so a caller can name the
@@ -117,6 +118,29 @@ function hintResultOrRethrow(err: unknown): CallToolResult {
 }
 
 /**
+ * The caller's `AbortSignal`, dug out of whatever the SDK passed.
+ *
+ * The context is the LAST argument on both shapes the SDK uses — `(args,
+ * ctx)` for a tool with an `inputSchema` and `(ctx)` for one without — and
+ * the signal hangs off `mcpReq`, not off the context itself. That level is
+ * worth stating because the obvious guess is wrong: `ctx.signal` is
+ * undefined in 2.0.0, and a probe that looked there concluded the SDK
+ * delivered no cancellation at all.
+ *
+ * Every step is checked rather than asserted. This runs on the tool path for
+ * every call, and a wrapper that throws while reaching for an optional field
+ * would break every tool in the fleet to add a feature none of them had.
+ */
+function callSignalFrom(args: readonly unknown[]): AbortSignal | undefined {
+  const ctx = args.at(-1);
+  if (typeof ctx !== 'object' || ctx === null) return undefined;
+  const req = (ctx as { mcpReq?: unknown }).mcpReq;
+  if (typeof req !== 'object' || req === null) return undefined;
+  const signal = (req as { signal?: unknown }).signal;
+  return signal instanceof AbortSignal ? signal : undefined;
+}
+
+/**
  * Wrap `server.registerTool` so every tool handler surfaces its error `hint`.
  *
  * Why this lives here rather than in each repo: the MCP tool boundary renders
@@ -149,15 +173,29 @@ export function surfaceToolHints(server: McpServer): void {
     config: unknown,
     cb: (...args: unknown[]) => CallToolResult | Promise<CallToolResult>,
   ): unknown =>
-    register(name, config, (...args: unknown[]) => {
-      let result: CallToolResult | Promise<CallToolResult>;
-      try {
-        result = cb(...args);
-      } catch (err) {
-        return hintResultOrRethrow(err);
-      }
-      return result instanceof Promise ? result.catch(hintResultOrRethrow) : result;
-    });
+    register(name, config, (...args: unknown[]) =>
+      // THE CALLER'S CANCELLATION, made ambient for the whole handler
+      // (`cancel/index.ts`). The SDK delivers it and the fleet ignored it:
+      // measured against @modelcontextprotocol/server 2.0.0, a cancelled
+      // call aborts `ctx.mcpReq.signal` with the caller's reason and the
+      // handler runs to completion regardless — so the HTTP request stays
+      // in flight, the child keeps burning metered CPU, and the upstream
+      // keeps being hit for somebody who has gone. claude.ai sent 101
+      // cancellations in the week to 2026-09-20.
+      //
+      // Here because this is the one wrapper every tool already passes
+      // through: threading the signal by hand would mean editing several
+      // hundred handlers and missing exactly the ones nobody edits.
+      withCallSignal(callSignalFrom(args), () => {
+        let result: CallToolResult | Promise<CallToolResult>;
+        try {
+          result = cb(...args);
+        } catch (err) {
+          return hintResultOrRethrow(err);
+        }
+        return result instanceof Promise ? result.catch(hintResultOrRethrow) : result;
+      }),
+    );
 }
 
 /**

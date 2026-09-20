@@ -32,7 +32,7 @@ import light:
 
 | Import | Contents |
 | --- | --- |
-| `@chrischall/mcp-utils` | core barrel: `server` + `response` + `errors` + `config` + `fs` + `http` + `concurrency` + `dates` + `zod` + `auth` + `scrape` |
+| `@chrischall/mcp-utils` | core barrel: `server` + `response` + `errors` + `config` + `fs` + `http` + `cancel` + `concurrency` + `dates` + `zod` + `auth` + `scrape` |
 | `@chrischall/mcp-utils/session` | session registry, session store, state persistence, token manager, cookie-session manager |
 | `@chrischall/mcp-utils/fetchproxy` | fetchproxy transport adapter, bot-wall / retry / concurrency helpers |
 | `@chrischall/mcp-utils/healthcheck` | credential-style healthcheck factory (no fetchproxy peer needed) |
@@ -422,6 +422,40 @@ const rows = await runBoundedBatch(ids, (id, signal) => fetchRow(id, signal), {
 a single hung row can't wedge the call. It always returns a full-length,
 input-ordered array. `setTimer`/`clearTimer` are injectable for tests. This
 hoists zillow's bulk-tool deadline + `pending`-backfill primitive.
+
+### `cancel` — the caller's cancellation, made ambient
+
+MCP clients cancel, and the SDK delivers it: `ctx.mcpReq.signal` aborts with
+the caller's reason. Measured on the mcp-host fleet, claude.ai sent
+`notifications/cancelled` 101 times in the week to 2026-09-20 — and every
+handler ran to completion regardless, because nothing watched it. A cancelled
+call kept its HTTP request in flight, kept burning the CPU a hosted child is
+metered on, and kept hitting an upstream that may charge for it.
+
+`surfaceToolHints` now puts that signal in an `AsyncLocalStorage` for the
+handler's whole async extent, so code several layers down can honour it
+without every tool threading it through:
+
+```ts
+import { currentCallSignal, killOnCancel, throwIfCancelled } from '@chrischall/mcp-utils';
+
+// `createApiClient` already folds it into its own timeout — nothing to do.
+// For a raw fetch:
+await fetch(url, { signal: currentCallSignal() });
+
+// For a spawned child, which passing a signal to fetch does nothing about:
+const done = killOnCancel(child);
+try { /* … */ } finally { done(); }   // the disposer is required
+
+// For a long loop with no fetch to hang the signal on:
+for (const page of pages) { throwIfCancelled(); /* … */ }
+```
+
+It cancels nothing by itself: it carries a signal, and the code that owns an
+operation decides whether stopping is safe. A tool that must finish a
+half-committed write simply does not ask. Outside a tool call — a unit test,
+a CLI — `currentCallSignal()` is `undefined`, which every consumer must read
+as "no cancellation".
 
 ### `concurrency` — bounded async map & single-flight
 
