@@ -118,26 +118,6 @@ function hintResultOrRethrow(err: unknown): CallToolResult {
 }
 
 /**
- * Wrap `server.registerTool` so every tool handler surfaces its error `hint`.
- *
- * Why this lives here rather than in each repo: the MCP tool boundary renders
- * only a thrown error's `message`. `McpToolError` has carried a `hint` — the
- * actionable half ("the available options are …", "set FOO_API_KEY") — since
- * the beginning, and {@link wrapToolError} is careful to preserve it, but
- * nothing ever rendered it, so every hint thrown from a tool handler was
- * invisible to the caller. Two repos had independently grown the same
- * hand-rolled wrapper before this landed.
- *
- * Handlers are invoked variadically because the SDK passes `(args, extra)` for
- * a tool with an `inputSchema` and `(extra)` for one without; forwarding
- * whatever arrived keeps both shapes intact. Both a synchronous throw and a
- * rejected promise are handled, since a handler may fail either way.
- *
- * Exported so `createTestHarness` can apply the same wrapper: a harness that
- * built a bare `McpServer` would show tests a different error surface than
- * production, which is the one thing a harness must never do.
- */
-/**
  * The caller's `AbortSignal`, dug out of whatever the SDK passed.
  *
  * The context is the LAST argument on both shapes the SDK uses — `(args,
@@ -160,6 +140,26 @@ function callSignalFrom(args: readonly unknown[]): AbortSignal | undefined {
   return signal instanceof AbortSignal ? signal : undefined;
 }
 
+/**
+ * Wrap `server.registerTool` so every tool handler surfaces its error `hint`.
+ *
+ * Why this lives here rather than in each repo: the MCP tool boundary renders
+ * only a thrown error's `message`. `McpToolError` has carried a `hint` — the
+ * actionable half ("the available options are …", "set FOO_API_KEY") — since
+ * the beginning, and {@link wrapToolError} is careful to preserve it, but
+ * nothing ever rendered it, so every hint thrown from a tool handler was
+ * invisible to the caller. Two repos had independently grown the same
+ * hand-rolled wrapper before this landed.
+ *
+ * Handlers are invoked variadically because the SDK passes `(args, extra)` for
+ * a tool with an `inputSchema` and `(extra)` for one without; forwarding
+ * whatever arrived keeps both shapes intact. Both a synchronous throw and a
+ * rejected promise are handled, since a handler may fail either way.
+ *
+ * Exported so `createTestHarness` can apply the same wrapper: a harness that
+ * built a bare `McpServer` would show tests a different error surface than
+ * production, which is the one thing a harness must never do.
+ */
 export function surfaceToolHints(server: McpServer): void {
   const register = server.registerTool.bind(server) as (
     ...args: unknown[]
