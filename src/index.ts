@@ -14,6 +14,7 @@
  *   - `@chrischall/mcp-utils/test`        in-memory test harness
  */
 
+export * from './cancel/index.js';
 export * from './server/index.js';
 export * from './response/index.js';
 export * from './errors/index.js';

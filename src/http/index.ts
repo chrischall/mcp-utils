@@ -17,6 +17,7 @@
  *    yields a fixed "unauthorized" string, not the credential.
  */
 
+import { withAmbientCancellation } from '../cancel/index.js';
 import { truncateErrorMessage } from '../errors/index.js';
 
 export * from './throttle.js';
@@ -297,12 +298,29 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   // Bound `run` with an AbortController when a timeout is configured, mapping the
   // abort to a RequestTimeoutError. No timeout → run as-is (no signal).
   function withTimeout(run: (signal?: AbortSignal) => Promise<Response>): Promise<Response> {
-    if (timeoutMs == null || timeoutMs <= 0) return run(undefined);
+    // THE CALLER'S CANCELLATION, folded in wherever it exists
+    // (`cancel/index.ts`): a request the caller has given up on is the one
+    // piece of work it is always safe to stop, and until this the only
+    // thing that could abort a fetch here was our own timeout — so a
+    // cancelled tool call held its upstream request open for the full
+    // budget while the child burned metered CPU for nobody.
+    //
+    // NO TIMEOUT is no longer "no signal": a service configured without one
+    // still honours the caller, which is the case where it matters most,
+    // since nothing else was ever going to stop that request.
+    if (timeoutMs == null || timeoutMs <= 0) return run(withAmbientCancellation(undefined));
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
-    return run(controller.signal)
+    return run(withAmbientCancellation(controller.signal))
       .catch((err: unknown) => {
-        if (err instanceof Error && err.name === 'AbortError') throw new RequestTimeoutError(service, timeoutMs);
+        // Told apart by WHICH signal fired, not by the error: an abort is an
+        // `AbortError` whichever end caused it, so asking the controller is
+        // the only way to avoid reporting a caller's cancellation as this
+        // service timing out — a diagnosis that sends somebody to raise a
+        // timeout that was never reached.
+        if (err instanceof Error && err.name === 'AbortError' && controller.signal.aborted) {
+          throw new RequestTimeoutError(service, timeoutMs);
+        }
         throw err;
       })
       .finally(() => clearTimeout(timer));

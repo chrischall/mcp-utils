@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { withCallSignal } from '../cancel/index.js';
 import {
   createApiClient,
   buildQueryString,
@@ -1072,5 +1073,65 @@ describe('runBoundedBatch', () => {
     );
     expect(seen).toEqual([1, 2, 3]); // item 3 still ran
     expect(result).toEqual([1, -1, 3]);
+  });
+});
+
+/**
+ * The caller's cancellation reaching the wire (`cancel/index.ts`).
+ *
+ * This is the half that actually stops work: a tool call the client gave up
+ * on should not hold its upstream request open for the full timeout while
+ * the child burns metered CPU. Until this the only thing that could abort a
+ * fetch here was our own timeout, and nothing threaded a caller's signal in.
+ */
+describe('createApiClient honours the caller’s cancellation', () => {
+  /** A fetch that never settles on its own — only an abort ends it. */
+  const hangingFetch: typeof fetch = (_url, init) =>
+    new Promise((_resolve, reject) => {
+      const signal = (init as RequestInit | undefined)?.signal;
+      if (!signal) return; // no signal => genuinely hangs, which fails the test by timeout
+      if (signal.aborted) return reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+      signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    });
+
+  it('aborts an in-flight request when the caller goes away, with no timeout configured', async () => {
+    // No timeout: before this change there was no signal at all here, so
+    // this request could never be stopped by anything.
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: hangingFetch });
+    const controller = new AbortController();
+    const call = withCallSignal(controller.signal, () => client.fetchJson('/slow'));
+    controller.abort(new Error('caller went away'));
+    await expect(call).rejects.toThrow(/abort/i);
+  });
+
+  it('does not report the caller’s cancellation as this service timing out', async () => {
+    // The diagnosis matters: both ends produce an `AbortError`, so a naive
+    // catch blames a timeout that was never reached and sends somebody to
+    // raise a budget that is fine.
+    const client = createApiClient({
+      baseUrl: 'https://x.test',
+      getToken: () => 't',
+      fetchImpl: hangingFetch,
+      timeout: 60_000,
+    });
+    const controller = new AbortController();
+    const call = withCallSignal(controller.signal, () => client.fetchJson('/slow'));
+    controller.abort(new Error('caller went away'));
+    await expect(call).rejects.toThrow(/abort/i);
+    await expect(call).rejects.not.toThrow(/timed out|timeout/i);
+  });
+
+  it('still reports its OWN timeout as a timeout', async () => {
+    const client = createApiClient({
+      baseUrl: 'https://x.test',
+      getToken: () => 't',
+      fetchImpl: hangingFetch,
+      timeout: 20,
+    });
+    // Inside a live call whose caller has NOT cancelled: the timeout is the
+    // one that fires, and must still be named as one.
+    await expect(withCallSignal(new AbortController().signal, () => client.fetchJson('/slow'))).rejects.toThrow(
+      /timed out|timeout/i,
+    );
   });
 });
