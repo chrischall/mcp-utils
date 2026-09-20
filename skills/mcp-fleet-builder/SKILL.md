@@ -1,6 +1,6 @@
 ---
 name: mcp-fleet-builder
-description: "Build or modify a chrischall service integration — by default a lean fpx (@fetchproxy/cli) skill, and a full chrischall MCP server (the ~50 *-mcp repos under ~/git on @chrischall/mcp-utils) only when the user wants one. Covers the fpx-skill-first decision, the skeleton, bearer / cookie-session / fetchproxy / rate-limited-public-API+OAuth-writes archetypes, hosting on mcp-host (claude.ai remote MCP — a registration, not a per-repo Worker; browser-bridge repos included since fetchproxy 2.1.0), bootstrap, and release/CI gotchas."
+description: "Build or modify a chrischall service integration — by default a lean fpx (@fetchproxy/cli) skill, and a full chrischall MCP server (the ~50 *-mcp repos under ~/git on @chrischall/mcp-utils) only when the user wants one. Covers the fpx-skill-first decision, the skeleton, bearer / cookie-session / fetchproxy / rate-limited-public-API+OAuth-writes archetypes, hosting on mcp-host (claude.ai remote MCP — a registration, not a per-repo Worker; browser-bridge repos included since fetchproxy 2.1.0), bootstrap, release/CI gotchas, and a MEASURED table of which MCP v2 features claude.ai actually supports (cancellation and progress yes, elicitation no) with the silent SDK-v2 gotchas behind them."
 ---
 
 # Building a chrischall fleet MCP
@@ -57,12 +57,13 @@ mint.yaml         # how this MCP wants to be HOSTED (mcp-host reads it; see belo
 
 Each `tools/*.ts` exports `registerXxxTools(server, deps)` that calls `server.registerTool(name, { description, annotations, inputSchema }, handler)` (high-level `McpServer` API with zod). `index.ts` only wires them.
 
-## @chrischall/mcp-utils surface  (current: 0.19.x)
+## @chrischall/mcp-utils surface  (current: 2.x)
 
-Declared exports are `.`, `./scrape`, `./test`, `./fetchproxy`, `./session`, `./html`. Everything under "Core entry" below is a grouping within the root export, not an importable subpath. This list goes stale — check `package.json#exports` in `~/git/mcp-utils` before concluding a helper doesn't exist and hand-rolling it.
+Declared exports are `.`, `./scrape`, `./test`, `./fetchproxy`, `./session`, `./html`, `./healthcheck`. **`./healthcheck` is where `registerCredentialHealthcheckTool` and its three companion types live as of 2.0.0** — they used to be re-exported from `./fetchproxy` and that re-export is gone, which is one of the three breaking changes in that major (the others: `runMcp` returns a `StdioServerHandle` synchronously rather than a promise, harmless because every caller discards it; and the peer ranges are bounded with `engines.node` declared, so a repo still on `@fetchproxy/server` 2.x now warns on install). Everything under "Core entry" below is a grouping within the root export, not an importable subpath. This list goes stale — check `package.json#exports` in `~/git/mcp-utils` before concluding a helper doesn't exist and hand-rolling it.
 
 Core entry (zero runtime deps — safe for any MCP):
 - `server`: `createMcpServer`, `runMcp({ name, version, banner?, deps, tools })`, `withGracefulShutdown`, `ToolRegistrar`, `surfaceToolHints`. **`runMcp` serves through the SDK's `serveStdio` entry and returns a `StdioServerHandle` synchronously** — `await runMcp({...})` is unchanged at every call site, since every consumer discards the result. It previously hand-wired `server.connect(new StdioServerTransport())`, and under SDK v2 the protocol era is instance state that only a serving entry sets, so `server/discover` answered `-32601 Method not found` across all 60 `runMcp` callers at once (found by @bschrib, chrischall/skylight-mcp#182). Two consequences to design for: the **tool registrars now run per served instance** — once per connection, twice when a client probes with `server/discover` and then falls back to `initialize` — so keep the client/session in `deps`, built once outside the call, and keep registrars to registering; and `legacy` defaults to `'serve'` so a 2025-era host still connects. Note that `createTestHarness` is a hand-wired 2025-era pair and cannot see an era bug — that is how #182 shipped green. **`createMcpServer`/`runMcp` also render a thrown `McpToolError`'s `hint` into the failing tool's text** (`<message>\n\nHint: <hint>`), opt out with `surfaceHints: false`. Before 0.15 the MCP boundary rendered only `message`, so every `hint:` thrown from a handler was invisible — 31 repos were throwing them, and two had independently grown the same local wrapper. `createTestHarness` applies the same wrapper, so a tool's failure text under test is the text production returns.
+- `cancel` (2.0.0+): `currentCallSignal`, `withAmbientCancellation`, `killOnCancel`, `throwIfCancelled`, and (2.1.0+) `reportProgress`, `callerWantsProgress`. `surfaceToolHints` puts the caller's request in an `AsyncLocalStorage` for the handler's whole async extent, so these work WITHOUT threading anything through a tool signature — which is the point, since the tools that would be missed are the ones nobody edits. `createApiClient` already folds the cancellation signal into its own timeout; a raw `fetch` needs `signal: currentCallSignal()`, and a spawned child needs `killOnCancel(child)` (whose disposer you MUST call when it settles). See **What claude.ai actually supports** below for why this is worth wiring and elicitation is not.
 - `response`: `minifiedResult` (the default for tool output), `viewParam`/`resolveView`/`viewResult`/`projectOrRaw` (the `view` vocabulary), `stripMediaUrls`, `errorResult` (redacts), `imageResult`, `rawTextResult`, `flattenJsonApi`, `deepMapStringField`, `pruneUndefined`. `textResult`/`jsonResult` are the PRETTY-printing pair — they exist for the `raw` rung and for a human reader, not for ordinary tool output.
 - `errors`: `McpToolError` + `SessionNotAuthenticatedError`/`BotWallError`/`RateLimitError`/`UnreachableError`/`ModeMismatchError`, `createHelpfulError`, `wrapToolError`, `truncateErrorMessage` (redacts THEN caps 500), `redactSecrets` (Bearer/Basic/Cookie/Set-Cookie values, JWTs, `sk-`/`ghp_`/`xox?-`/`AIza`/`AKIA`/`whsec_` shapes, secret query params), `messageOf`
 - `config`: `readEnvVar`/`requireEnvVar` (trim + `''`/`'undefined'`/`'null'`/`${...}`→unset), `parseBoolEnv`, `loadDotenvSafely`, `expandPath`, `readPortEnv` (numeric+placeholder-hardened port), `createCachedJsonArrayLoader({envVar,defaults})` (env-named JSON-array file: parse + positive/negative cache — the COMMUNITIES_FILE loader)
@@ -454,6 +455,82 @@ mcp-host bridge ls                     # a live lastUsedAt means a browser is al
 - **Publish before you register.** An npm-sourced registration resolves against the registry, so the version must actually be published — see the "a green tag does not mean a green publish" rule; confirm with `npm view <pkg> version` first.
 - **Auto-merge orphans your follow-up commit.** Less acute now that hosting is not a chain of small PRs, but a repo change made *for* hosting (a `*_WS_PORT` env var, an injectable IO) is still one complete PR, not a staging branch.
 
+## What claude.ai actually supports — MEASURED, don't guess
+
+Measured on the mcp-host fleet over the week to 2026-09-20 (usage-row
+telemetry, `principals.client_id` = claude.ai, ~10.6k requests) plus a
+throwaway probe connector. Build to this table rather than to the spec:
+
+| feature | claude.ai | build it? |
+| --- | --- | --- |
+| 2026 routing headers (`Mcp-Method`/`Mcp-Name`) | **yes** — 10,595 of 10,595 requests | nothing to do; client-side |
+| `server/discover` | **yes** — 2,894 calls | comes free from a serving entry (see §Skeleton) |
+| declared protocol revision | **`2025-06-18`** | it carries 2026 routing over a 2025 lifecycle — do not assume 2026-07-28 |
+| `Mcp-Session-Id` returned | **yes** | nothing to do |
+| `notifications/cancelled` | **yes** — 101 in the week | **YES** — `cancel` module above |
+| **`_meta.progressToken`** on `tools/call` | **yes** | **YES** — `reportProgress`; progress genuinely arrives |
+| `resources/list` | yes — 37 calls | optional |
+| `resources/subscribe` | **no** — 0 calls against a server that advertises it | no |
+| `elicitation` | **NO** — declares none, answers `-32021` | **no** — a confirm-gated write cannot ask claude.ai |
+| `sampling`, `roots` | **no** — declares neither | no |
+| structured output (`outputSchema`/`structuredContent`) | accepts and round-trips it | **judgement**: whether it CONSUMES it is not observable server-side, and returning both doubles result bytes on a metered host. Not worth it fleet-wide without a reason |
+
+claude.ai's whole declared capability set is `{"extensions": {…}}` —
+`clientName: Anthropic/ClaudeAI`. Claude Code, by contrast, declares
+`{"elicitation":{"form":{}}}` and elicitation works there, so a
+`requireConfirmation` tool behaves differently by surface. Re-read the live
+numbers any time with `meta.clientCapabilities` / `meta.protocolVersion` /
+`meta.progressToken` on `usage_events` (docs/USAGE.md in mcp-host).
+
+### The trap this sets: a confirm-gated tool is INERT on claude.ai
+
+`requireConfirmation` returns an `input_required` result, and the SDK refuses
+to deliver one to a client that declared no `elicitation`. **That refusal is
+raised AFTER the handler returned**, so the handler cannot catch it and
+claude.ai renders it as `{"error": "Error occurred during tool execution"}`
+with nothing else. From gogcli-mcp #358 (2026-09-17) until mcp-utils #258,
+all five Gmail dispatch tools were dead on that surface and said nothing.
+
+It does not look like a capability problem, which is why it cost a day: the
+failure is fast, HTTP 200 at the gateway, and identical whatever the
+arguments — so it invites a hypothesis about the payload. **The tell is the
+duration.** A guarded tool that never ran answers in ~100 ms where the real
+work took seconds:
+
+```sql
+SELECT at, duration_ms, json_extract(meta_json,'$.name')
+FROM usage_events WHERE kind='mcp_request' ORDER BY at DESC LIMIT 20;
+```
+
+Two rules follow. **Reproduce with the runner's own client shape** — `new
+Client(…, { versionNegotiation: {mode:'auto'}, inputRequired: {autoFulfill:
+false} })` with NO capabilities, against the *published* package. A local
+Claude Code call will not reproduce it, because Claude Code declares
+elicitation. And **give every guarded tool an `unsupportedNote`** naming the
+staging twin (`gog_gmail_drafts_forward` → review → `gog_gmail_drafts_send`),
+so the refusal is a route rather than a dead end.
+
+### SDK v2 gotchas these rest on — all three are SILENT
+
+Against `@modelcontextprotocol/server` 2.0.0, and each cost a debugging
+round because none of them throws:
+
+- **The cancellation signal is `ctx.mcpReq.signal`, not `ctx.signal`.**
+  `ctx` carries only `sessionId`/`mcpReq`/`http`; a probe that looks at
+  `ctx.signal` concludes the SDK delivers no cancellation at all.
+- **`ctx.mcpReq.notify` takes a notification OBJECT**, not
+  `(method, params)`. Handed a string it spreads it character by character
+  and puts `{"0":"n","1":"o",…}` on the wire, which the peer rejects as
+  `Unknown message type` — while the server sees a clean return.
+- **The progress token is at `_meta`, not `meta`.** Reading `meta` yields
+  `undefined`, the notification goes out well-formed but tokenless, and the
+  client discards it as *"progress notification for an unknown token"*.
+
+Because all three are invisible server-side, **test progress and
+cancellation through a real `Client`** (`InMemoryTransport.createLinkedPair`)
+and assert `client.onerror` stayed empty. A unit test on the server cannot
+tell a delivered notification from a dropped one.
+
 ## Conventions (how chris likes them)
 
 - **TDD, always.** Failing test → minimal code → green. Especially for write tools.
@@ -533,6 +610,7 @@ A new fleet repo isn't done until ALL of this exists. Each line below was a real
 - **Re-running `pr-auto-review` does NOT re-arm; trigger a fresh PR event.** `gh run rerun` re-executes the review job but `claude-code-action` does not regenerate `structured_output` on a rerun (the "Surface verdict" step shows `skipped`), so the arm step falls back to `verdict=unknown` and won't add `ready-to-merge`. To get a clean verdict + arm, fire a fresh `pull_request` event — `gh pr close <n> && gh pr reopen <n>` (or a push) — not a workflow rerun.
 - **A PR that CHANGES a workflow file can't be auto-reviewed — the Claude App's OIDC token exchange validates the workflow against `main`.** The App's app-token exchange fails `401 — "Workflow validation failed. The workflow file must exist and have identical content to the version on the repository's default branch"` whenever the PR's `pr-auto-review.yml` (or any workflow it touches) differs from the copy on the default branch. The review step then emits NO verdict (the log even says *"this is normal … you should ignore this error"*), so the PR shows `review/review → fail` / "no verdict" and never arms. This is a **chicken-and-egg every repo hits when first adopting the shared workflows** (the PR that swaps `pr-auto-review.yml` to the stub can't be reviewed by the new-but-not-yet-on-`main` workflow), and it recurs for any later workflow-only PR. Tell it apart from a real auth/token failure: the review fast-fails in ~20–30 s with the `App token exchange failed: 401 … Workflow validation failed` line, while other repos' auto-reviews still pass (so the token is fine). **Resolution: this PR must be merged ONCE outside the auto-review path** — have the human add `ready-to-merge`, which fires the deferred CI run and flips `ci-gated` to success, then auto-merge takes it (no verdict needed). Under status-mode gating the label is the ONLY route: an un-armed PR sits on `ci-gated: pending`, and a *pending* required status blocks the merge button, so the old "just squash-merge it manually" escape (which relied on a *skipped* check counting as satisfied) no longer works. After it lands on `main`, every subsequent PR auto-reviews normally. Per the never-merge rule, surface this and let the human arm/merge — don't add `ready-to-merge` yourself.
 - **A green JOB does not mean the action happened — read the log, not the conclusion.** The `mcp-publish` composite *warns and skips* rather than failing when a secret is absent, so a job goes green next to `##[warning] … was NOT published`. This is the same class as "a green tag does not mean a green publish", and it fools you twice over: grepping the log for the warning text also matches the **echoed script source** (lines prefixed with the `^[[36;1m` command-echo escape), so a naive grep "finds" the warning on runs where it never fired. Grep for the real markers — `##[warning]`, `Total Upload`, `Current Version ID` — or just verify the artifact: `npm view <pkg> version`, `mcp-host get <slug>`, a live `curl`.
+- **A publish that has not appeared yet looks EXACTLY like one that failed — read the job log before raising the alarm.** The complement to the rule above, and it cost a false alarm on 2026-09-20: `@chrischall/mcp-utils@2.0.0` was tagged, `package.json` said 2.0.0, and both `npm view` AND a direct registry fetch still served 1.0.0 several minutes later — the exact signature of the silent-publish-failure this skill warns about. It had published fine. The job log ends `+ @chrischall/mcp-utils@2.0.0` followed by *"Your package is being processed and may take a few minutes to become available"*, and it showed up shortly after. **So: check the publish STEP's log for that `+ <pkg>@<version>` line first.** Present ⇒ wait and re-poll (`until curl -s https://registry.npmjs.org/<pkg> | grep -q '"<version>"'; do sleep 10; done`). Absent ⇒ it really did fail, re-run `release-please.yml` (the npm step is idempotent). Also note `npm view` has its own cache — `npm cache clean --force`, or fetch `https://registry.npmjs.org/<pkg>` directly, before concluding anything.
 - **`npm view <pkg> version` is necessary but NOT sufficient — install the published tarball and run the handshake.** `npm i <pkg>@<v>` into a clean dir, then drive `initialize` + `tools/list` against its `bin`. That is what caught `manifest.json` listing 13 of the 14 tools the server registers: the tool was callable by name, the server booted fine, and nothing else reads that file — so an mcpb host would simply never have shown it. **Guard it with a test that asserts the `manifest.json` roster equals the registered roster in BOTH directions** (drive the real registrars through `createTestHarness`), and reject a blank description while you're there. Do the install in a directory with no parent `package.json`: npm walks up, and a scratch dir under one with a symlinked `node_modules` will install straight into the linked target.
 - **Release-please does NOT refresh its PR for hidden commit types, so its branch goes stale and conflicts.** Merge a run of `build(deps-dev)` / `chore` / `ci` commits while a release PR is open and the release branch stays pinned at its old merge-base; because those types are `hidden: true` in `changelog-sections`, release-please sees nothing changelog-relevant and leaves the PR alone. Every run keeps reporting **success** while the PR sits `DIRTY` — the conflict is `package.json`/`package-lock.json`, which both the dep bumps and the version bump touch. `workflow_dispatch` does not fix it (same no-op logic). **Recovery: delete the release branch** (`gh api -X DELETE repos/<o>/<r>/git/refs/heads/release-please--branches--main--components--<pkg>`, which auto-closes the PR) **then re-run release-please** — it rebuilds from current `main`. The contents are generated-only, so nothing is lost. Then verify the regenerated PR's **merge-base equals `main` head** AND that it **preserved the dep bumps** — a rebuild from a stale base would silently revert every merged bump.
 - **Never detect a condition by matching PROSE — export a constant or a predicate.** The recurring shape is a message whose wording serves two purposes, so a classifier keyed on it fires on the wrong one. It bit twice in one day. freshbooks regex-matched a rendered error for `FRESHBOOKS_REFRESH_TOKEN`, which is true whenever the token is merely NAMED among the missing vars — so with an app credential also missing, the message said "reconnecting cannot supply them" while the hint said "Reconnect this connector". honeybook's `classifyThrown` matched `use_magic_link` as a SYMPTOM of a rejected session, and its no-session message names `use_magic_link` as the FIX — so a user who had never connected was told their session expired. Both now key on an exported constant/predicate (`NO_AUTH_CONFIGURED`/`isNoAuthConfigured`, `CkAuthError.reason`, `HoneyBookApiError.status`) so the thrower and the reader cannot drift. A copied string keeps its own test green the day the wording changes. Corollary: when two sites must agree on a message, ONE of them owns it and the other imports it — and add a test that the real thrower actually raises it, since two strings agreeing proves nothing if nothing throws the message they agree about.
