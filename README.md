@@ -502,7 +502,7 @@ caller sees only an opaque failure. Measured on the mcp-host fleet
 never run.
 
 `callerAcceptsFormElicitation(ctx)` answers before the handler returns, so
-{@link requireConfirmation} can refuse with a sentence instead of a prompt
+`requireConfirmation` can refuse with a sentence instead of a prompt
 nothing will deliver.
 
 ```ts
