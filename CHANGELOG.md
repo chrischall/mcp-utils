@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.1.0](https://github.com/chrischall/mcp-utils/compare/v2.0.0...v2.1.0) (2026-09-20)
+
+
+### Features
+
+* **progress:** report progress to a caller that asked for it ([#255](https://github.com/chrischall/mcp-utils/issues/255)) ([d83f0d8](https://github.com/chrischall/mcp-utils/commit/d83f0d8dadd696887093cb09d866f70ea4a6a0a7))
+
+
+### Bug Fixes
+
+* **confirm:** tell a caller that cannot be asked, instead of failing opaquely ([#258](https://github.com/chrischall/mcp-utils/issues/258)) ([a637222](https://github.com/chrischall/mcp-utils/commit/a637222f6ed401d0ef6583d6a8232ceb609fe73b))
+
+
+### Documentation
+
+* **skill:** what claude.ai actually supports, measured rather than assumed ([#260](https://github.com/chrischall/mcp-utils/issues/260)) ([c7ef144](https://github.com/chrischall/mcp-utils/commit/c7ef144c98dd8ca5874b7faf4531658237d6ac12))
+
 ## [2.0.0](https://github.com/chrischall/mcp-utils/compare/v1.0.0...v2.0.0) (2026-09-20)
 
 
