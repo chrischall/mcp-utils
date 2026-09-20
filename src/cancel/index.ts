@@ -45,6 +45,8 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 /** What one tool call carries for as long as it runs. */
 interface CallContext {
   signal: AbortSignal;
+  /** The SDK request, for progress — absent when the caller supplied none. */
+  request?: ProgressCapableRequest;
 }
 
 const storage = new AsyncLocalStorage<CallContext>();
@@ -58,8 +60,12 @@ const storage = new AsyncLocalStorage<CallContext>();
  * {@link currentCallSignal}, and not entering the context at all is cheaper
  * and easier to reason about.
  */
-export function withCallSignal<T>(signal: AbortSignal | undefined, fn: () => T): T {
-  return signal ? storage.run({ signal }, fn) : fn();
+export function withCallSignal<T>(
+  signal: AbortSignal | undefined,
+  fn: () => T,
+  request?: ProgressCapableRequest,
+): T {
+  return signal ? storage.run({ signal, ...(request ? { request } : {}) }, fn) : fn();
 }
 
 /**
@@ -141,4 +147,63 @@ export function killOnCancel(child: Killable, signal: NodeJS.Signals = 'SIGTERM'
 export function throwIfCancelled(): void {
   const signal = currentCallSignal();
   if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason));
+}
+
+/** The part of the SDK's request context progress needs. */
+interface ProgressCapableRequest {
+  _meta?: { progressToken?: string | number };
+  notify(notification: { method: string; params: Record<string, unknown> }): Promise<void> | void;
+}
+
+/**
+ * Tell the caller how far along a long tool call is.
+ *
+ * MEASURED SUPPORT, which is why this exists at all: on the mcp-host fleet
+ * claude.ai sends `_meta.progressToken` on its `tools/call` requests
+ * (recorded as `meta.progressToken` on the usage row, 2026-09-20), so
+ * progress a hosted MCP reports genuinely reaches it. Without a token
+ * nothing can be delivered and this is a no-op — which is the ordinary case
+ * for a client that did not ask.
+ *
+ * THREE THINGS ARE EASY TO GET WRONG HERE, and all three were, against
+ * `@modelcontextprotocol/server` 2.0.0, before this was written:
+ *
+ *  1. `notify` takes a NOTIFICATION OBJECT, not `(method, params)`. Passed a
+ *     string it spreads it character by character and puts
+ *     `{"0":"n","1":"o",…}` on the wire — a frame the peer answers with
+ *     `Unknown message type`. It does not throw, so the mistake is invisible
+ *     from the server.
+ *  2. The caller's token is at `_meta`, NOT `meta`. Reading `meta` yields
+ *     `undefined`, and the notification then goes out WITHOUT a
+ *     `progressToken` — well-formed, accepted, and dropped by the client
+ *     with "progress notification for an unknown token", because the client
+ *     routes on that field alone.
+ *  3. Neither mistake throws. A tool reporting progress into the void looks
+ *     exactly like one reporting progress correctly, from the server's side.
+ *
+ * AMBIENT, like the cancellation above and for the same reason: the token
+ * belongs to the request, `surfaceToolHints` already has it, and threading a
+ * reporter through several hundred tools is how most of them end up without
+ * one.
+ */
+export async function reportProgress(progress: number, total?: number, message?: string): Promise<void> {
+  const req = storage.getStore()?.request;
+  const token = req?._meta?.progressToken;
+  // No token means the caller did not ask for progress, which is the
+  // ordinary case and not a failure.
+  if (req === undefined || token === undefined) return;
+  await req.notify({
+    method: 'notifications/progress',
+    params: {
+      progressToken: token,
+      progress,
+      ...(total === undefined ? {} : { total }),
+      ...(message === undefined ? {} : { message }),
+    },
+  });
+}
+
+/** Whether this caller asked for progress — for skipping work nobody will see. */
+export function callerWantsProgress(): boolean {
+  return storage.getStore()?.request?._meta?.progressToken !== undefined;
 }
