@@ -3,7 +3,7 @@ import { McpServer, InMemoryTransport } from '@modelcontextprotocol/server';
 import { Client } from '@modelcontextprotocol/client';
 import { z } from 'zod';
 import { surfaceToolHints } from '../server/index.js';
-import { currentCallSignal, throwIfCancelled, withAmbientCancellation, withCallSignal } from './index.js';
+import { currentCallSignal, killOnCancel, throwIfCancelled, withAmbientCancellation, withCallSignal } from './index.js';
 
 /**
  * The caller's cancellation, and the gap it closes.
@@ -110,5 +110,59 @@ describe('throwIfCancelled', () => {
       controller.abort(reason);
       expect(() => throwIfCancelled()).toThrow(reason);
     });
+  });
+});
+
+/**
+ * The SUBPROCESS case, which passing a signal to `fetch` does nothing about.
+ * A tool that shells out holds a whole process — `gogcli-mcp` runs the `gog`
+ * binary this way — so a cancelled call leaves it running to its own
+ * timeout, still talking upstream on metered CPU.
+ */
+describe('killOnCancel', () => {
+  function fakeChild(): { kill: (s?: NodeJS.Signals | number) => boolean; killed: (NodeJS.Signals | number | undefined)[] } {
+    const killed: (NodeJS.Signals | number | undefined)[] = [];
+    return { kill: (s) => (killed.push(s), true), killed };
+  }
+
+  it('kills the child when the caller cancels, and stops listening once it settles', () => {
+    const controller = new AbortController();
+    const child = fakeChild();
+    withCallSignal(controller.signal, () => {
+      const dispose = killOnCancel(child);
+      expect(child.killed).toEqual([]);
+      dispose();
+      // Disposed BEFORE the abort: a settled child must not be signalled,
+      // and a listener that outlives the call is a leak per invocation.
+      controller.abort(new Error('caller went away'));
+      expect(child.killed, 'a disposed listener still killed the child').toEqual([]);
+    });
+  });
+
+  it('kills a child whose caller had already gone before it started', () => {
+    const controller = new AbortController();
+    controller.abort(new Error('gone'));
+    const child = fakeChild();
+    // Ordinary rather than theoretical: a slow install or a queued spawn
+    // puts real time between the cancel and the process existing.
+    withCallSignal(controller.signal, () => killOnCancel(child));
+    expect(child.killed).toEqual(['SIGTERM']);
+  });
+
+  it('does nothing outside a tool call', () => {
+    const child = fakeChild();
+    const dispose = killOnCancel(child);
+    dispose();
+    expect(child.killed).toEqual([]);
+  });
+
+  it('signals the child when the caller actually goes', () => {
+    const controller = new AbortController();
+    const child = fakeChild();
+    withCallSignal(controller.signal, () => {
+      killOnCancel(child);
+      controller.abort(new Error('caller went away'));
+    });
+    expect(child.killed).toEqual(['SIGTERM']);
   });
 });

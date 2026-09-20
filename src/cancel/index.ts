@@ -89,6 +89,47 @@ export function withAmbientCancellation(own: AbortSignal | undefined): AbortSign
   return AbortSignal.any([own, ambient]);
 }
 
+/** The part of a spawned child {@link killOnCancel} needs. */
+interface Killable {
+  kill(signal?: NodeJS.Signals | number): boolean;
+}
+
+/**
+ * Kill a spawned child when the caller cancels, and stop listening when it
+ * ends.
+ *
+ * The SUBPROCESS case, which is the expensive one and is not covered by
+ * passing a signal to `fetch`. A tool that shells out holds a whole process
+ * — `gogcli-mcp` runs the `gog` binary this way — so a cancelled call leaves
+ * that process running to its own timeout, still talking to the upstream,
+ * still charged to the child's metered CPU. Aborting an HTTP request does
+ * nothing about it.
+ *
+ * Returns a disposer the caller MUST run when the child settles. Without it
+ * the listener outlives the call, and on a long-lived signal that is a leak
+ * per invocation — the reason this hands back a function rather than
+ * attaching and hoping.
+ *
+ * SIGTERM by default: a child gets the chance to exit cleanly, as the
+ * supervisor gives its own children. A caller that knows better passes
+ * something else.
+ */
+export function killOnCancel(child: Killable, signal: NodeJS.Signals = 'SIGTERM'): () => void {
+  const ambient = currentCallSignal();
+  if (!ambient) return () => {};
+  // Already gone by the time the child started, which a slow install or a
+  // queued spawn makes ordinary rather than theoretical.
+  if (ambient.aborted) {
+    child.kill(signal);
+    return () => {};
+  }
+  const onAbort = (): void => {
+    child.kill(signal);
+  };
+  ambient.addEventListener('abort', onAbort, { once: true });
+  return () => ambient.removeEventListener('abort', onAbort);
+}
+
 /**
  * Throw if the caller has gone, for a tool doing its own long work.
  *
