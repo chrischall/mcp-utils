@@ -120,18 +120,14 @@ function hintResultOrRethrow(err: unknown): CallToolResult {
 }
 
 /**
- * The caller's `AbortSignal`, dug out of whatever the SDK passed.
+ * The SDK request for the call in flight, or `undefined` when it cannot
+ * deliver a notification.
  *
- * The context is the LAST argument on both shapes the SDK uses — `(args,
- * ctx)` for a tool with an `inputSchema` and `(ctx)` for one without — and
- * the signal hangs off `mcpReq`, not off the context itself. That level is
- * worth stating because the obvious guess is wrong: `ctx.signal` is
- * undefined in 2.0.0, and a probe that looked there concluded the SDK
- * delivered no cancellation at all.
- *
- * Every step is checked rather than asserted. This runs on the tool path for
- * every call, and a wrapper that throws while reaching for an optional field
- * would break every tool in the fleet to add a feature none of them had.
+ * Shares the shape rules described on {@link callSignalFrom} below — the
+ * context is the LAST argument, and what matters hangs off `mcpReq` rather
+ * than off the context. The extra check here is `notify`: `reportProgress`
+ * must never have to guess whether the request can carry a notification, so
+ * a request without it is treated as absent.
  */
 function mcpRequestFrom(args: readonly unknown[]): Parameters<typeof withCallSignal>[2] {
   const ctx = args.at(-1);
@@ -145,6 +141,20 @@ function mcpRequestFrom(args: readonly unknown[]): Parameters<typeof withCallSig
     : undefined;
 }
 
+/**
+ * The caller's `AbortSignal`, dug out of whatever the SDK passed.
+ *
+ * The context is the LAST argument on both shapes the SDK uses — `(args,
+ * ctx)` for a tool with an `inputSchema` and `(ctx)` for one without — and
+ * the signal hangs off `mcpReq`, not off the context itself. That level is
+ * worth stating because the obvious guess is wrong: `ctx.signal` is
+ * undefined in 2.0.0, and a probe that looked there concluded the SDK
+ * delivered no cancellation at all.
+ *
+ * Every step is checked rather than asserted. This runs on the tool path for
+ * every call, and a wrapper that throws while reaching for an optional field
+ * would break every tool in the fleet to add a feature none of them had.
+ */
 function callSignalFrom(args: readonly unknown[]): AbortSignal | undefined {
   const ctx = args.at(-1);
   if (typeof ctx !== 'object' || ctx === null) return undefined;

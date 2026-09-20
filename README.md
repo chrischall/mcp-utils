@@ -32,7 +32,7 @@ import light:
 
 | Import | Contents |
 | --- | --- |
-| `@chrischall/mcp-utils` | core barrel: `server` + `response` + `errors` + `config` + `fs` + `http` + `cancel` + `concurrency` + `dates` + `zod` + `auth` + `scrape` |
+| `@chrischall/mcp-utils` | core barrel: `server` + `response` + `errors` + `config` + `fs` + `http` + `cancel` + `caller` + `concurrency` + `dates` + `zod` + `auth` + `scrape` |
 | `@chrischall/mcp-utils/session` | session registry, session store, state persistence, token manager, cookie-session manager |
 | `@chrischall/mcp-utils/fetchproxy` | fetchproxy transport adapter, bot-wall / retry / concurrency helpers |
 | `@chrischall/mcp-utils/healthcheck` | credential-style healthcheck factory (no fetchproxy peer needed) |
@@ -490,6 +490,38 @@ identical to working code from the server's side:
   discards it as *"progress notification for an unknown token"*.
 - Sending progress when the caller asked for none produces exactly that
   error at the client, so the no-op matters.
+
+### `caller` — what the CALLER can do, made readable
+
+A confirmation-guarded tool returns `input_required`, and the SDK refuses to
+deliver one to a client that declared no `elicitation` — a protocol `-32021`
+raised **after** the handler returned, so the handler cannot catch it and the
+caller sees only an opaque failure. Measured on the mcp-host fleet
+2026-09-20: claude.ai declares `{"extensions": {…}}` and no `elicitation`, so
+`gog_gmail_forward` answered four attempts in a row in under 110 ms, having
+never run.
+
+`callerAcceptsFormElicitation(ctx)` answers before the handler returns, so
+{@link requireConfirmation} can refuse with a sentence instead of a prompt
+nothing will deliver.
+
+```ts
+import { callerAcceptsFormElicitation, callerCapabilities } from '@chrischall/mcp-utils';
+
+if (callerAcceptsFormElicitation(ctx) === false) { /* say so; do not prompt */ }
+```
+
+Two sources, because the answer lives in two places: a 2026-07-28 request
+carries the caller's own declaration in its `_meta` envelope — and a relay
+forwards the *real* caller's per request, so the envelope **wins** over
+anything connection-scoped — while a 2025 connection declared its
+capabilities once at `initialize`, where only the low-level `Server` kept
+them. `surfaceToolHints` reads that second source and stores it ambiently.
+
+**Absence is never a verdict.** With neither source available the helpers
+answer `undefined`, never `false`; reading "cannot tell" as "cannot" would
+refuse every caller this cannot see, including handlers registered outside
+`surfaceToolHints`.
 
 ### `concurrency` — bounded async map & single-flight
 
