@@ -457,6 +457,40 @@ half-committed write simply does not ask. Outside a tool call — a unit test,
 a CLI — `currentCallSignal()` is `undefined`, which every consumer must read
 as "no cancellation".
 
+#### Progress
+
+The same store carries the caller's progress token, so a long tool can say
+how far along it is:
+
+```ts
+import { callerWantsProgress, reportProgress } from '@chrischall/mcp-utils';
+
+for (const [i, page] of pages.entries()) {
+  await reportProgress(i + 1, pages.length, `page ${i + 1}`);
+  // …
+}
+```
+
+MEASURED support, which is why it is here: claude.ai sends
+`_meta.progressToken` on its `tools/call` requests (mcp-host usage rows,
+2026-09-20), so progress a hosted MCP reports genuinely arrives. A caller
+that did not ask has no token and `reportProgress` is a no-op —
+`callerWantsProgress()` is there for skipping work nobody will see.
+
+Three things about the SDK make this worth a helper rather than three lines
+at each call site, because **none of them throws** and all three look
+identical to working code from the server's side:
+
+- `notify` takes a notification OBJECT, not `(method, params)`. Handed a
+  string it spreads it character by character and puts
+  `{"0":"n","1":"o",…}` on the wire, which the peer rejects as
+  `Unknown message type`.
+- The caller's token lives at `_meta`, not `meta`. Read the wrong one and
+  the notification goes out well-formed but tokenless, and the client
+  discards it as *"progress notification for an unknown token"*.
+- Sending progress when the caller asked for none produces exactly that
+  error at the client, so the no-op matters.
+
 ### `concurrency` — bounded async map & single-flight
 
 `mapWithConcurrency`, `singleFlight`, `memoizeAsync` — zero-dependency async

@@ -131,6 +131,18 @@ function hintResultOrRethrow(err: unknown): CallToolResult {
  * every call, and a wrapper that throws while reaching for an optional field
  * would break every tool in the fleet to add a feature none of them had.
  */
+function mcpRequestFrom(args: readonly unknown[]): Parameters<typeof withCallSignal>[2] {
+  const ctx = args.at(-1);
+  if (typeof ctx !== 'object' || ctx === null) return undefined;
+  const req = (ctx as { mcpReq?: unknown }).mcpReq;
+  if (typeof req !== 'object' || req === null) return undefined;
+  // Only a request that can actually deliver one, so `reportProgress` never
+  // has to guess: the SDK's own shape, checked the same way the signal is.
+  return typeof (req as { notify?: unknown }).notify === 'function'
+    ? (req as Parameters<typeof withCallSignal>[2])
+    : undefined;
+}
+
 function callSignalFrom(args: readonly unknown[]): AbortSignal | undefined {
   const ctx = args.at(-1);
   if (typeof ctx !== 'object' || ctx === null) return undefined;
@@ -194,7 +206,7 @@ export function surfaceToolHints(server: McpServer): void {
           return hintResultOrRethrow(err);
         }
         return result instanceof Promise ? result.catch(hintResultOrRethrow) : result;
-      }),
+      }, mcpRequestFrom(args)),
     );
 }
 

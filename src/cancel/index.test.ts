@@ -3,7 +3,15 @@ import { McpServer, InMemoryTransport } from '@modelcontextprotocol/server';
 import { Client } from '@modelcontextprotocol/client';
 import { z } from 'zod';
 import { surfaceToolHints } from '../server/index.js';
-import { currentCallSignal, killOnCancel, throwIfCancelled, withAmbientCancellation, withCallSignal } from './index.js';
+import {
+  callerWantsProgress,
+  currentCallSignal,
+  killOnCancel,
+  reportProgress,
+  throwIfCancelled,
+  withAmbientCancellation,
+  withCallSignal,
+} from './index.js';
 
 /**
  * The caller's cancellation, and the gap it closes.
@@ -164,5 +172,76 @@ describe('killOnCancel', () => {
       controller.abort(new Error('caller went away'));
     });
     expect(child.killed).toEqual(['SIGTERM']);
+  });
+});
+
+/**
+ * Progress, end to end through a real client.
+ *
+ * Worth an integration test rather than a unit one, because all three ways
+ * this can be wrong are INVISIBLE from the server: `notify` takes an object
+ * (a string is spread character by character onto the wire), the token is at
+ * `_meta` not `meta` (reading the wrong one drops the field and the client
+ * discards the notification), and neither mistake throws. Only a client that
+ * actually receives something proves any of it.
+ */
+describe('reportProgress', () => {
+  async function callWith(
+    tool: () => Promise<unknown>,
+    opts: { wantProgress: boolean },
+  ): Promise<{ received: unknown[]; errors: string[] }> {
+    const server = new McpServer({ name: 'progress-test', version: '0.0.1' });
+    surfaceToolHints(server);
+    server.registerTool('work', { description: 'x', inputSchema: z.object({}) }, async () => {
+      await tool();
+      return { content: [{ type: 'text', text: 'done' }] };
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0.0.1' });
+    const errors: string[] = [];
+    client.onerror = (e) => errors.push(String((e as Error)?.message ?? e));
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const received: unknown[] = [];
+    await client.callTool(
+      { name: 'work', arguments: {} },
+      opts.wantProgress ? { onprogress: (p) => received.push(p) } : undefined,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await client.close();
+    await server.close();
+    return { received, errors };
+  }
+
+  it('reaches a caller that asked for it, with the shape it asked in', async () => {
+    const { received, errors } = await callWith(async () => {
+      expect(callerWantsProgress()).toBe(true);
+      await reportProgress(1, 3, 'half');
+      await reportProgress(3, 3, 'done');
+    }, { wantProgress: true });
+
+    expect(received).toEqual([
+      { progress: 1, total: 3, message: 'half' },
+      { progress: 3, total: 3, message: 'done' },
+    ]);
+    // No "unknown token" and no "Unknown message type" — the two failures
+    // that are silent on the server and only visible here.
+    expect(errors).toEqual([]);
+  });
+
+  it('is a no-op for a caller that did not ask, and never errors at the client', async () => {
+    const { received, errors } = await callWith(async () => {
+      expect(callerWantsProgress()).toBe(false);
+      await reportProgress(1, 3, 'nobody asked');
+    }, { wantProgress: false });
+
+    expect(received).toEqual([]);
+    // Sending an untokened progress notification anyway is what makes a
+    // client log `progress notification for an unknown token`.
+    expect(errors).toEqual([]);
+  });
+
+  it('does nothing outside a tool call', async () => {
+    expect(callerWantsProgress()).toBe(false);
+    await expect(reportProgress(1)).resolves.toBeUndefined();
   });
 });
