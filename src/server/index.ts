@@ -42,6 +42,8 @@ import { errorResult } from '../response/index.js';
 
 export * from './confirmation.js';
 import { withCallSignal } from '../cancel/index.js';
+import { withCallerCapabilities } from '../caller/index.js';
+import type { CallerCapabilities } from '../caller/index.js';
 
 /**
  * The handle {@link runMcp} returns — re-exported so a caller can name the
@@ -153,6 +155,37 @@ function callSignalFrom(args: readonly unknown[]): AbortSignal | undefined {
 }
 
 /**
+ * The capabilities the client declared at `initialize`, read off the low-level
+ * `Server` the {@link McpServer} wraps.
+ *
+ * This is the 2025-ERA source, and that is the whole reason the wrapper
+ * resolves it: a 2026-07-28 request carries the caller's declaration in its
+ * own per-request envelope, which {@link callerCapabilities} reads and
+ * prefers, but a 2025 connection declared them once at handshake and only the
+ * server kept them.
+ *
+ * Checked at every step rather than asserted, for the reason the two above
+ * are: this runs on the tool path for every call, and `getClientCapabilities`
+ * is a deprecated accessor on a type this package does not own — it is absent
+ * from `McpServer` itself, which is how a first attempt read `undefined`
+ * forever without anything failing.
+ */
+function declaredCapabilitiesFrom(server: McpServer): CallerCapabilities | undefined {
+  const inner = (server as unknown as { server?: unknown }).server;
+  if (typeof inner !== 'object' || inner === null) return undefined;
+  const read = (inner as { getClientCapabilities?: unknown }).getClientCapabilities;
+  if (typeof read !== 'function') return undefined;
+  try {
+    const declared = (read as () => unknown).call(inner);
+    return typeof declared === 'object' && declared !== null
+      ? (declared as CallerCapabilities)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Wrap `server.registerTool` so every tool handler surfaces its error `hint`.
  *
  * Why this lives here rather than in each repo: the MCP tool boundary renders
@@ -198,15 +231,27 @@ export function surfaceToolHints(server: McpServer): void {
       // Here because this is the one wrapper every tool already passes
       // through: threading the signal by hand would mean editing several
       // hundred handlers and missing exactly the ones nobody edits.
-      withCallSignal(callSignalFrom(args), () => {
-        let result: CallToolResult | Promise<CallToolResult>;
-        try {
-          result = cb(...args);
-        } catch (err) {
-          return hintResultOrRethrow(err);
-        }
-        return result instanceof Promise ? result.catch(hintResultOrRethrow) : result;
-      }, mcpRequestFrom(args)),
+      withCallSignal(
+        callSignalFrom(args),
+        () =>
+          // WHAT THE CALLER CAN DO, made ambient for the same reason and in
+          // the same place (`caller/index.ts`). Only the 2025-era half needs
+          // the wrapper — a 2026-07-28 request answers for itself off its own
+          // envelope — but a guarded tool that cannot tell whether the caller
+          // can be shown a prompt returns one the SDK then refuses to deliver,
+          // and that refusal reaches the caller as an unexplained protocol
+          // error it had no chance to catch.
+          withCallerCapabilities(declaredCapabilitiesFrom(server), () => {
+            let result: CallToolResult | Promise<CallToolResult>;
+            try {
+              result = cb(...args);
+            } catch (err) {
+              return hintResultOrRethrow(err);
+            }
+            return result instanceof Promise ? result.catch(hintResultOrRethrow) : result;
+          }),
+        mcpRequestFrom(args),
+      ),
     );
 }
 
