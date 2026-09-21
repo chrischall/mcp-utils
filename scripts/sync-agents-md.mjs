@@ -2,9 +2,9 @@
 /**
  * Generate AGENTS.md from CLAUDE.md, or check that it is still in sync.
  *
- *   node scripts/sync-agents-md.mjs ../some-mcp          # write
- *   node scripts/sync-agents-md.mjs ../some-mcp --check  # non-zero if stale
- *   node scripts/sync-agents-md.mjs ~/git --all          # every sibling repo
+ *   node scripts/sync-agents-md.mjs ../some-mcp          # write, creating if absent
+ *   node scripts/sync-agents-md.mjs ../some-mcp --check  # non-zero if stale or absent
+ *   node scripts/sync-agents-md.mjs ~/git --all          # resync every sibling; never creates
  *
  * WHY GENERATE RATHER THAN MAINTAIN. The two files are the same document for
  * two audiences, and keeping two copies by hand is how thirteen repos ended
@@ -67,11 +67,26 @@ function isCopyOf(agents, claude) {
   return shared / a.size > 0.6;
 }
 
-function run(repo, check) {
+function run(repo, check, allowCreate) {
   const c = join(repo, 'CLAUDE.md');
   const a = join(repo, 'AGENTS.md');
-  if (!existsSync(c) || !existsSync(a)) return null;
+  if (!existsSync(c)) return null;
   const claude = readFileSync(c, 'utf8');
+
+  // No AGENTS.md yet. CREATING one is only right when a human named this
+  // repo: whether a repo should carry the file at all is a decision, and
+  // under `--all` that decision would be made for ~90 repos at once by a
+  // script. So a named target creates, a sweep reports and moves on.
+  if (!existsSync(a)) {
+    // Silent under `--all`: whether a repo should carry the file at all is
+    // not the sweep's question, and 33 "skipped" lines bury the two real
+    // results it exists to surface.
+    if (!allowCreate) return null;
+    if (check) return 'MISSING';
+    writeFileSync(a, agentsFromClaude(claude));
+    return 'created';
+  }
+
   const have = readFileSync(a, 'utf8');
   if (!isCopyOf(have, claude)) return 'own document — skipped';
   const want = agentsFromClaude(claude);
@@ -93,13 +108,18 @@ const repos = all
   : [target];
 
 let stale = 0;
+let missing = 0;
 for (const r of repos) {
-  const res = run(r, check);
+  const res = run(r, check, !all);
   if (!res) continue;
   if (res === 'STALE') stale++;
+  if (res === 'MISSING') missing++;
   if (res !== 'in sync' || !all) console.log(`  ${res.padEnd(11)} ${r.replace(process.env.HOME ?? '', '~')}`);
 }
-if (check && stale) {
-  console.error(`\n${stale} AGENTS.md out of sync. Run without --check to regenerate.`);
+if (check && (stale || missing)) {
+  const parts = [];
+  if (stale) parts.push(`${stale} out of sync`);
+  if (missing) parts.push(`${missing} absent`);
+  console.error(`\nAGENTS.md: ${parts.join(', ')}. Run without --check to write.`);
   process.exit(1);
 }
