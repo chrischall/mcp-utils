@@ -1,6 +1,6 @@
 ---
 name: mcp-fleet-builder
-description: "Build or modify a chrischall service integration — by default a lean fpx (@fetchproxy/cli) skill, and a full chrischall MCP server (the ~50 *-mcp repos under ~/git on @chrischall/mcp-utils) only when the user wants one. Covers the fpx-skill-first decision, the skeleton, bearer / cookie-session / fetchproxy / rate-limited-public-API+OAuth-writes archetypes, hosting on mcp-host (claude.ai remote MCP — a registration, not a per-repo Worker; browser-bridge repos included since fetchproxy 2.1.0), bootstrap, release/CI gotchas, and a MEASURED table of what claude.ai actually supports and HONOURS (cancellation yes; elicitation, progress, structuredContent and destructiveHint all no) with the silent SDK-v2 gotchas behind them."
+description: "Build or modify a chrischall service integration — by default a lean fpx (@fetchproxy/cli) skill, and a full chrischall MCP server (the ~50 *-mcp repos under ~/git on @chrischall/mcp-utils) only when the user wants one. Covers the fpx-skill-first decision, the skeleton, bearer / cookie-session / fetchproxy / rate-limited-public-API+OAuth-writes archetypes, hosting on mcp-host (claude.ai remote MCP — a registration, not a per-repo Worker; browser-bridge repos included since fetchproxy 2.1.0), bootstrap, release/CI gotchas, and how to build to what MCP clients measurably do (annotate everything, write descriptions for search, honour cancellation, never emit structuredContent or return inputRequired unconditionally) — the evidence behind those rules lives in docs/CLIENT-BEHAVIOUR.md."
 ---
 
 # Building a chrischall fleet MCP
@@ -455,131 +455,38 @@ mcp-host bridge ls                     # a live lastUsedAt means a browser is al
 - **Publish before you register.** An npm-sourced registration resolves against the registry, so the version must actually be published — see the "a green tag does not mean a green publish" rule; confirm with `npm view <pkg> version` first.
 - **Auto-merge orphans your follow-up commit.** Less acute now that hosting is not a chain of small PRs, but a repo change made *for* hosting (a `*_WS_PORT` env var, an injectable IO) is still one complete PR, not a staging branch.
 
-## What claude.ai actually supports — MEASURED, don't guess
+## Build to what clients measurably do
 
-> The full record, with dates, sample sizes and the queries to re-run it,
-> lives in `@chrischall/mcp-utils` `docs/CLIENT-BEHAVIOUR.md`. What follows is
-> the short form.
+The evidence — what each client declares, what it honours, the dates and
+sample sizes, the queries to re-run it and how to diagnose an opaque tool
+failure — is **[`docs/CLIENT-BEHAVIOUR.md`](../../docs/CLIENT-BEHAVIOUR.md)**
+in this repo. It is not repeated here; two copies of a measurement are two
+things to drift. What follows is only what it means for building one.
 
-Measured on the mcp-host fleet over the week to 2026-09-20 (usage-row
-telemetry, `principals.client_id` = claude.ai, ~10.6k requests) plus a
-throwaway probe connector. Build to this table rather than to the spec:
-
-| feature | claude.ai | build it? |
-| --- | --- | --- |
-| 2026 routing headers (`Mcp-Method`/`Mcp-Name`) | **yes** — 10,595 of 10,595 requests | nothing to do; client-side |
-| `server/discover` | **yes** — 2,894 calls | comes free from a serving entry (see §Skeleton) |
-| declared protocol revision | **`2025-06-18`** | it carries 2026 routing over a 2025 lifecycle — do not assume 2026-07-28 |
-| `Mcp-Session-Id` returned | **yes** | nothing to do |
-| `notifications/cancelled` | **yes** — 101 in the week | **YES** — `cancel` module above |
-| **`_meta.progressToken`** on `tools/call` | **effectively NO** — 1 of 2,958 calls ever, and that one was our own test | **no** — `reportProgress` works, but nothing asks for it |
-| `resources/list` | yes — 37 calls | optional |
-| `resources/subscribe` | **no** — 0 calls against a server that advertises it | no |
-| `elicitation` | **NO** — declares none, answers `-32021` | **no** — a confirm-gated write cannot ask claude.ai |
-| `sampling`, `roots` | **no** — declares neither | no |
-| structured output (`outputSchema`/`structuredContent`) | **NO — never reaches the model** (probed) | **no** — it costs result bytes on a metered host and is discarded |
-
-claude.ai's whole declared capability set is `{"extensions": {…}}` —
-`clientName: Anthropic/ClaudeAI`. Claude Code, by contrast, declares
-`{"elicitation":{"form":{}}}` and elicitation works there, so a
-`requireConfirmation` tool behaves differently by surface. Re-read the live
-numbers any time with `meta.clientCapabilities` / `meta.protocolVersion` /
-`meta.progressToken` on `usage_events` (docs/USAGE.md in mcp-host).
-
-### What a client HONOURS is a different question, and telemetry cannot answer it
-
-Everything above is what the client SENDS. Whether it acts on what we send is
-invisible server-side, and guessing it cost real work. Probed 2026-09-21 with
-a throwaway connector (`~/git/mcp-probe`, an MCPB registered as slug `probe`):
-
-| we send | claude.ai |
-| --- | --- |
-| `destructiveHint: true` | **IGNORED** — four tools identical but for their annotations all ran with no confirmation step, including the unannotated control the spec default makes destructive |
-| `readOnlyHint: true` | no observable difference |
-| `structuredContent` + `outputSchema` | **never reaches the model** — a probe answering `RED` in text and `BLUE` in structured content was read as `RED` |
-| `audio` block | **dropped**, replaced by a text notice |
-| `resource_link` block | **dropped**, replaced by a text notice |
-| `text` / `image` / embedded `resource` | delivered |
-| a registered prompt | `prompts/list` never called |
-| a subscribable resource | `resources/subscribe` never called |
-| a `title` annotation | **stripped** — the loaded schema carries `name` and `description` only, so the model never sees it |
-
-**Tool schemas are DEFERRED on claude.ai.** The model gets names, then has to
-run a `tool_search` to load parameters before it can call anything — observed
-2026-09-21 failing first with *"'mcp__probe__probe_b_saw_red' has not been
-loaded yet"* and recovering via a search. Two consequences for a fleet this
-size (434 tools across the gog servers alone): a tool is only reachable if
-its NAME and DESCRIPTION match how someone would search for it, so the
-description is discovery rather than decoration; and the client's own tool
-namespacing is `server:tool`, not the `mcp__server__tool` the model first
-guessed.
-
-**So claude.ai has NO in-band human gate.** Not elicitation, not the
-annotation. Tool annotations are still worth getting right — they are
-truthful, Claude Code may honour them, and the fleet was publishing "save a
-draft" as destructive — but do not present them as a safety layer there. A
-real gate has to be in the PROTOCOL: a first call that refuses to dispatch
-and returns a payload-bound token, so the human sees a preview in the
-transcript before a second call can act.
-
-**How to re-run this.** The probe's groups SELF-REPORT: the answer is which
-tool the model calls next, so it lands in `usage_events.meta.name` and needs
-nobody watching a screen. Two traps found while building it — a probe that
-called `ctx.mcpReq.elicitInput()` measured the protocol ERA rather than the
-capability and answered the same for every client (use `inputRequired(...)`,
-which is what `requireConfirmation` actually returns), and a harness that
-checked only for a thrown error read `isError: true` as success.
-
-### The trap this sets: a confirm-gated tool is INERT on claude.ai
-
-`requireConfirmation` returns an `input_required` result, and the SDK refuses
-to deliver one to a client that declared no `elicitation`. **That refusal is
-raised AFTER the handler returned**, so the handler cannot catch it and
-claude.ai renders it as `{"error": "Error occurred during tool execution",
-"request_id": "..."}` with nothing else — reproduced VERBATIM 2026-09-21 by a
-clean-room probe that does nothing but return `inputRequired`, so that string
-is the canonical symptom of this and not of whatever the tool was doing. From gogcli-mcp #358 (2026-09-17) until mcp-utils #258,
-all five Gmail dispatch tools were dead on that surface and said nothing.
-
-It does not look like a capability problem, which is why it cost a day: the
-failure is fast, HTTP 200 at the gateway, and identical whatever the
-arguments — so it invites a hypothesis about the payload. **The tell is the
-duration.** A guarded tool that never ran answers in ~100 ms where the real
-work took seconds:
-
-```sql
-SELECT at, duration_ms, json_extract(meta_json,'$.name')
-FROM usage_events WHERE kind='mcp_request' ORDER BY at DESC LIMIT 20;
-```
-
-Two rules follow. **Reproduce with the runner's own client shape** — `new
-Client(…, { versionNegotiation: {mode:'auto'}, inputRequired: {autoFulfill:
-false} })` with NO capabilities, against the *published* package. A local
-Claude Code call will not reproduce it, because Claude Code declares
-elicitation. And **give every guarded tool an `unsupportedNote`** naming the
-staging twin (`gog_gmail_drafts_forward` → review → `gog_gmail_drafts_send`),
-so the refusal is a route rather than a dead end.
-
-### SDK v2 gotchas these rest on — all three are SILENT
-
-Against `@modelcontextprotocol/server` 2.0.0, and each cost a debugging
-round because none of them throws:
-
-- **The cancellation signal is `ctx.mcpReq.signal`, not `ctx.signal`.**
-  `ctx` carries only `sessionId`/`mcpReq`/`http`; a probe that looks at
-  `ctx.signal` concludes the SDK delivers no cancellation at all.
-- **`ctx.mcpReq.notify` takes a notification OBJECT**, not
-  `(method, params)`. Handed a string it spreads it character by character
-  and puts `{"0":"n","1":"o",…}` on the wire, which the peer rejects as
-  `Unknown message type` — while the server sees a clean return.
-- **The progress token is at `_meta`, not `meta`.** Reading `meta` yields
-  `undefined`, the notification goes out well-formed but tokenless, and the
-  client discards it as *"progress notification for an unknown token"*.
-
-Because all three are invisible server-side, **test progress and
-cancellation through a real `Client`** (`InMemoryTransport.createLinkedPair`)
-and assert `client.onerror` stayed empty. A unit test on the server cannot
-tell a delivered notification from a dropped one.
+- **Annotate every tool.** `destructiveHint` defaults to TRUE, so silence
+  publishes as destructive, and a client alarming on everything has said
+  nothing. Use `toolAnnotations({ readOnly, destructive })`: `readOnly: true`
+  when it changes nothing, `destructive: false` for a recoverable edit,
+  `destructive: true` for a delete, a send, or anything another person sees.
+  Do it for truthfulness — **claude.ai ignores the hint**, so it is not a
+  safety gate there.
+- **Write descriptions for SEARCH.** claude.ai defers tool schemas and the
+  model must search to load one, so a tool whose name and description do not
+  match how someone would look for it is effectively unreachable. At fleet
+  scale a description is discovery, not decoration.
+- **Honour cancellation** — the one advanced feature claude.ai actually uses.
+  `cancel` module; `killOnCancel` for a child process.
+- **Do not emit** `structuredContent`, `audio` or `resource_link`. None reach
+  the model, and the first costs bytes on a metered host.
+- **Never return `inputRequired` unconditionally.** Check
+  `callerAcceptsFormElicitation(ctx)` first and give guarded tools an
+  `unsupportedNote` naming the staging twin (`gog_gmail_drafts_forward` →
+  review → `gog_gmail_drafts_send`), so the refusal is a route rather than a
+  dead end.
+- **Test progress and cancellation through a real `Client`** and assert
+  `client.onerror` stayed empty. The three SDK gotchas behind them are all
+  SILENT (see the doc); a server-side unit test cannot tell a delivered
+  notification from a dropped one.
 
 ## Conventions (how chris likes them)
 

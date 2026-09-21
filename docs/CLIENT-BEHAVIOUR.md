@@ -101,6 +101,24 @@ The refusal is raised **after the handler returns**, so a handler cannot
 catch it. It must be predicted — which is what `callerAcceptsFormElicitation`
 in the `caller` module is for.
 
+### Diagnosing it
+
+It does not look like a capability problem, which is why it cost days: the
+failure is fast, HTTP 200 at the gateway, and identical whatever the
+arguments — so it invites a hypothesis about the payload. **The tell is the
+duration.** A guarded tool that never ran answers in ~100 ms where the real
+work took seconds:
+
+```sql
+SELECT at, duration_ms, json_extract(meta_json,'$.name')
+  FROM usage_events WHERE kind='mcp_request' ORDER BY at DESC LIMIT 20;
+```
+
+**Reproduce with the runner's own client shape** — `new Client(…, {
+versionNegotiation: {mode:'auto'}, inputRequired: {autoFulfill: false} })`
+with NO capabilities, against the **published** package. A local Claude Code
+call will not reproduce it, because Claude Code declares elicitation.
+
 ## Spec defaults worth memorising
 
 From `schema/2025-06-18/schema.ts`, `ToolAnnotations`:
