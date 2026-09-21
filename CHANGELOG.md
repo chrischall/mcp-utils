@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.2.0](https://github.com/chrischall/mcp-utils/compare/v2.1.0...v2.2.0) (2026-09-21)
+
+
+### Features
+
+* **zod:** let toolAnnotations say destructive ([#267](https://github.com/chrischall/mcp-utils/issues/267)) ([668fb67](https://github.com/chrischall/mcp-utils/commit/668fb6746386ac89c124735634041076ef0748cc))
+
+
+### Documentation
+
+* collapse the skill's duplicate of the client-behaviour record ([#268](https://github.com/chrischall/mcp-utils/issues/268)) ([2b562b3](https://github.com/chrischall/mcp-utils/commit/2b562b3954734a4393c9d9c5139ebe66be10a2b8)), closes [#266](https://github.com/chrischall/mcp-utils/issues/266)
+* log what MCP clients measurably do, in one place ([#265](https://github.com/chrischall/mcp-utils/issues/265)) ([5e639ba](https://github.com/chrischall/mcp-utils/commit/5e639ba0b137a0c40f88682fedf8f4399c0401cf))
+* re-home the orphaned signal docblock and list the caller module ([#261](https://github.com/chrischall/mcp-utils/issues/261)) ([b204741](https://github.com/chrischall/mcp-utils/commit/b2047412753bf0a7a3c57a213905fb49d1d92901))
+* **skill:** what claude.ai HONOURS, measured with a throwaway probe ([#264](https://github.com/chrischall/mcp-utils/issues/264)) ([422be1d](https://github.com/chrischall/mcp-utils/commit/422be1d04133723e3a578129d3b6bf60e3f01752))
+
 ## [2.1.0](https://github.com/chrischall/mcp-utils/compare/v2.0.0...v2.1.0) (2026-09-20)
 
 
