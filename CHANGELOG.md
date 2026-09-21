@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.2.1](https://github.com/chrischall/mcp-utils/compare/v2.2.0...v2.2.1) (2026-09-21)
+
+
+### Documentation
+
+* the annotation rule the sweep actually settled, and a script to check it ([#269](https://github.com/chrischall/mcp-utils/issues/269)) ([67b726f](https://github.com/chrischall/mcp-utils/commit/67b726f99e3705a667c036e4255233f9cd9c7d17))
+* the two things the follow-up round taught, and a tripwire for one ([#271](https://github.com/chrischall/mcp-utils/issues/271)) ([5d61ac1](https://github.com/chrischall/mcp-utils/commit/5d61ac135341e29503d1f9c2124f9d133e704b9e))
+* the usage line should mention --expect ([#273](https://github.com/chrischall/mcp-utils/issues/273)) ([fea9031](https://github.com/chrischall/mcp-utils/commit/fea903191ed636fe495c6de75af8b989c5cce860)), closes [#272](https://github.com/chrischall/mcp-utils/issues/272)
+
 ## [2.2.0](https://github.com/chrischall/mcp-utils/compare/v2.1.0...v2.2.0) (2026-09-21)
 
 
