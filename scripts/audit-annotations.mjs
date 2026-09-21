@@ -29,7 +29,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
 const entry = process.argv[2];
 if (!entry) {
-  console.error('usage: audit-annotations.mjs <path/to/dist/entry.js> [--summary]');
+  console.error('usage: audit-annotations.mjs <path/to/dist/entry.js> [--summary] [--expect <n>]');
   process.exit(2);
 }
 const summaryOnly = process.argv.includes('--summary');
