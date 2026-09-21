@@ -498,12 +498,36 @@ things to drift. What follows is only what it means for building one.
   "stamps a First Viewed time the co-parent can see ... cannot be undone".
 
 - **Verify on the wire, PER TOOL, never from source or a summary count.**
-  `node scripts/audit-annotations.mjs <repo>/dist/index.js`. Source lies four
+  `node scripts/audit-annotations.mjs <repo>/dist/index.js`. Source lies five
   ways — a shared registrar rather than the call site, a regex window that
   bleeds into the next declaration, an inner `toolAnnotations({...})`
-  overridden by an outer `destructiveHint`, and `readOnly` defaulting to true
-  so a missing key is a read. Every bug that mattered in the sweep was caught
-  here; the summary counts looked plausible each time.
+  overridden by an outer `destructiveHint`, `readOnly` defaulting to true so
+  a missing key is a read, and **tools registered in a LOOP**, which no
+  `registerTool('<literal>'` scan can see at all. Every bug that mattered in
+  the sweep was caught here; the summary counts looked plausible each time.
+
+  **Count the wire against your source scan and CHASE ANY GAP.** That is the
+  only signal loop-registered tools give. untappd-mcp served 45 and scanned
+  41 — the four missing ones were `add_friend`/`accept_friend`/
+  `reject_friend`/`remove_friend`, every one of which reaches another
+  person, and they shipped unannotated because the gap was noticed and not
+  followed. kiaaccess-mcp gave the identical signal (19 vs 16) and following
+  it found its loop-registered door commands. A gap is usually the shared
+  `registerCredentialHealthcheckTool`, which is fine — but you have to look
+  to know that.
+
+- **Give the repo a meta-test so the next tool cannot forget.** Asserting
+  `readOnlyHint` alone does not do it: `destructiveHint` defaults to true, so
+  a write that omits it and a write that considered it leave identical
+  annotations, and the suite stays green either way. Assert, per tool, that
+  every write sets a BOOLEAN `destructiveHint` (silence fails), and that no
+  read claims to destroy. skylight-mcp `tests/tool-annotations.test.ts` and
+  vibo-mcp `tests/index.test.ts` are the two shapes — one reads the
+  registered config, the other drives a real client. Mutation-check by
+  DELETING the option from a tool, not by flipping it: omission is what a
+  newly-added tool looks like. If you also pin the size of the destructive
+  set, COUNT it off the built server — deriving it ("16 deletes plus the
+  three that reach a person") produced 20 against an actual 24.
 - **Write descriptions for SEARCH.** claude.ai defers tool schemas and the
   model must search to load one, so a tool whose name and description do not
   match how someone would look for it is effectively unreachable. At fleet
