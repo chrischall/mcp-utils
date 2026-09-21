@@ -248,3 +248,24 @@ describe('normalizeTime', () => {
     expect(normalizeTime('0am')).toBeUndefined();
   });
 });
+
+describe('toolAnnotations destructive', () => {
+  it('emits destructiveHint ONLY when asked', () => {
+    // Omission is not neutrality — the spec default makes a readOnly:false
+    // tool destructive — but the helper must not INVENT a hint either, or a
+    // caller that never considered the question gets an answer it did not
+    // give. Emitted only when set, exactly like idempotent and openWorld.
+    expect(toolAnnotations({ readOnly: false })).toEqual({ readOnlyHint: false });
+    expect('destructiveHint' in toolAnnotations({ readOnly: false })).toBe(false);
+  });
+
+  it.each([[false], [true]])('carries destructive: %s through', (d) => {
+    expect(toolAnnotations({ readOnly: false, destructive: d }))
+      .toEqual({ readOnlyHint: false, destructiveHint: d });
+  });
+
+  it('sits alongside the other hints without disturbing them', () => {
+    expect(toolAnnotations({ title: 'T', readOnly: false, destructive: false, idempotent: true, openWorld: true }))
+      .toEqual({ title: 'T', readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: true });
+  });
+});
