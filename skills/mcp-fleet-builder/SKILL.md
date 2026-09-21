@@ -465,11 +465,45 @@ things to drift. What follows is only what it means for building one.
 
 - **Annotate every tool.** `destructiveHint` defaults to TRUE, so silence
   publishes as destructive, and a client alarming on everything has said
-  nothing. Use `toolAnnotations({ readOnly, destructive })`: `readOnly: true`
-  when it changes nothing, `destructive: false` for a recoverable edit,
-  `destructive: true` for a delete, a send, or anything another person sees.
-  Do it for truthfulness — **claude.ai ignores the hint**, so it is not a
-  safety gate there.
+  nothing. Use `toolAnnotations({ readOnly, destructive })` (needs mcp-utils
+  >= 2.2.0 — before that the option did not exist, which is why a 16-repo
+  sweep found 500 destructive tools and six additive ones). Do it for
+  truthfulness: **claude.ai ignores the hint**, so it is not a safety gate
+  there.
+
+  **The test that decides it: is there an INVERSE in this same tool set?**
+  If a later call can restore the prior state, it is `destructive: false`.
+  That is what makes `artsonia_post_comment` destructive (nothing there
+  deletes a comment) while `musicbrainz_submit_tags` is additive despite
+  writing to a shared public database. Two riders, both learned the hard way:
+  something that reaches ANOTHER PERSON has no inverse even when it looks
+  like one (`evite_cancel_event` has `reinstate_event`, but cannot un-notify
+  the guests), and something that SPENDS a single-use thing — an MFA code, a
+  gift card, a login attempt against an account that locks — has none either.
+
+  **Actuation is destructive when it REDUCES safety or security and leaves it
+  reduced**, not merely because it is physical. `kia_unlock_doors` is
+  destructive and `kia_lock_doors` is not, and both are perfectly
+  recoverable. A blanket "physical means destructive" marks locking a car
+  dangerous, which is pure noise.
+
+- **The oracle is per repo, and the wrong one produces confident nonsense.**
+  An HTTP verb was trustworthy in skylight-mcp (0 disagreements across 113
+  tools) and actively wrong in untappd-mcp, where `wishlist_add` is a GET and
+  everything else is a POST — it would have called a deletion additive and an
+  addition a read. vibo-mcp has no verb at all (GraphQL; the operation
+  constant is the oracle) and myhotlunchbox-mcp is POST-for-everything. **The
+  DESCRIPTIONS are the only universal oracle**, and they are often explicit:
+  `ofw_get_message` is destructive because its own text says the fetch
+  "stamps a First Viewed time the co-parent can see ... cannot be undone".
+
+- **Verify on the wire, PER TOOL, never from source or a summary count.**
+  `node scripts/audit-annotations.mjs <repo>/dist/index.js`. Source lies four
+  ways — a shared registrar rather than the call site, a regex window that
+  bleeds into the next declaration, an inner `toolAnnotations({...})`
+  overridden by an outer `destructiveHint`, and `readOnly` defaulting to true
+  so a missing key is a read. Every bug that mattered in the sweep was caught
+  here; the summary counts looked plausible each time.
 - **Write descriptions for SEARCH.** claude.ai defers tool schemas and the
   model must search to load one, so a tool whose name and description do not
   match how someone would look for it is effectively unreachable. At fleet
