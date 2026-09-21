@@ -40,6 +40,12 @@ import light:
 | `@chrischall/mcp-utils/scrape` | convenience alias for the zero-dep `scrape` module (also in the core barrel) |
 | `@chrischall/mcp-utils/test` | in-memory test harness for tool registration |
 
+See **[`docs/CLIENT-BEHAVIOUR.md`](docs/CLIENT-BEHAVIOUR.md)** for what MCP
+clients measurably support and *honour* — including why an unannotated tool
+publishes as destructive, why `structuredContent` is dead weight on
+claude.ai, and the three silent SDK gotchas around cancellation and
+progress.
+
 ```ts
 import { createMcpServer, textResult, requireEnvVar } from '@chrischall/mcp-utils';
 import { createSessionRegistry } from '@chrischall/mcp-utils/session';

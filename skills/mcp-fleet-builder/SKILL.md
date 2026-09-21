@@ -457,6 +457,10 @@ mcp-host bridge ls                     # a live lastUsedAt means a browser is al
 
 ## What claude.ai actually supports — MEASURED, don't guess
 
+> The full record, with dates, sample sizes and the queries to re-run it,
+> lives in `@chrischall/mcp-utils` `docs/CLIENT-BEHAVIOUR.md`. What follows is
+> the short form.
+
 Measured on the mcp-host fleet over the week to 2026-09-20 (usage-row
 telemetry, `principals.client_id` = claude.ai, ~10.6k requests) plus a
 throwaway probe connector. Build to this table rather than to the spec:
