@@ -1,6 +1,6 @@
 ---
 name: mcp-fleet-builder
-description: "Build or modify a chrischall service integration — by default a lean fpx (@fetchproxy/cli) skill, and a full chrischall MCP server (the ~50 *-mcp repos under ~/git on @chrischall/mcp-utils) only when the user wants one. Covers the fpx-skill-first decision, the skeleton, bearer / cookie-session / fetchproxy / rate-limited-public-API+OAuth-writes archetypes, hosting on mcp-host (claude.ai remote MCP — a registration, not a per-repo Worker; browser-bridge repos included since fetchproxy 2.1.0), bootstrap, release/CI gotchas, and a MEASURED table of which MCP v2 features claude.ai actually supports (cancellation and progress yes, elicitation no) with the silent SDK-v2 gotchas behind them."
+description: "Build or modify a chrischall service integration — by default a lean fpx (@fetchproxy/cli) skill, and a full chrischall MCP server (the ~50 *-mcp repos under ~/git on @chrischall/mcp-utils) only when the user wants one. Covers the fpx-skill-first decision, the skeleton, bearer / cookie-session / fetchproxy / rate-limited-public-API+OAuth-writes archetypes, hosting on mcp-host (claude.ai remote MCP — a registration, not a per-repo Worker; browser-bridge repos included since fetchproxy 2.1.0), bootstrap, release/CI gotchas, and a MEASURED table of what claude.ai actually supports and HONOURS (cancellation yes; elicitation, progress, structuredContent and destructiveHint all no) with the silent SDK-v2 gotchas behind them."
 ---
 
 # Building a chrischall fleet MCP
@@ -498,6 +498,7 @@ a throwaway connector (`~/git/mcp-probe`, an MCPB registered as slug `probe`):
 | `text` / `image` / embedded `resource` | delivered |
 | a registered prompt | `prompts/list` never called |
 | a subscribable resource | `resources/subscribe` never called |
+| a `title` annotation | **stripped** — the loaded schema carries `name` and `description` only, so the model never sees it |
 
 **Tool schemas are DEFERRED on claude.ai.** The model gets names, then has to
 run a `tool_search` to load parameters before it can call anything — observed
@@ -530,8 +531,10 @@ checked only for a thrown error read `isError: true` as success.
 `requireConfirmation` returns an `input_required` result, and the SDK refuses
 to deliver one to a client that declared no `elicitation`. **That refusal is
 raised AFTER the handler returned**, so the handler cannot catch it and
-claude.ai renders it as `{"error": "Error occurred during tool execution"}`
-with nothing else. From gogcli-mcp #358 (2026-09-17) until mcp-utils #258,
+claude.ai renders it as `{"error": "Error occurred during tool execution",
+"request_id": "..."}` with nothing else — reproduced VERBATIM 2026-09-21 by a
+clean-room probe that does nothing but return `inputRequired`, so that string
+is the canonical symptom of this and not of whatever the tool was doing. From gogcli-mcp #358 (2026-09-17) until mcp-utils #258,
 all five Gmail dispatch tools were dead on that surface and said nothing.
 
 It does not look like a capability problem, which is why it cost a day: the
