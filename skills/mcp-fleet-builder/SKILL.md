@@ -516,6 +516,25 @@ things to drift. What follows is only what it means for building one.
   `registerCredentialHealthcheckTool`, which is fine — but you have to look
   to know that.
 
+- **Audit the WHOLE fleet on the wire, not the repos a grep surfaced.**
+  `node scripts/audit-fleet-annotations.mjs ~/git` walks every built
+  `*-mcp`, applies the spec defaults, and flags the one direction that costs
+  safety: a tool NAMED for an irreversible act that claims to be read-only
+  or additive. It exits non-zero on a hit.
+
+  Run it because a source scan answers the wrong question. "Which repos use
+  `toolAnnotations`" is not "which repos are annotated correctly", and the
+  only two false safe-claims ever found in this fleet — `outlook_send_mail`
+  and honeybook's `send_message`, each declaring `destructiveHint: false` on
+  a tool that mails a third party — were in repos with ZERO `toolAnnotations`
+  call sites. No source scan would have reached either. 63 servers is one
+  pass.
+
+  It reports SUSPECTS, never verdicts: read each description, because the
+  test is whether an inverse exists in that tool set and no keyword knows
+  that. `resy_remove_favorite` looks alarming and is correctly additive;
+  `send_message` looks ordinary and was not.
+
 - **Give the repo a meta-test so the next tool cannot forget.** Asserting
   `readOnlyHint` alone does not do it: `destructiveHint` defaults to true, so
   a write that omits it and a write that considered it leave identical
