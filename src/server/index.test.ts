@@ -236,15 +236,63 @@ describe('withGracefulShutdown — bounded cleanup', () => {
     expect(exitSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('a second signal during a stuck shutdown forces an immediate exit', async () => {
+  it('a second signal after the grace window during a stuck shutdown forces an immediate exit', async () => {
+    vi.useFakeTimers();
     const target = { close: () => new Promise<void>(() => {}) };
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     withGracefulShutdown(target, { timeoutMs: 60_000 });
     process.emit('SIGTERM');
-    await new Promise((r) => setImmediate(r));
+    await vi.advanceTimersByTimeAsync(500);
     expect(exitSpy).not.toHaveBeenCalled();
     process.emit('SIGTERM');
+    expect(exitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a repeat signal inside the default 500ms grace window (npx double SIGINT) and still cleans up', async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    const onSignal = vi.fn(() => new Promise<void>((r) => (release = r)));
+    const target = { close: vi.fn(async () => undefined) };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    withGracefulShutdown(target, { onSignal, timeoutMs: 60_000 });
+    process.emit('SIGINT');
+    await vi.advanceTimersByTimeAsync(10);
+    process.emit('SIGINT'); // the duplicate npx delivers for one Ctrl-C
+    await vi.advanceTimersByTimeAsync(489);
+    process.emit('SIGINT');
+    expect(exitSpy).not.toHaveBeenCalled();
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onSignal).toHaveBeenCalledTimes(1);
+    expect(target.close).toHaveBeenCalledTimes(1);
+    expect(exitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('honours a custom repeatSignalGraceMs', async () => {
+    vi.useFakeTimers();
+    const target = { close: () => new Promise<void>(() => {}) };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    withGracefulShutdown(target, { timeoutMs: 60_000, repeatSignalGraceMs: 2000 });
+    process.emit('SIGINT');
+    await vi.advanceTimersByTimeAsync(1999);
+    process.emit('SIGINT');
+    expect(exitSpy).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    process.emit('SIGINT');
+    expect(exitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('repeatSignalGraceMs: 0 restores the immediate second-signal exit', async () => {
+    vi.useFakeTimers();
+    const target = { close: () => new Promise<void>(() => {}) };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    withGracefulShutdown(target, { timeoutMs: 60_000, repeatSignalGraceMs: 0 });
+    process.emit('SIGINT');
+    process.emit('SIGINT');
     expect(exitSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -512,6 +560,12 @@ describe('tool error hints', () => {
 });
 
 describe('withGracefulShutdown — option validation', () => {
+  it.each([[-1], [Number.NaN], [Number.POSITIVE_INFINITY]])('rejects repeatSignalGraceMs %s', (t) => {
+    expect(() =>
+      withGracefulShutdown({ close: async () => undefined }, { exit: false, repeatSignalGraceMs: t }),
+    ).toThrow(RangeError);
+  });
+
   it.each([[0], [-1], [Number.NaN], [Number.POSITIVE_INFINITY]])('rejects timeoutMs %s', (t) => {
     expect(() => withGracefulShutdown({ close: async () => undefined }, { exit: false, timeoutMs: t })).toThrow(
       RangeError,
