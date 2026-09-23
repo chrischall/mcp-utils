@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.3.0](https://github.com/chrischall/mcp-utils/compare/v2.2.1...v2.3.0) (2026-09-23)
+
+
+### Features
+
+* harden token refresh, request origin checks and secret redaction; add confirmation binding and path confinement ([#281](https://github.com/chrischall/mcp-utils/issues/281)) ([9bdc569](https://github.com/chrischall/mcp-utils/commit/9bdc56916251a5e9b2aef1369700d0d1a61947ef))
+* **scripts:** audit the whole fleet's annotations on the wire ([#274](https://github.com/chrischall/mcp-utils/issues/274)) ([0051515](https://github.com/chrischall/mcp-utils/commit/0051515ba024a2a36b0b3811b07974ab376a61a6))
+* **scripts:** generate AGENTS.md from CLAUDE.md instead of maintaining two ([#276](https://github.com/chrischall/mcp-utils/issues/276)) ([a4d9ecd](https://github.com/chrischall/mcp-utils/commit/a4d9ecd8b8a1e5abcb6b486f6a8262d80d121e6d))
+
+
+### Bug Fixes
+
+* close confirmation-binding key collisions and loops, allow base-URL userinfo, and survive a double Ctrl-C ([#283](https://github.com/chrischall/mcp-utils/issues/283)) ([9b86c98](https://github.com/chrischall/mcp-utils/commit/9b86c981b5f634620013a6b99746c8cd97aaa5cf))
+* **scripts:** let sync-agents-md create the file it says it generates ([#278](https://github.com/chrischall/mcp-utils/issues/278)) ([9a1d91b](https://github.com/chrischall/mcp-utils/commit/9a1d91b6a2f68c4962c4301fba09ff283cd9ae0a)), closes [#277](https://github.com/chrischall/mcp-utils/issues/277)
+
 ## [2.2.1](https://github.com/chrischall/mcp-utils/compare/v2.2.0...v2.2.1) (2026-09-21)
 
 
