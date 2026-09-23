@@ -309,3 +309,14 @@ describe('buildIdExtractor', () => {
     expect(extract('abc-99-def')).toBe('99');
   });
 });
+
+// audit 2026-09 (BUG-3): the script strip must not drift after 'İ' (U+0130).
+describe('extractPlainTextFromHtml with non-length-preserving Unicode', () => {
+  it('strips script content that follows U+0130', () => {
+    const html = '<p>İİİİİİİİ</p><script>var secretScript = 1;</script><p>after</p>';
+    const out = extractPlainTextFromHtml(html);
+    expect(out).not.toContain('secretScript');
+    expect(out).toContain('after');
+    expect(out).toContain('İİİİİİİİ');
+  });
+});

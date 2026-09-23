@@ -271,13 +271,23 @@ export function extractPlainTextFromHtml(html: string): string {
 }
 
 /**
+ * Lowercase ASCII letters only. Unlike `String#toLowerCase`, this is
+ * length-preserving (`'İ'` lowercases to TWO UTF-16 units), so offsets found in
+ * the result index the original string correctly. HTML tag and attribute
+ * names are ASCII, so nothing is lost.
+ */
+function asciiLower(s: string): string {
+  return s.replace(/[A-Z]+/g, (m) => m.toLowerCase());
+}
+
+/**
  * Remove every `<tag …>…</tag>` element (opening tag, content, and close) in a
  * single linear forward pass. An unterminated opener drops the remainder — the
  * safe choice for the script/style strip (never leak the tail). Case-insensitive
  * on the tag name.
  */
 function stripElementContent(html: string, tag: string): string {
-  const lower = html.toLowerCase();
+  const lower = asciiLower(html);
   const open = `<${tag}`;
   const close = `</${tag}>`;
   let out = '';

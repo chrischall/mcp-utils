@@ -270,3 +270,17 @@ describe('stripJsonGuard', () => {
     expect(stripJsonGuard('{"a":1}')).toBe('{"a":1}');
   });
 });
+
+// audit 2026-09 (BUG-3): toLowerCase is not length-preserving ('İ' → 2 units),
+// so offsets from a lowercased copy drifted against the original.
+describe('scanners stay aligned after non-length-preserving Unicode', () => {
+  it('extractJsonLdBlocks finds a block after U+0130', () => {
+    const html = '<p>İstanbul İzmir</p><script type="application/ld+json">{"a":1}</script>';
+    expect(extractJsonLdBlocks(html)).toEqual([{ a: 1 }]);
+  });
+
+  it('ogContent reads the right attribute span after U+0130', () => {
+    const html = '<title>İİİİ</title><meta property="og:title" content="Venue">';
+    expect(ogContent(html, 'og:title')).toBe('Venue');
+  });
+});

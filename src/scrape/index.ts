@@ -240,6 +240,16 @@ function nextTagOpen(lowerHtml: string, name: string, from: number): number {
 }
 
 /**
+ * Lowercase ASCII letters only. Unlike `String#toLowerCase`, this is
+ * length-preserving (`'İ'` lowercases to TWO UTF-16 units), so offsets found in
+ * the result index the original string correctly. HTML tag and attribute
+ * names are ASCII, so nothing is lost.
+ */
+function asciiLower(s: string): string {
+  return s.replace(/[A-Z]+/g, (m) => m.toLowerCase());
+}
+
+/**
  * Parse every `<script type="application/ld+json">` block in the page,
  * skipping malformed ones. Returns the parsed values in document order.
  * Consolidates etix's / tripadvisor's ld+json block iteration.
@@ -252,7 +262,7 @@ function nextTagOpen(lowerHtml: string, name: string, from: number): number {
  */
 export function extractJsonLdBlocks(html: string): unknown[] {
   const out: unknown[] = [];
-  const lower = html.toLowerCase();
+  const lower = asciiLower(html);
   let i = 0;
   for (;;) {
     const open = nextTagOpen(lower, 'script', i);
@@ -322,7 +332,7 @@ const META_PROP_RE = /\b(?:property|name)\s*=\s*["']([^"']*)["']/i;
  */
 export function ogContent(html: string, property: string): string | undefined {
   const want = property.toLowerCase();
-  const lower = html.toLowerCase();
+  const lower = asciiLower(html);
   let i = 0;
   for (;;) {
     const open = nextTagOpen(lower, 'meta', i);
