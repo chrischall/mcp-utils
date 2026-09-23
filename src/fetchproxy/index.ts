@@ -947,16 +947,16 @@ function healthcheckHint(args: {
   return `Unexpected error — see the error.message field for details.`;
 }
 
-/**
- * Snake-case a live `status()` snapshot into the same shape `runProbe`'s
- * `bridge` projection has — used on the path-aware route, where the probe
- * did not go through `runProbe`. Tolerates a pre-2.5.0 server (no `session`).
- */
 /** Redact + truncate a bridge failure reason, keeping `null`/absent as-is. */
 function redactReason<T>(reason: T): T {
   return (typeof reason === 'string' ? truncateErrorMessage(reason) : reason) as T;
 }
 
+/**
+ * Snake-case a live `status()` snapshot into the same shape `runProbe`'s
+ * `bridge` projection has — used on the path-aware route, where the probe
+ * did not go through `runProbe`. Tolerates a pre-2.5.0 server (no `session`).
+ */
 function projectBridgeStatus(
   health: ReturnType<FetchproxyTransport['status']>,
 ): NonNullable<BridgeHealthcheckResult['bridge']> {
