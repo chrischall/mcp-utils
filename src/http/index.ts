@@ -73,7 +73,11 @@ export interface ReactiveTokenSource {
 }
 
 export interface ApiClientOptions {
-  /** Absolute base URL; request paths are appended verbatim. A trailing slash is trimmed. */
+  /**
+   * Absolute base URL; request paths are appended verbatim. A trailing slash is trimmed.
+   * A path whose result lands on a different origin (e.g. `@other.host/x`,
+   * `.other.host`, `:8443/x`) is refused before any credential is attached.
+   */
   baseUrl: string;
   /**
    * Resolve the current bearer token. Called per request so the caller can
@@ -129,9 +133,11 @@ export interface ApiClientOptions {
   sleep?: (ms: number) => Promise<void>;
   /**
    * Per-attempt request timeout in milliseconds. When set (> 0), each fetch is
-   * bounded by an {@link AbortController}; on expiry it throws a
-   * {@link RequestTimeoutError} instead of hanging until the host kills the
-   * tool call. A 429 retry gets a fresh timeout. Omit/0 to disable (default).
+   * bounded by an {@link AbortController} — from the request until its body
+   * has been read, so a body that stalls after the headers is bounded too; on
+   * expiry it throws a {@link RequestTimeoutError} instead of hanging until the
+   * host kills the tool call. A 429 retry gets a fresh timeout. Omit/0 to
+   * disable (default).
    */
   timeout?: number;
 }
@@ -295,9 +301,25 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   const authHeader = (token: string | undefined): Record<string, string> =>
     !token ? {} : opts.tokenHeader ? { [opts.tokenHeader]: token } : { Authorization: `Bearer ${token}` };
 
+  /**
+   * One in-flight attempt. The timeout does NOT stop at the headers: `fetch`
+   * resolves as soon as they arrive, and a body that then stalls would hold
+   * the tool call open past `timeout` — the thing the option exists to
+   * prevent. So the timer stays armed until the caller has read the body
+   * ({@link readBody}) and calls `done()`.
+   */
+  interface Attempt {
+    res: Response;
+    /** Disarm the timer. Idempotent. */
+    done: () => void;
+    /** Rejects with RequestTimeoutError if the timer fires; never resolves. */
+    expired: Promise<never> | undefined;
+  }
+
   // Bound `run` with an AbortController when a timeout is configured, mapping the
-  // abort to a RequestTimeoutError. No timeout → run as-is (no signal).
-  function withTimeout(run: (signal?: AbortSignal) => Promise<Response>): Promise<Response> {
+  // abort to a RequestTimeoutError. No timeout → no timer (the caller's
+  // cancellation still applies).
+  async function withTimeout(run: (signal?: AbortSignal) => Promise<Response>): Promise<Attempt> {
     // THE CALLER'S CANCELLATION, folded in wherever it exists
     // (`cancel/index.ts`): a request the caller has given up on is the one
     // piece of work it is always safe to stop, and until this the only
@@ -308,31 +330,96 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     // NO TIMEOUT is no longer "no signal": a service configured without one
     // still honours the caller, which is the case where it matters most,
     // since nothing else was ever going to stop that request.
-    if (timeoutMs == null || timeoutMs <= 0) return run(withAmbientCancellation(undefined));
+    if (timeoutMs == null || timeoutMs <= 0) {
+      const res = await run(withAmbientCancellation(undefined));
+      return { res, done: () => {}, expired: undefined };
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
-    return run(withAmbientCancellation(controller.signal))
-      .catch((err: unknown) => {
-        // Told apart by WHICH signal fired, not by the error: an abort is an
-        // `AbortError` whichever end caused it, so asking the controller is
-        // the only way to avoid reporting a caller's cancellation as this
-        // service timing out — a diagnosis that sends somebody to raise a
-        // timeout that was never reached.
-        if (err instanceof Error && err.name === 'AbortError' && controller.signal.aborted) {
-          throw new RequestTimeoutError(service, timeoutMs);
-        }
-        throw err;
-      })
-      .finally(() => clearTimeout(timer));
+    let res: Response;
+    try {
+      res = await run(withAmbientCancellation(controller.signal));
+    } catch (err) {
+      clearTimeout(timer);
+      // Told apart by WHICH signal fired, not by the error: an abort is an
+      // `AbortError` whichever end caused it, so asking the controller is
+      // the only way to avoid reporting a caller's cancellation as this
+      // service timing out — a diagnosis that sends somebody to raise a
+      // timeout that was never reached.
+      if (err instanceof Error && err.name === 'AbortError' && controller.signal.aborted) {
+        throw new RequestTimeoutError(service, timeoutMs);
+      }
+      throw err;
+    }
+    const expired = new Promise<never>((_resolve, reject) => {
+      controller.signal.addEventListener('abort', () => reject(new RequestTimeoutError(service, timeoutMs)), {
+        once: true,
+      });
+    });
+    // Only observed if a body read is racing it; never an unhandled rejection.
+    expired.catch(() => {});
+    return { res, done: () => clearTimeout(timer), expired };
   }
 
-  async function send(method: string, path: string, opt: RequestOptions): Promise<Response> {
+  /**
+   * Read the body of `attempt` under its timeout, then disarm the timer.
+   * Races the read against the timer rather than trusting the stream to
+   * honour the abort signal, so a custom `fetchImpl` whose body ignores the
+   * signal is bounded too.
+   */
+  async function readBody<T>(attempt: Attempt, read: (res: Response) => Promise<T>): Promise<T> {
+    try {
+      if (!attempt.expired) return await read(attempt.res);
+      return await Promise.race([read(attempt.res), attempt.expired]);
+    } catch (err) {
+      if (err instanceof RequestTimeoutError) {
+        attempt.res.body?.cancel().catch(() => {});
+      }
+      throw err;
+    } finally {
+      attempt.done();
+    }
+  }
+
+  const baseOrigin = ((): string | undefined => {
+    try {
+      return new URL(base).origin;
+    } catch {
+      return undefined;
+    }
+  })();
+
+  /**
+   * Refuse a `path` that would carry the credential off the base origin.
+   * The URL is built by concatenation, so a path such as `@other.host/x`
+   * turns the base host into userinfo and `fetch` would send the
+   * Authorization header to `other.host`. Checked before any token is minted.
+   */
+  function resolveUrl(path: string, query: string): string {
+    const url = `${base}${path}${query}`;
+    if (baseOrigin === undefined) return url; // unparseable base: nothing to compare against
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new Error(`Refusing request to ${service}: path ${JSON.stringify(path)} does not form a valid URL.`);
+    }
+    if (parsed.origin !== baseOrigin || parsed.username !== '' || parsed.password !== '') {
+      throw new Error(
+        `Refusing request to ${service}: path ${JSON.stringify(path)} resolves outside the base origin ${baseOrigin}. ` +
+          'Paths must be relative to baseUrl (start them with "/").',
+      );
+    }
+    return url;
+  }
+
+  async function send(method: string, path: string, opt: RequestOptions): Promise<Attempt> {
     // formData wins over a JSON body; it's sent verbatim so fetch sets the boundary.
     const isMultipart = opt.formData !== undefined;
     const hasJsonBody = !isMultipart && opt.body !== undefined;
     const reqBody: FormData | string | undefined = isMultipart ? opt.formData : hasJsonBody ? JSON.stringify(opt.body) : undefined;
     const query = opt.query ? buildQueryString(opt.query) : '';
-    const url = `${base}${path}${query}`;
+    const url = resolveUrl(path, query);
     const bodyInit = reqBody !== undefined ? { body: reqBody } : {};
 
     // One fetch with the given token; Authorization comes last from the auth
@@ -354,7 +441,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     // tokenManager (reactive refresh + 401-replay) takes precedence over getToken.
     // Each attempt is wrapped by withTimeout, so the abort signal reaches fetch
     // through whichever auth path is in play.
-    const once = (): Promise<Response> =>
+    const once = (): Promise<Attempt> =>
       withTimeout((signal) =>
         opts.tokenManager
           ? opts.tokenManager.withAuth((token) => fetchWith(token, signal))
@@ -364,9 +451,11 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     let attempt = 0;
     // attempt 0 is the initial request; up to `retry.count` further attempts on 429.
     for (;;) {
-      const res = await once();
+      const current = await once();
+      const res = current.res;
 
       if (retryStatuses.includes(res.status) && attempt < retry.count) {
+        current.done();
         attempt += 1;
         const delay = retry.honorRetryAfter
           ? parseRetryAfterMs(res.headers.get('retry-after'), {
@@ -377,18 +466,20 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
         await sleep(delay);
         continue;
       }
-      return res;
+      return current;
     }
   }
 
   async function fetchJson<T>(method: string, path: string, opt: RequestOptions = {}): Promise<T> {
-    const res = await send(method, path, opt);
+    const attempt = await send(method, path, opt);
+    const res = attempt.res;
 
+    if (res.status === 401 || res.status === 429 || res.status === 204) attempt.done();
     if (res.status === 401) throw unauthorized();
     if (res.status === 429) throw rateLimited();
     if (res.status === 204) return undefined as T;
 
-    const text = await res.text();
+    const text = await readBody(attempt, (r) => r.text());
     if (!res.ok) {
       throw new ApiError(res.status, formatApiError(res.status, method, path, text, { service }));
     }
@@ -398,12 +489,14 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
 
   async function fetchHtml(method: string, path: string, opt: RequestOptions = {}): Promise<string> {
     const headers = { Accept: 'text/html,*/*', ...opt.headers };
-    const res = await send(method, path, { ...opt, headers });
+    const attempt = await send(method, path, { ...opt, headers });
+    const res = attempt.res;
 
+    if (res.status === 401 || res.status === 429) attempt.done();
     if (res.status === 401) throw unauthorized();
     if (res.status === 429) throw rateLimited();
 
-    const text = await res.text();
+    const text = await readBody(attempt, (r) => r.text());
     if (!res.ok) {
       throw new ApiError(res.status, formatApiError(res.status, method, path, text, { service }));
     }
@@ -412,16 +505,21 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
 
   async function fetchRaw(method: string, path: string, opt: RequestOptions = {}): Promise<RawApiResponse> {
     const headers = { Accept: '*/*', ...opt.headers };
-    const res = await send(method, path, { ...opt, headers });
+    const attempt = await send(method, path, { ...opt, headers });
+    const res = attempt.res;
 
+    if (res.status === 401 || res.status === 429) attempt.done();
     if (res.status === 401) throw unauthorized();
     if (res.status === 429) throw rateLimited();
 
     if (!res.ok) {
-      const text = await res.text().catch(() => '');
+      const text = await readBody(attempt, (r) => r.text()).catch((err: unknown) => {
+        if (err instanceof RequestTimeoutError) throw err;
+        return '';
+      });
       throw new ApiError(res.status, formatApiError(res.status, method, path, text, { service }));
     }
-    const bytes = new Uint8Array(await res.arrayBuffer());
+    const bytes = new Uint8Array(await readBody(attempt, (r) => r.arrayBuffer()));
     return {
       status: res.status,
       contentType: res.headers.get('content-type'),
