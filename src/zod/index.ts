@@ -180,6 +180,7 @@ export interface ToolAnnotations {
   title?: string;
   readOnlyHint: boolean;
   idempotentHint?: boolean;
+  destructiveHint?: boolean;
   openWorldHint?: boolean;
 }
 
@@ -187,7 +188,11 @@ export interface ToolAnnotations {
 export interface ToolAnnotationsInput {
   /** Human-readable tool title (shown in clients). Omitted from output when unset. */
   title?: string;
-  /** Tool does not modify state. Default `true` (most fleet tools are reads). */
+  /**
+   * Tool does not modify state. Default `true` (most fleet tools are reads) —
+   * EXCEPT when `destructive` is set, which only describes a write, so the
+   * default becomes `false`. `readOnly: true` with `destructive: true` throws.
+   */
   readOnly?: boolean;
   /** Repeated identical calls have the same effect. Emitted ONLY when set. */
   idempotent?: boolean;
@@ -228,13 +233,21 @@ export interface ToolAnnotationsInput {
  * @example toolAnnotations({ readOnly: false })             // { readOnlyHint: false } — DESTRUCTIVE by spec default
  * @example toolAnnotations({ readOnly: false, destructive: false })
  *   // { readOnlyHint: false, destructiveHint: false } — a recoverable edit
+ * @example toolAnnotations({ destructive: true })
+ *   // { readOnlyHint: false, destructiveHint: true } — destructive implies a write
  * @example toolAnnotations({ title: 'Search', idempotent: true, openWorld: true })
  *   // { title, readOnlyHint: true, idempotentHint: true, openWorldHint: true }
  */
 export function toolAnnotations(opts: ToolAnnotationsInput = {}): ToolAnnotations {
+  // Per the MCP spec a client ignores destructiveHint when readOnlyHint is
+  // true, and may auto-approve read-only tools — so a destructive tool that
+  // forgot `readOnly: false` would be published as a safe read.
+  if (opts.readOnly === true && opts.destructive === true) {
+    throw new Error('toolAnnotations: readOnly: true contradicts destructive: true — a destructive tool is not read-only.');
+  }
   return {
     ...(opts.title !== undefined ? { title: opts.title } : {}),
-    readOnlyHint: opts.readOnly ?? true,
+    readOnlyHint: opts.readOnly ?? opts.destructive === undefined,
     ...(opts.idempotent !== undefined ? { idempotentHint: opts.idempotent } : {}),
     ...(opts.destructive !== undefined ? { destructiveHint: opts.destructive } : {}),
     ...(opts.openWorld !== undefined ? { openWorldHint: opts.openWorld } : {}),

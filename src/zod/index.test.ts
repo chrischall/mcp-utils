@@ -16,6 +16,7 @@ import {
   toolAnnotations,
   extractTime,
   normalizeTime,
+  type ToolAnnotations,
 } from './index.js';
 
 describe('atoms', () => {
@@ -267,5 +268,27 @@ describe('toolAnnotations destructive', () => {
   it('sits alongside the other hints without disturbing them', () => {
     expect(toolAnnotations({ title: 'T', readOnly: false, destructive: false, idempotent: true, openWorld: true }))
       .toEqual({ title: 'T', readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: true });
+  });
+});
+
+// audit 2026-09 (QUAL-1): a destructive tool must never be published read-only.
+describe('toolAnnotations — destructive implies not read-only', () => {
+  it('defaults readOnlyHint to false when destructive is set', () => {
+    expect(toolAnnotations({ destructive: true })).toEqual({ readOnlyHint: false, destructiveHint: true });
+    expect(toolAnnotations({ destructive: false })).toEqual({ readOnlyHint: false, destructiveHint: false });
+  });
+
+  it('rejects the contradictory readOnly: true + destructive: true', () => {
+    expect(() => toolAnnotations({ readOnly: true, destructive: true })).toThrow(/readOnly/);
+  });
+
+  it('exposes destructiveHint on the ToolAnnotations type', () => {
+    const a: ToolAnnotations = toolAnnotations({ readOnly: false, destructive: true });
+    const d: boolean | undefined = a.destructiveHint;
+    expect(d).toBe(true);
+  });
+
+  it('leaves the plain read default untouched', () => {
+    expect(toolAnnotations({})).toEqual({ readOnlyHint: true });
   });
 });
