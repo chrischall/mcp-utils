@@ -203,6 +203,62 @@ describe('withGracefulShutdown', () => {
   });
 });
 
+// audit 2026-09 (BUG-4): a wedged cleanup must not hang the process forever.
+describe('withGracefulShutdown — bounded cleanup', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    process.removeAllListeners('SIGINT');
+    process.removeAllListeners('SIGTERM');
+  });
+
+  it('exits after the cleanup timeout when onSignal never settles', async () => {
+    vi.useFakeTimers();
+    const target = { close: vi.fn(async () => undefined) };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    withGracefulShutdown(target, { onSignal: () => new Promise<void>(() => {}), timeoutMs: 1000 });
+    process.emit('SIGTERM');
+    await vi.advanceTimersByTimeAsync(999);
+    expect(exitSpy).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(exitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('defaults to a 5s cleanup bound when close() never settles', async () => {
+    vi.useFakeTimers();
+    const target = { close: () => new Promise<void>(() => {}) };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    withGracefulShutdown(target);
+    process.emit('SIGINT');
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(exitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('a second signal during a stuck shutdown forces an immediate exit', async () => {
+    const target = { close: () => new Promise<void>(() => {}) };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    withGracefulShutdown(target, { timeoutMs: 60_000 });
+    process.emit('SIGTERM');
+    await new Promise((r) => setImmediate(r));
+    expect(exitSpy).not.toHaveBeenCalled();
+    process.emit('SIGTERM');
+    expect(exitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('exits once, not twice, when cleanup finishes in time', async () => {
+    vi.useFakeTimers();
+    const target = { close: vi.fn(async () => undefined) };
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    withGracefulShutdown(target, { timeoutMs: 1000 });
+    process.emit('SIGTERM');
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(exitSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('runMcp', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -356,7 +412,7 @@ describe('tool error hints', () => {
 
   it('appends the hint of an McpToolError rejected asynchronously', async () => {
     const { client, close } = await harness((s) =>
-      s.registerTool('t', { inputSchema: z.object({ a: z.string() }) }, async () => {
+      void s.registerTool('t', { inputSchema: z.object({ a: z.string() }) }, async () => {
         throw new McpToolError('no such option 999', { hint: 'Available: 1 (Bus), 2 (Walker)' });
       }),
     );
@@ -368,7 +424,7 @@ describe('tool error hints', () => {
 
   it('appends the hint of an McpToolError thrown synchronously', async () => {
     const { client, close } = await harness((s) =>
-      s.registerTool('t', {}, (() => {
+      void s.registerTool('t', {}, (() => {
         throw new McpToolError('bad', { hint: 'do the thing' });
       }) as never),
     );
@@ -380,7 +436,7 @@ describe('tool error hints', () => {
   // `(args, extra)`; the wrapper forwards whatever arrived, so both work.
   it('leaves a zero-argument tool callable', async () => {
     const { client, close } = await harness((s) =>
-      s.registerTool('t', {}, async () => ({ content: [{ type: 'text' as const, text: 'ok' }] })),
+      void s.registerTool('t', {}, async () => ({ content: [{ type: 'text' as const, text: 'ok' }] })),
     );
     expect(textOf(await client.callTool({ name: 't' }))).toBe('ok');
     await close();
@@ -389,7 +445,7 @@ describe('tool error hints', () => {
   it('passes a tool with an inputSchema its arguments unchanged', async () => {
     const seen: unknown[] = [];
     const { client, close } = await harness((s) =>
-      s.registerTool('t', { inputSchema: z.object({ a: z.string() }) }, async (args) => {
+      void s.registerTool('t', { inputSchema: z.object({ a: z.string() }) }, async (args) => {
         seen.push(args);
         return { content: [{ type: 'text' as const, text: 'ok' }] };
       }),
@@ -401,7 +457,7 @@ describe('tool error hints', () => {
 
   it('leaves an McpToolError with no hint as the bare message', async () => {
     const { client, close } = await harness((s) =>
-      s.registerTool('t', {}, async () => {
+      void s.registerTool('t', {}, async () => {
         throw new McpToolError('just this');
       }),
     );
@@ -413,7 +469,7 @@ describe('tool error hints', () => {
   // one rather than being flattened into advice.
   it('leaves a non-McpToolError untouched', async () => {
     const { client, close } = await harness((s) =>
-      s.registerTool('t', {}, async () => {
+      void s.registerTool('t', {}, async () => {
         throw new TypeError('undefined is not a function');
       }),
     );
@@ -427,7 +483,7 @@ describe('tool error hints', () => {
   it('can be opted out of', async () => {
     const { client, close } = await harness(
       (s) =>
-        s.registerTool('t', {}, async () => {
+        void s.registerTool('t', {}, async () => {
           throw new McpToolError('bad', { hint: 'do the thing' });
         }),
       false,
@@ -445,12 +501,20 @@ describe('tool error hints', () => {
       shutdown: false,
       tools: [
         (s) =>
-          s.registerTool('t', {}, async () => {
+          void s.registerTool('t', {}, async () => {
             throw new McpToolError('bad', { hint: 'do the thing' });
           }),
       ],
     });
     expect(textOf(await client.callTool({ name: 't' }))).toContain('Hint: do the thing');
     await close();
+  });
+});
+
+describe('withGracefulShutdown — option validation', () => {
+  it.each([[0], [-1], [Number.NaN], [Number.POSITIVE_INFINITY]])('rejects timeoutMs %s', (t) => {
+    expect(() => withGracefulShutdown({ close: async () => undefined }, { exit: false, timeoutMs: t })).toThrow(
+      RangeError,
+    );
   });
 });

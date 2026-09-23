@@ -331,14 +331,27 @@ export interface GracefulShutdownOptions {
    * fleet's `process.exit(0)`). Set `false` in tests so the process survives.
    */
   exit?: boolean;
+  /**
+   * Upper bound (ms) on `onSignal` + `close`. When cleanup has not settled by
+   * then, it is abandoned (logged) and the process exits. Default `5000`.
+   * Must be a finite number > 0. Only meaningful with `exit` on.
+   */
+  timeoutMs?: number;
 }
+
+/** Default bound on graceful-shutdown cleanup. */
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5000;
 
 /**
  * Wire SIGINT/SIGTERM to a one-shot graceful shutdown: run `onSignal` (e.g.
  * close the client/transport), close `target`, then `process.exit(0)` (unless
- * `exit: false`). Idempotent — a second signal mid-shutdown is ignored, and a
- * throwing `onSignal`/`close` is logged but still exits cleanly so a wedged
- * cleanup can't hang the host.
+ * `exit: false`). A throwing `onSignal`/`close` is logged but still exits
+ * cleanly, and cleanup that never settles is abandoned after `timeoutMs`
+ * (default 5s), so a wedged cleanup can't hang the host. A second signal while
+ * shutdown is in progress forces an immediate exit (with `exit: false` it is
+ * ignored, as before). Note that under `npx` a single Ctrl-C can deliver
+ * SIGINT twice (once to the process group, once forwarded by npx), which
+ * takes that immediate-exit path and skips the rest of the cleanup.
  *
  * `target` is the {@link StdioServerHandle} when called from {@link runMcp} —
  * closing the handle closes whichever instance the connection pinned *and* the
@@ -350,11 +363,37 @@ export function withGracefulShutdown(
   opts: GracefulShutdownOptions = {},
 ): void {
   const shouldExit = opts.exit ?? true;
+  if (opts.timeoutMs !== undefined && !(Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0)) {
+    throw new RangeError('withGracefulShutdown: timeoutMs must be a finite number greater than 0.');
+  }
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
   let shuttingDown = false;
+  let exited = false;
+
+  const exitOnce = (): void => {
+    if (exited) return;
+    exited = true;
+    process.exit(0);
+  };
 
   const handler = (signal: ShutdownSignal): void => {
-    if (shuttingDown) return;
+    if (shuttingDown) {
+      // The host asked again: stop waiting on cleanup.
+      if (shouldExit) {
+        console.error(`[mcp-utils] second ${signal} during shutdown — exiting now`);
+        exitOnce();
+      }
+      return;
+    }
     shuttingDown = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (shouldExit) {
+      timer = setTimeout(() => {
+        console.error(`[mcp-utils] graceful shutdown on ${signal} did not finish in ${timeoutMs}ms — exiting`);
+        exitOnce();
+      }, timeoutMs);
+      timer.unref?.();
+    }
     void (async () => {
       try {
         if (opts.onSignal) await opts.onSignal(signal);
@@ -366,7 +405,8 @@ export function withGracefulShutdown(
           }`,
         );
       } finally {
-        if (shouldExit) process.exit(0);
+        if (timer !== undefined) clearTimeout(timer);
+        if (shouldExit) exitOnce();
       }
     })();
   };

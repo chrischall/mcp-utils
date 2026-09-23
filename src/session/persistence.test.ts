@@ -998,3 +998,198 @@ describe('CookieSessionManager — persistence read ordering', () => {
     expect(logins).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// audit 2026-09: network errors and the library's own refresher are transient
+// (BUG-1); a transient proactive-refresh failure keeps a still-valid token (BUG-6)
+// ---------------------------------------------------------------------------
+
+describe('TokenManager — transient failures from the network and createOAuth2Refresher', () => {
+  function diskLike(seed: BearerTokens | null): StatePersistence<BearerTokens> & { value: BearerTokens | null } {
+    const api = {
+      value: seed,
+      load: () => api.value,
+      save: (t: BearerTokens) => {
+        api.value = t;
+      },
+      clear: () => {
+        api.value = null;
+      },
+    };
+    return api;
+  }
+
+  function managerOver(refresh: (rt: string) => Promise<{ accessToken: string; expiresAt: number }>) {
+    const c = clock();
+    const counters = { logins: 0 };
+    const store = diskLike({ accessToken: 'a1', refreshToken: 'good', expiresAt: c.now() - 1 });
+    const mgr = new TokenManager({
+      initial: async () => {
+        counters.logins += 1;
+        return { accessToken: 'fresh', expiresAt: c.now() + 3_600_000 };
+      },
+      refresh,
+      persistence: store,
+      now: c.now,
+    });
+    return { mgr, store, counters };
+  }
+
+  const networkErrors: Array<[string, unknown]> = [
+    ['undici "fetch failed"', new TypeError('fetch failed', { cause: Object.assign(new Error('x'), { code: 'ECONNRESET' }) })],
+    ['a DNS failure code', Object.assign(new Error('getaddrinfo ENOTFOUND auth.test'), { code: 'ENOTFOUND' })],
+    ['an AbortError', Object.assign(new Error('aborted'), { name: 'AbortError' })],
+    ['a TimeoutError', Object.assign(new Error('timed out'), { name: 'TimeoutError' })],
+    ['any error carrying status 502', Object.assign(new Error('bad gateway'), { status: 502 })],
+    ['any error carrying status 429', Object.assign(new Error('slow down'), { status: 429 })],
+  ];
+
+  for (const [label, err] of networkErrors) {
+    it(`treats ${label} as transient`, async () => {
+      const { mgr, store, counters } = managerOver(async () => {
+        throw err;
+      });
+      await expect(mgr.getAccessToken()).rejects.toThrow();
+      expect(counters.logins).toBe(0);
+      expect(store.value?.refreshToken).toBe('good');
+    });
+  }
+
+  it('still treats a programming TypeError as revoked (re-mints)', async () => {
+    const { mgr, counters } = managerOver(async () => {
+      throw new TypeError("Cannot read properties of undefined (reading 'access_token')");
+    });
+    expect(await mgr.getAccessToken()).toBe('fresh');
+    expect(counters.logins).toBe(1);
+  });
+
+  async function refresherOver(fetchImpl: typeof fetch) {
+    const { createOAuth2Refresher } = await import('../auth/index.js');
+    const r = createOAuth2Refresher({ endpoint: 'https://auth.test/token', refreshToken: 'good', fetchImpl });
+    return async (rt: string) => {
+      const out = await r(rt);
+      return { accessToken: out.accessToken, expiresAt: Date.now() + 3_600_000 };
+    };
+  }
+
+  it('keeps the refresh token when createOAuth2Refresher gets a 503', async () => {
+    const refresh = await refresherOver((async () => new Response('down', { status: 503 })) as unknown as typeof fetch);
+    const { mgr, store, counters } = managerOver(refresh);
+    await expect(mgr.getAccessToken()).rejects.toThrow(/503/);
+    expect(counters.logins).toBe(0);
+    expect(store.value?.refreshToken).toBe('good');
+  });
+
+  it('keeps the refresh token when createOAuth2Refresher’s fetch rejects', async () => {
+    const refresh = await refresherOver((async () => {
+      throw new TypeError('fetch failed');
+    }) as unknown as typeof fetch);
+    const { mgr, store, counters } = managerOver(refresh);
+    await expect(mgr.getAccessToken()).rejects.toThrow(/fetch failed/);
+    expect(counters.logins).toBe(0);
+    expect(store.value?.refreshToken).toBe('good');
+  });
+
+  it('still re-mints when createOAuth2Refresher gets a 400 invalid_grant', async () => {
+    const refresh = await refresherOver((async () =>
+      new Response('{"error":"invalid_grant"}', { status: 400 })) as unknown as typeof fetch);
+    const { mgr, counters } = managerOver(refresh);
+    expect(await mgr.getAccessToken()).toBe('fresh');
+    expect(counters.logins).toBe(1);
+  });
+});
+
+describe('TokenManager — transient proactive-refresh failure inside the skew window', () => {
+  it('returns the still-valid access token instead of failing the call', async () => {
+    const c = clock();
+    const mgr = new TokenManager({
+      // 2 minutes left: inside the 5-minute skew window, but still valid.
+      initial: { accessToken: 'still-good', refreshToken: 'r', expiresAt: c.now() + 120_000 },
+      refresh: async () => {
+        throw new ApiError(503, 'Service Unavailable');
+      },
+      now: c.now,
+    });
+    expect(await mgr.getAccessToken()).toBe('still-good');
+  });
+
+  it('throws the transient error once the token has actually expired', async () => {
+    const c = clock();
+    const mgr = new TokenManager({
+      initial: { accessToken: 'old', refreshToken: 'r', expiresAt: c.now() + 120_000 },
+      refresh: async () => {
+        throw new ApiError(503, 'Service Unavailable');
+      },
+      now: c.now,
+    });
+    c.advance(120_000);
+    await expect(mgr.getAccessToken()).rejects.toThrow(/Service Unavailable/);
+  });
+
+  it('still re-mints on a revoked refresh even while the token is valid', async () => {
+    const c = clock();
+    let logins = 0;
+    const mgr = new TokenManager({
+      initial: async () => {
+        logins += 1;
+        return { accessToken: `a${logins}`, refreshToken: 'r', expiresAt: c.now() + 120_000 };
+      },
+      refresh: async () => {
+        throw new ApiError(400, 'invalid_grant');
+      },
+      now: c.now,
+    });
+    // The first call bootstraps a1, which is already inside the skew window,
+    // so the refresh fails as revoked and the login re-runs.
+    expect(await mgr.getAccessToken()).toBe('a2');
+    expect(logins).toBe(2);
+  });
+});
+
+describe('TokenManager — a refresher whose rotation could not be persisted', () => {
+  it('surfaces the error without wiping the store or re-logging in', async () => {
+    const { createOAuth2Refresher } = await import('../auth/index.js');
+    const c = clock();
+    let n = 0;
+    const r = createOAuth2Refresher({
+      endpoint: 'https://auth.test/token',
+      refreshToken: 'good',
+      fetchImpl: (async () => {
+        n += 1;
+        return new Response(JSON.stringify({ access_token: `at-${n}`, refresh_token: `rt-${n}` }), { status: 200 });
+      }) as unknown as typeof fetch,
+      onRotate: () => {
+        throw new Error('disk full');
+      },
+    });
+    let logins = 0;
+    let cleared = 0;
+    const store: StatePersistence<BearerTokens> & { value: BearerTokens | null } = {
+      value: { accessToken: 'a1', refreshToken: 'good', expiresAt: c.now() - 1 },
+      load: () => store.value,
+      save: (t) => {
+        store.value = t;
+      },
+      clear: () => {
+        cleared += 1;
+        store.value = null;
+      },
+    };
+    const mgr = new TokenManager({
+      initial: async () => {
+        logins += 1;
+        return { accessToken: 'fresh', expiresAt: c.now() + 3_600_000 };
+      },
+      refresh: async (rt) => {
+        const out = await r(rt);
+        return { accessToken: out.accessToken, refreshToken: out.refreshToken, expiresAt: c.now() + 3_600_000 };
+      },
+      persistence: store,
+      now: c.now,
+    });
+    await expect(mgr.getAccessToken()).rejects.toThrow(/disk full|rotat/i);
+    expect(logins).toBe(0);
+    expect(cleared).toBe(0);
+    expect(n).toBe(1);
+  });
+});

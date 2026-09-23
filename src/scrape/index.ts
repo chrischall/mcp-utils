@@ -16,6 +16,8 @@
  * carries that optional peer dep; this module is safe for the core barrel.
  */
 
+import { asciiLower } from '../internal/ascii.js';
+
 // ---------------------------------------------------------------------------
 // Entity decoding / tag stripping
 // ---------------------------------------------------------------------------
@@ -252,7 +254,7 @@ function nextTagOpen(lowerHtml: string, name: string, from: number): number {
  */
 export function extractJsonLdBlocks(html: string): unknown[] {
   const out: unknown[] = [];
-  const lower = html.toLowerCase();
+  const lower = asciiLower(html);
   let i = 0;
   for (;;) {
     const open = nextTagOpen(lower, 'script', i);
@@ -322,7 +324,7 @@ const META_PROP_RE = /\b(?:property|name)\s*=\s*["']([^"']*)["']/i;
  */
 export function ogContent(html: string, property: string): string | undefined {
   const want = property.toLowerCase();
-  const lower = html.toLowerCase();
+  const lower = asciiLower(html);
   let i = 0;
   for (;;) {
     const open = nextTagOpen(lower, 'meta', i);

@@ -20,6 +20,7 @@
  */
 
 import { parse, type HTMLElement } from 'node-html-parser';
+import { asciiLower } from '../internal/ascii.js';
 
 export type { HTMLElement };
 
@@ -277,7 +278,7 @@ export function extractPlainTextFromHtml(html: string): string {
  * on the tag name.
  */
 function stripElementContent(html: string, tag: string): string {
-  const lower = html.toLowerCase();
+  const lower = asciiLower(html);
   const open = `<${tag}`;
   const close = `</${tag}>`;
   let out = '';

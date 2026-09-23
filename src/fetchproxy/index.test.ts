@@ -1450,3 +1450,58 @@ describe('probe URL rendering', () => {
     await harness.close();
   });
 });
+
+// audit 2026-09 (SEC-3): the runProbe route must redact like the direct route.
+describe('registerBridgeHealthcheckTool — redaction on the bridge route', () => {
+  const SECRET = 'Bearer abcdefghijklmnopqrstuvwxyz0123';
+  const probeResult = {
+    ok: false,
+    elapsed_ms: 12,
+    bridge: {
+      role: 'host',
+      port: 37150,
+      server_version: '3.0.1',
+      fetch_timeout_ms: 30000,
+      last_success_at: null,
+      last_failure_at: 1,
+      last_failure_reason: `upstream said: ${SECRET} ${'x'.repeat(2000)}`,
+      consecutive_failures: 1,
+    },
+    error: { kind: 'other', message: `HTTP 500: {"echo":"${SECRET}","sessionToken":"sess-SECRET-999"} ${'y'.repeat(2000)}` },
+  } as unknown as BridgeProbeResult;
+
+  it('redacts and truncates the probe error message and last_failure_reason', async () => {
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'svc',
+        probePath: '/robots.txt',
+        hostLabel: 'svc.test',
+        transport: {
+          async runProbe(fetchFn, p) {
+            try {
+              await fetchFn(p);
+            } catch {
+              /* classified by the server */
+            }
+            return probeResult;
+          },
+          status() {
+            return { lastExtensionMessageAt: null } as never;
+          },
+        },
+        probeFn: async () => {
+          throw new Error(`boom ${SECRET}`);
+        },
+      }),
+    );
+    const res = await harness.callTool('svc_healthcheck', {});
+    await harness.close();
+    const text = JSON.stringify(res);
+    expect(text).not.toContain('abcdefghijklmnopqrstuvwxyz0123');
+    expect(text).not.toContain('sess-SECRET-999');
+    const body = parseToolResult<{ error: { message: string }; bridge: { last_failure_reason: string } }>(res);
+    expect(body.error.message.length).toBeLessThan(1100);
+    expect(body.bridge.last_failure_reason.length).toBeLessThan(1100);
+  });
+});

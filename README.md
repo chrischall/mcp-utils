@@ -143,6 +143,16 @@ server.registerTool('calendar_delete', config, async ({ eventId }, ctx) => {
 The details are a preview, not trusted retry state. Recompute authorization and
 the write from the tool's original validated arguments each round.
 
+By default any accepted `confirmation` response on the request is honoured.
+Pass `binding: { key, args }` (key ≥ 32 bytes, shared by every process that
+may receive the retry) to tie the acceptance to this action and these
+arguments: the prompt carries an HMAC-protected `requestState`, and an
+acceptance without a matching, unexpired state is asked again. Don't combine
+it with a `ServerOptions.requestState.verify` hook. The state is **not
+single-use**: within `ttlSeconds` (default 600) the same acceptance can be
+replayed for identical arguments, never for different ones. If the action must
+not run twice (a payment, a send), record consumed states and refuse repeats.
+
 ### `response` — tool-result formatting
 
 `textResult` / `jsonResult` (alias), `rawTextResult`, `imageResult`,
@@ -324,7 +334,7 @@ without re-reading). Pass `readFile` to inject a reader in tests.
 ### `fs` — streaming file helpers (uploads) & binary output
 
 `fileBlob`, `readFileHead`, `resolveOutputDir`, `uniquePath`,
-`writeBinaryOutput`, `sniffMimeBytes`.
+`writeBinaryOutput`, `sniffMimeBytes`, `assertPathWithinRoots`.
 
 The binary-output kit (hoisted from gemini + flightaware) is the fleet
 convention for tools that generate bytes: `resolveOutputDir(perCall,
@@ -348,6 +358,12 @@ const head = await readFileHead(path, 65_536);
 Use `fileBlob` in place of `new Blob([readFileSync(path)])` for `FormData` uploads
 — `fs.openAsBlob` backs the Blob with the file on disk, so a 20 MB upload uses
 constant memory instead of a 20 MB Buffer.
+
+When a path comes from a tool argument (especially on a hosted connector),
+pass `allowedRoots` to `fileBlob` / `readFileHead` / `resolveOutputDir` — the
+path is resolved through symlinks and refused unless it is inside one of the
+roots (for `resolveOutputDir`, only the per-call dir is confined). Omitting it
+keeps the unconfined behaviour.
 
 ### `http` — bearer API-client kit
 
@@ -647,6 +663,14 @@ injection.
 `createAuthResolver`, `resolveAuthPattern`, `sessionLoginFlow`,
 `createOAuth2Refresher`, `createCachedTokenSource`, `signEs256Jwt`, and the
 supporting `FetchproxySession` / `AuthPattern` types.
+
+`createOAuth2Refresher` is stateful: when the token endpoint rotates the
+refresh token, later exchanges send the new one, and `onRotate(token)` is
+called so you can persist it. A non-2xx throws `OAuth2RefreshError` (an
+`McpToolError` with `status`), and a 4xx other than 408/429 is never retried.
+If `onRotate` throws, the exchange is not retried; the refresher keeps the new
+token and throws `OAuth2RotationPersistError` (carrying the `result`), which
+`TokenManager` surfaces without wiping its store.
 
 `createCachedTokenSource({ mint, bufferMs })` caches any minted token until
 shortly before expiry with a single-flight mint and an `invalidate()` hook for

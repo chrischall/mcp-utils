@@ -4,8 +4,10 @@ import {
   resolveAuthPattern,
   sessionLoginFlow,
   createOAuth2Refresher,
+  OAuth2RefreshError,
+  OAuth2RotationPersistError,
 } from './index.js';
-import { SessionNotAuthenticatedError } from '../errors/index.js';
+import { McpToolError, SessionNotAuthenticatedError } from '../errors/index.js';
 
 // ---------------------------------------------------------------------------
 // createAuthResolver — three-path (env → fetchproxy → helpful error)
@@ -50,7 +52,7 @@ describe('createAuthResolver', () => {
       envVar: 'Z_REFRESH_TOKEN',
       bootstrap,
       bootstrapOptions: { domains: ['zola.com'], declare: { cookies: ['usr'] } },
-      parseTokens,
+      parseTokens: parseTokens as unknown as Parameters<typeof createAuthResolver>[0]['parseTokens'],
       env: {},
     });
     const result = await resolve();
@@ -573,7 +575,7 @@ describe('createOAuth2Refresher', () => {
       refreshToken: 'rt',
       fetchImpl,
     });
-    const err = await refresh().catch((e: unknown) => e as Error);
+    const err = (await refresh().catch((e: unknown) => e)) as Error;
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toContain('401');
     expect(err.message).not.toContain(longSecret); // bearer token redacted
@@ -740,5 +742,164 @@ describe('resolved expiry', () => {
       sessionScrape: async () => ({ credential: 'C', source: 'session', expiresAt: new Date(0) }),
     });
     expect(r.expiresAt?.getTime()).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// audit 2026-09: rotation (BUG-2) and status-carrying failures (BUG-1)
+// ---------------------------------------------------------------------------
+
+describe('createOAuth2Refresher — rotation and failure status', () => {
+  function tokenResponse(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  }
+
+  it('sends the rotated refresh token on the next exchange, not the spent one', async () => {
+    const sent: string[] = [];
+    let n = 0;
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      sent.push(new URLSearchParams(String(init?.body)).get('refresh_token') ?? '');
+      n += 1;
+      return tokenResponse({ access_token: `at-${n}`, refresh_token: `rt-${n + 1}` });
+    }) as unknown as typeof fetch;
+    const refresh = createOAuth2Refresher({ endpoint: 'https://svc.test/token', refreshToken: 'rt-1', fetchImpl });
+    await refresh();
+    await refresh();
+    await refresh();
+    expect(sent).toEqual(['rt-1', 'rt-2', 'rt-3']);
+  });
+
+  it('keeps the current refresh token when the server does not rotate', async () => {
+    const sent: string[] = [];
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      sent.push(new URLSearchParams(String(init?.body)).get('refresh_token') ?? '');
+      return tokenResponse({ access_token: 'at' });
+    }) as unknown as typeof fetch;
+    const refresh = createOAuth2Refresher({ endpoint: 'https://svc.test/token', refreshToken: 'rt-1', fetchImpl });
+    await refresh();
+    await refresh();
+    expect(sent).toEqual(['rt-1', 'rt-1']);
+  });
+
+  it('calls onRotate with each new refresh token so callers can persist it', async () => {
+    const rotated: string[] = [];
+    let n = 0;
+    const fetchImpl = vi.fn(async () => {
+      n += 1;
+      return tokenResponse({ access_token: 'at', refresh_token: `rt-${n + 1}` });
+    }) as unknown as typeof fetch;
+    const refresh = createOAuth2Refresher({
+      endpoint: 'https://svc.test/token',
+      refreshToken: 'rt-1',
+      fetchImpl,
+      onRotate: (t) => {
+        rotated.push(t);
+      },
+    });
+    await refresh();
+    await refresh();
+    expect(rotated).toEqual(['rt-2', 'rt-3']);
+  });
+
+  it('uses an explicitly passed refresh token (TokenManager.refresh signature)', async () => {
+    const sent: string[] = [];
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      sent.push(new URLSearchParams(String(init?.body)).get('refresh_token') ?? '');
+      return tokenResponse({ access_token: 'at' });
+    }) as unknown as typeof fetch;
+    const refresh = createOAuth2Refresher({ endpoint: 'https://svc.test/token', refreshToken: 'rt-1', fetchImpl });
+    await refresh('rt-from-manager');
+    expect(sent).toEqual(['rt-from-manager']);
+  });
+
+  it('does not retry a 4xx (a spent/invalid grant must not be replayed)', async () => {
+    let calls = 0;
+    const fetchImpl = vi.fn(async () => {
+      calls += 1;
+      return tokenResponse({ error: 'invalid_grant' }, 400);
+    }) as unknown as typeof fetch;
+    const refresh = createOAuth2Refresher({
+      endpoint: 'https://svc.test/token',
+      refreshToken: 'rt',
+      retry: { count: 3, delayMs: 0 },
+      fetchImpl,
+    });
+    await expect(refresh()).rejects.toThrow(/400/);
+    expect(calls).toBe(1);
+  });
+
+  it('still retries a 5xx', async () => {
+    let calls = 0;
+    const fetchImpl = vi.fn(async () => {
+      calls += 1;
+      return calls < 2 ? tokenResponse({}, 503) : tokenResponse({ access_token: 'ok' });
+    }) as unknown as typeof fetch;
+    const refresh = createOAuth2Refresher({
+      endpoint: 'https://svc.test/token',
+      refreshToken: 'rt',
+      retry: { count: 2, delayMs: 0 },
+      fetchImpl,
+    });
+    expect((await refresh()).accessToken).toBe('ok');
+    expect(calls).toBe(2);
+  });
+
+  it('throws an McpToolError that carries the HTTP status', async () => {
+    const fetchImpl = vi.fn(async () => tokenResponse({}, 503)) as unknown as typeof fetch;
+    const refresh = createOAuth2Refresher({ endpoint: 'https://svc.test/token', refreshToken: 'rt', fetchImpl });
+    const err = (await refresh().catch((e: unknown) => e)) as McpToolError & { status?: number };
+    expect(err).toBeInstanceOf(McpToolError);
+    expect(err).toBeInstanceOf(OAuth2RefreshError);
+    expect(err.status).toBe(503);
+  });
+});
+
+// Review follow-up: an onRotate failure must not be retried (each retry would
+// burn another rotation) and must not lose the freshly rotated token.
+describe('createOAuth2Refresher — onRotate failure', () => {
+  function rotatingFetch(sent: string[]) {
+    let n = 0;
+    return vi.fn(async (_url: string, init?: RequestInit) => {
+      sent.push(new URLSearchParams(String(init?.body)).get('refresh_token') ?? '');
+      n += 1;
+      return new Response(JSON.stringify({ access_token: `at-${n}`, refresh_token: `rt-${n + 1}` }), { status: 200 });
+    }) as unknown as typeof fetch;
+  }
+
+  it('does not retry the exchange when onRotate throws, and surfaces a persistence error carrying the result', async () => {
+    const sent: string[] = [];
+    const refresh = createOAuth2Refresher({
+      endpoint: 'https://svc.test/token',
+      refreshToken: 'rt-1',
+      retry: { count: 3, delayMs: 0 },
+      fetchImpl: rotatingFetch(sent),
+      onRotate: () => {
+        throw new Error('disk full');
+      },
+    });
+    const err = (await refresh().catch((e: unknown) => e)) as OAuth2RotationPersistError;
+    expect(err).toBeInstanceOf(OAuth2RotationPersistError);
+    expect(err).toBeInstanceOf(McpToolError);
+    expect(err.persistenceFailure).toBe(true);
+    expect(err.result.accessToken).toBe('at-1');
+    expect(err.result.refreshToken).toBe('rt-2');
+    expect(sent).toEqual(['rt-1']); // exactly one exchange
+  });
+
+  it('keeps the rotated token: the next exchange sends it, even if a stale token is passed in', async () => {
+    const sent: string[] = [];
+    let fail = true;
+    const refresh = createOAuth2Refresher({
+      endpoint: 'https://svc.test/token',
+      refreshToken: 'rt-1',
+      fetchImpl: rotatingFetch(sent),
+      onRotate: () => {
+        if (fail) throw new Error('disk full');
+      },
+    });
+    await refresh().catch(() => undefined);
+    fail = false;
+    await refresh('rt-1'); // a caller (e.g. TokenManager) still holding the spent token
+    expect(sent).toEqual(['rt-1', 'rt-2']);
   });
 });

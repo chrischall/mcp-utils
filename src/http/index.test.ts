@@ -1099,7 +1099,7 @@ describe('createApiClient honours the caller’s cancellation', () => {
     // this request could never be stopped by anything.
     const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: hangingFetch });
     const controller = new AbortController();
-    const call = withCallSignal(controller.signal, () => client.fetchJson('/slow'));
+    const call = withCallSignal(controller.signal, () => client.fetchJson('GET', '/slow'));
     controller.abort(new Error('caller went away'));
     await expect(call).rejects.toThrow(/abort/i);
   });
@@ -1115,7 +1115,7 @@ describe('createApiClient honours the caller’s cancellation', () => {
       timeout: 60_000,
     });
     const controller = new AbortController();
-    const call = withCallSignal(controller.signal, () => client.fetchJson('/slow'));
+    const call = withCallSignal(controller.signal, () => client.fetchJson('GET', '/slow'));
     controller.abort(new Error('caller went away'));
     await expect(call).rejects.toThrow(/abort/i);
     await expect(call).rejects.not.toThrow(/timed out|timeout/i);
@@ -1130,8 +1130,83 @@ describe('createApiClient honours the caller’s cancellation', () => {
     });
     // Inside a live call whose caller has NOT cancelled: the timeout is the
     // one that fires, and must still be named as one.
-    await expect(withCallSignal(new AbortController().signal, () => client.fetchJson('/slow'))).rejects.toThrow(
+    await expect(withCallSignal(new AbortController().signal, () => client.fetchJson('GET', '/slow'))).rejects.toThrow(
       /timed out|timeout/i,
     );
+  });
+});
+
+// --- audit 2026-09: path must stay on the base origin (SEC-1) ---------------
+
+describe('createApiClient path confinement', () => {
+  const origins = ['@evil.test/x', 'user:pw@evil.test/x', '.evil.test/x', ':8443/x', 'evil'];
+  for (const path of origins) {
+    it(`refuses a path (${JSON.stringify(path)}) that resolves off the base origin, before any fetch`, async () => {
+      const { fn, calls } = stubFetch([jsonResponse({})]);
+      const client = createApiClient({ baseUrl: 'https://api.example.com', getToken: () => 'SECRET', fetchImpl: fn });
+      await expect(client.fetchJson('GET', path)).rejects.toThrow(/origin|path/i);
+      await expect(client.fetchHtml('GET', path)).rejects.toThrow(/origin|path/i);
+      await expect(client.fetchRaw('GET', path)).rejects.toThrow(/origin|path/i);
+      expect(calls).toHaveLength(0);
+    });
+  }
+
+  it('still accepts ordinary same-origin paths, including an empty path and a bare query', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({}), jsonResponse({}), jsonResponse({}), jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://api.example.com/v1/', getToken: () => 't', fetchImpl: fn });
+    await client.fetchJson('GET', '/users/1');
+    await client.fetchJson('GET', '');
+    await client.fetchJson('GET', '?page=2');
+    await client.fetchJson('GET', '/a', { query: { q: '@evil.test' } });
+    expect(calls.map((c) => c.url)).toEqual([
+      'https://api.example.com/v1/users/1',
+      'https://api.example.com/v1',
+      'https://api.example.com/v1?page=2',
+      'https://api.example.com/v1/a?q=%40evil.test',
+    ]);
+  });
+});
+
+// --- audit 2026-09: the timeout covers the body read (BUG-5) ----------------
+
+describe('createApiClient timeout covers the response body', () => {
+  /** A Response whose headers arrive at once but whose body never finishes. */
+  function stalledBody(): Response {
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('{"partial":'));
+      },
+    });
+    return new Response(stream, { status: 200, headers: { 'content-type': 'application/json' } });
+  }
+
+  for (const method of ['fetchJson', 'fetchHtml', 'fetchRaw'] as const) {
+    it(`${method} rejects with RequestTimeoutError when the body stalls after the headers`, async () => {
+      vi.useFakeTimers();
+      try {
+        const fetchImpl = (async () => stalledBody()) as unknown as typeof fetch;
+        const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl, timeout: 5000 });
+        const p = client[method]('GET', '/a');
+        const assertion = expect(p).rejects.toBeInstanceOf(RequestTimeoutError);
+        await vi.advanceTimersByTimeAsync(5000);
+        await assertion;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  }
+
+  it('does not fire the timer after a successful read (no stray abort)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { fn, calls } = stubFetch([jsonResponse({ ok: 1 })]);
+      const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn, timeout: 5000 });
+      await expect(client.fetchJson('GET', '/a')).resolves.toEqual({ ok: 1 });
+      const signal = (calls[0]!.init as { signal: AbortSignal }).signal;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(signal.aborted).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

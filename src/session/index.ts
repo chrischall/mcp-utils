@@ -1059,7 +1059,11 @@ export interface TokenManagerOptions {
    *
    * The default resolves that by only excusing failures that are transient *by
    * construction* — a {@link RateLimitedError}, a {@link RequestTimeoutError},
-   * or an {@link ApiError} with a 5xx status. Anything else is assumed to be a
+   * any error carrying a numeric `status` that is 5xx, 429 or 408 (an
+   * {@link ApiError}, or `createOAuth2Refresher`'s `OAuth2RefreshError`), an
+   * `AbortError`/`TimeoutError`, or a network failure (undici's
+   * `TypeError('fetch failed')`, or a socket/DNS error code such as
+   * `ECONNRESET`/`ENOTFOUND` on the error or its `cause`). Anything else is assumed to be a
    * dead credential, which keeps the recover-from-revocation guarantee. Override
    * it for a service that signals revocation some other way (or, conversely, one
    * that answers a live token with a 5xx). Mirrors the permanent-vs-transient
@@ -1091,7 +1095,50 @@ export interface TokenManagerOptions {
 function defaultIsRefreshRevoked(err: unknown): boolean {
   if (err instanceof RateLimitedError || err instanceof RequestTimeoutError) return false;
   if (err instanceof ApiError && err.status >= 500) return false;
-  return true;
+  return !isTransientFailure(err);
+}
+
+/** An error flagged as "the exchange worked, saving its result did not". */
+function isPersistenceFailure(err: unknown): boolean {
+  return err !== null && typeof err === 'object' && (err as { persistenceFailure?: unknown }).persistenceFailure === true;
+}
+
+/** Socket / DNS error codes that say nothing about the credential. */
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ECONNABORTED',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ENETUNREACH',
+  'ENETDOWN',
+  'EHOSTUNREACH',
+  'EPIPE',
+]);
+
+/**
+ * Whether `err` is an outage rather than a verdict on the credential: a
+ * status-carrying error with a 5xx/429/408 status (duck-typed, so the
+ * library's own `OAuth2RefreshError` counts without an import), an abort or
+ * timeout, or a network failure. Walks a short `cause` chain because undici
+ * wraps the socket error in `TypeError('fetch failed', { cause })`.
+ */
+function isTransientFailure(err: unknown): boolean {
+  let cur: unknown = err;
+  for (let depth = 0; depth < 4 && cur !== null && typeof cur === 'object'; depth++) {
+    const e = cur as { status?: unknown; name?: unknown; message?: unknown; code?: unknown; cause?: unknown };
+    if (typeof e.status === 'number' && (e.status >= 500 || e.status === 429 || e.status === 408)) return true;
+    if (e.name === 'AbortError' || e.name === 'TimeoutError') return true;
+    if (typeof e.code === 'string' && (TRANSIENT_NETWORK_CODES.has(e.code) || e.code.startsWith('UND_ERR_'))) {
+      return true;
+    }
+    // undici's network failure. Matched on the exact message so an ordinary
+    // programming TypeError still counts as "credential dead" (re-mint).
+    if (e.name === 'TypeError' && e.message === 'fetch failed') return true;
+    cur = e.cause;
+  }
+  return false;
 }
 
 /** Whether a parsed record has the shape of {@link BearerTokens}. */
@@ -1112,6 +1159,9 @@ function isBearerTokens(raw: unknown): raw is BearerTokens {
  *   and costing nothing.
  * - **Proactive:** {@link TokenManager.getAccessToken} refreshes when the token
  *   is within `skewMs` (default 5 min) of expiry, returning a still-valid token.
+ *   If that early refresh fails transiently (see
+ *   {@link TokenManagerOptions.isRefreshRevoked}) while the current token has
+ *   not yet expired, the current token is returned and the next call retries.
  * - **Reactive:** {@link TokenManager.withAuth} runs a request, and on a `401`
  *   refreshes once and replays exactly once (no infinite loop).
  * - **Race-safe:** concurrent refreshes (and concurrent bootstraps) coalesce
@@ -1292,6 +1342,10 @@ export class TokenManager {
     // that produced it SUCCEEDED, spending the old token upstream. Clearing the
     // store here would destroy the only surviving copy.
     if (err instanceof StatePersistenceError) throw err.cause;
+    // Same for a refresher that rotated successfully but could not save the
+    // new token (createOAuth2Refresher's OAuth2RotationPersistError,
+    // duck-typed so this module does not import auth).
+    if (isPersistenceFailure(err)) throw err;
     if (this.bootstrapFn === undefined) throw err;
     // Only a credential we believe is DEAD is worth destroying. A 5xx or a
     // timeout leaves a perfectly good refresh token that the next call can use.
@@ -1311,6 +1365,17 @@ export class TokenManager {
       try {
         await this.refreshNow();
       } catch (err) {
+        // An early refresh that hit an outage must not fail a call whose token
+        // still works: keep using it until it has actually expired.
+        const held = this.tokens;
+        if (
+          !(err instanceof StatePersistenceError) &&
+          held !== undefined &&
+          this.now() < held.expiresAt &&
+          !this.isRefreshRevokedFn(err)
+        ) {
+          return held.accessToken;
+        }
         return (await this.reBootstrap(err)).accessToken;
       }
       tokens = this.tokens ?? tokens;
