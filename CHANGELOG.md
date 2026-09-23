@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.0](https://github.com/chrischall/mcp-utils/compare/v2.3.0...v2.4.0) (2026-09-23)
+
+
+### Features
+
+* **fetchproxy:** forward retryOnTimeout so read-only POSTs keep the timeout retry ([#284](https://github.com/chrischall/mcp-utils/issues/284)) ([0e40d87](https://github.com/chrischall/mcp-utils/commit/0e40d87085f07f2e28ad085f5e90abbee4055cf0))
+
 ## [2.3.0](https://github.com/chrischall/mcp-utils/compare/v2.2.1...v2.3.0) (2026-09-23)
 
 
