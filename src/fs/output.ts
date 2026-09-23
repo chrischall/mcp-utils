@@ -14,21 +14,34 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { expandPath, readEnvVar, type EnvSource } from '../config/index.js';
+import { assertPathWithinRoots } from './confine.js';
 
 /**
  * Resolve the directory a binary-output tool should write into:
  * the per-call argument → the named env var → the current working directory.
  * `~` and relative paths are expanded ({@link expandPath}) and the directory is
  * created recursively so the subsequent write can't ENOENT.
+ *
+ * `allowedRoots` (opt-in) confines the **per-call** directory — the value a
+ * tool argument supplies — to those roots, checked through symlinks before
+ * anything is created. The env var and cwd are operator configuration and are
+ * not constrained.
  */
 export function resolveOutputDir(
   perCall: string | undefined,
   envVar: string,
-  opts: { env?: EnvSource } = {},
+  opts: { env?: EnvSource; allowedRoots?: readonly string[] } = {},
 ): string {
   const raw = perCall ?? readEnvVar(envVar, opts.env ? { env: opts.env } : {});
   if (!raw) return process.cwd();
   const dir = expandPath(raw);
+  if (perCall !== undefined && opts.allowedRoots) {
+    assertPathWithinRoots(dir, opts.allowedRoots);
+    mkdirSync(dir, { recursive: true });
+    // Re-check now it exists, in case a component was swapped for a symlink.
+    assertPathWithinRoots(dir, opts.allowedRoots);
+    return dir;
+  }
   mkdirSync(dir, { recursive: true });
   return dir;
 }

@@ -12,6 +12,8 @@
 import { openAsBlob } from 'node:fs';
 import { open, type FileHandle } from 'node:fs/promises';
 
+import { assertPathWithinRoots } from './confine.js';
+
 /** Options for {@link fileBlob}. */
 export interface FileBlobOptions {
   /** MIME type stamped on the Blob (becomes the multipart part's Content-Type). */
@@ -20,6 +22,18 @@ export interface FileBlobOptions {
   maxBytes?: number;
   /** Friendly name for the size-limit error message (e.g. "Image"). */
   label?: string;
+  /**
+   * Refuse a path that does not resolve (through symlinks) inside one of these
+   * directories. Recommended whenever `path` comes from a tool argument on a
+   * hosted connector. Omit for the previous, unconfined behaviour.
+   */
+  allowedRoots?: readonly string[];
+}
+
+/** Options for {@link readFileHead}. */
+export interface ReadFileHeadOptions {
+  /** As {@link FileBlobOptions.allowedRoots}. */
+  allowedRoots?: readonly string[];
 }
 
 /**
@@ -28,12 +42,14 @@ export interface FileBlobOptions {
  * streams them from disk as it sends the request body. Use in place of
  * `new Blob([readFileSync(path)])` when building `FormData` for an upload.
  *
- * @throws if the file can't be opened, or (when `maxBytes` is set) is too large.
+ * @throws if the file can't be opened, is outside `allowedRoots` (when set), or
+ *   (when `maxBytes` is set) is too large.
  */
 export async function fileBlob(path: string, opts: FileBlobOptions = {}): Promise<Blob> {
+  const target = opts.allowedRoots ? assertPathWithinRoots(path, opts.allowedRoots) : path;
   let blob: Blob;
   try {
-    blob = await openAsBlob(path, opts.type !== undefined ? { type: opts.type } : undefined);
+    blob = await openAsBlob(target, opts.type !== undefined ? { type: opts.type } : undefined);
   } catch {
     throw new Error(`Cannot read file for upload: ${path}`);
   }
@@ -50,12 +66,13 @@ export async function fileBlob(path: string, opts: FileBlobOptions = {}): Promis
  * dimensions, file-type detection) WITHOUT loading the whole file. Returns only
  * as many bytes as were actually read (a short file yields a short buffer).
  */
-export async function readFileHead(path: string, bytes: number): Promise<Buffer> {
+export async function readFileHead(path: string, bytes: number, opts: ReadFileHeadOptions = {}): Promise<Buffer> {
+  const target = opts.allowedRoots ? assertPathWithinRoots(path, opts.allowedRoots) : path;
   // Wrap the open like `fileBlob` does, so a missing file yields the same clean,
   // non-leaking message instead of a raw Node ENOENT (path + stack).
   let fh: FileHandle;
   try {
-    fh = await open(path, 'r');
+    fh = await open(target, 'r');
   } catch {
     throw new Error(`Cannot read file: ${path}`);
   }
@@ -69,3 +86,4 @@ export async function readFileHead(path: string, bytes: number): Promise<Buffer>
 }
 
 export * from './output.js';
+export { assertPathWithinRoots } from './confine.js';

@@ -324,7 +324,7 @@ without re-reading). Pass `readFile` to inject a reader in tests.
 ### `fs` — streaming file helpers (uploads) & binary output
 
 `fileBlob`, `readFileHead`, `resolveOutputDir`, `uniquePath`,
-`writeBinaryOutput`, `sniffMimeBytes`.
+`writeBinaryOutput`, `sniffMimeBytes`, `assertPathWithinRoots`.
 
 The binary-output kit (hoisted from gemini + flightaware) is the fleet
 convention for tools that generate bytes: `resolveOutputDir(perCall,
@@ -348,6 +348,12 @@ const head = await readFileHead(path, 65_536);
 Use `fileBlob` in place of `new Blob([readFileSync(path)])` for `FormData` uploads
 — `fs.openAsBlob` backs the Blob with the file on disk, so a 20 MB upload uses
 constant memory instead of a 20 MB Buffer.
+
+When a path comes from a tool argument (especially on a hosted connector),
+pass `allowedRoots` to `fileBlob` / `readFileHead` / `resolveOutputDir` — the
+path is resolved through symlinks and refused unless it is inside one of the
+roots (for `resolveOutputDir`, only the per-call dir is confined). Omitting it
+keeps the unconfined behaviour.
 
 ### `http` — bearer API-client kit
 
