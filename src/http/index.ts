@@ -381,19 +381,26 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     }
   }
 
-  const baseOrigin = ((): string | undefined => {
+  // The base's own origin and userinfo. A baseUrl may legitimately carry
+  // userinfo (`https://u:pw@host`); a resolved URL must then carry exactly
+  // that userinfo, never a different or newly-introduced one.
+  const baseParts = ((): { origin: string; username: string; password: string } | undefined => {
     try {
-      return new URL(base).origin;
+      const u = new URL(base);
+      return { origin: u.origin, username: u.username, password: u.password };
     } catch {
       return undefined;
     }
   })();
+  const baseOrigin = baseParts?.origin;
 
   /**
    * Refuse a `path` that would carry the credential off the base origin.
    * The URL is built by concatenation, so a path such as `@other.host/x`
    * turns the base host into userinfo and `fetch` would send the
-   * Authorization header to `other.host`. Checked before any token is minted.
+   * Authorization header to `other.host`. Userinfo is allowed only when it
+   * exactly matches the base's own (none, for a base without any), so a path
+   * can neither introduce nor change it. Checked before any token is minted.
    */
   function resolveUrl(path: string, query: string): string {
     const url = `${base}${path}${query}`;
@@ -404,7 +411,11 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     } catch {
       throw new Error(`Refusing request to ${service}: path ${JSON.stringify(path)} does not form a valid URL.`);
     }
-    if (parsed.origin !== baseOrigin || parsed.username !== '' || parsed.password !== '') {
+    if (
+      parsed.origin !== baseOrigin ||
+      parsed.username !== baseParts?.username ||
+      parsed.password !== baseParts?.password
+    ) {
       throw new Error(
         `Refusing request to ${service}: path ${JSON.stringify(path)} resolves outside the base origin ${baseOrigin}. ` +
           'Paths must be relative to baseUrl (start them with "/").',
