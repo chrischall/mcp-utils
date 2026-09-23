@@ -642,6 +642,49 @@ describe('createFetchproxyTransport — verb adapters', () => {
     expect(jsonSpy).toHaveBeenCalledWith('POST', '/api', { body: { q: 1 }, subdomain: 'www' });
   });
 
+  it('requestJson() forwards retryOnTimeout so a read-only POST keeps the cold-start retry', async () => {
+    const t = createFetchproxyTransport({
+      serverName: 'compass-mcp',
+      version: '1.0.0',
+      domains: ['compass.com'],
+      defaultSubdomain: 'www',
+      identityDir,
+    });
+    const jsonSpy = vi.spyOn(t.server, 'requestJson').mockResolvedValue({
+      data: {},
+      result: { status: 200, body: '{}', url: 'https://www.compass.com/api' },
+    });
+
+    await t.requestJson('POST', '/api', { body: { q: 1 }, retryOnTimeout: true });
+    expect(jsonSpy).toHaveBeenLastCalledWith('POST', '/api', {
+      body: { q: 1 },
+      retryOnTimeout: true,
+      subdomain: 'www',
+    });
+
+    // Omitted → not forwarded, so fetchproxy's method-based default applies.
+    await t.requestJson('POST', '/api', { body: { q: 1 } });
+    expect(jsonSpy).toHaveBeenLastCalledWith('POST', '/api', { body: { q: 1 }, subdomain: 'www' });
+  });
+
+  it('fetch() forwards retryOnTimeout, including an explicit false', async () => {
+    const t = createFetchproxyTransport({
+      serverName: 'homes-mcp',
+      version: '1.0.0',
+      domains: ['homes.com'],
+      identityDir,
+    });
+    const reqSpy = vi
+      .spyOn(t.server, 'request')
+      .mockResolvedValue({ status: 200, body: '', url: 'https://homes.com/x' });
+
+    await t.fetch({ method: 'POST', path: '/search', body: '{}', retryOnTimeout: true });
+    expect(reqSpy).toHaveBeenLastCalledWith('POST', '/search', { body: '{}', retryOnTimeout: true });
+
+    await t.fetch({ method: 'GET', path: '/x', retryOnTimeout: false });
+    expect(reqSpy).toHaveBeenLastCalledWith('GET', '/x', { retryOnTimeout: false });
+  });
+
   it('runProbe() delegates straight to the server', async () => {
     const t = createFetchproxyTransport({
       serverName: 'redfin-mcp',
