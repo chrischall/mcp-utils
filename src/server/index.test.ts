@@ -203,6 +203,62 @@ describe('withGracefulShutdown', () => {
   });
 });
 
+// audit 2026-09 (BUG-4): a wedged cleanup must not hang the process forever.
+describe('withGracefulShutdown — bounded cleanup', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    process.removeAllListeners('SIGINT');
+    process.removeAllListeners('SIGTERM');
+  });
+
+  it('exits after the cleanup timeout when onSignal never settles', async () => {
+    vi.useFakeTimers();
+    const target = { close: vi.fn(async () => undefined) };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    withGracefulShutdown(target, { onSignal: () => new Promise<void>(() => {}), timeoutMs: 1000 });
+    process.emit('SIGTERM');
+    await vi.advanceTimersByTimeAsync(999);
+    expect(exitSpy).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(exitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('defaults to a 5s cleanup bound when close() never settles', async () => {
+    vi.useFakeTimers();
+    const target = { close: () => new Promise<void>(() => {}) };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    withGracefulShutdown(target);
+    process.emit('SIGINT');
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(exitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('a second signal during a stuck shutdown forces an immediate exit', async () => {
+    const target = { close: () => new Promise<void>(() => {}) };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    withGracefulShutdown(target, { timeoutMs: 60_000 });
+    process.emit('SIGTERM');
+    await new Promise((r) => setImmediate(r));
+    expect(exitSpy).not.toHaveBeenCalled();
+    process.emit('SIGTERM');
+    expect(exitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('exits once, not twice, when cleanup finishes in time', async () => {
+    vi.useFakeTimers();
+    const target = { close: vi.fn(async () => undefined) };
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    withGracefulShutdown(target, { timeoutMs: 1000 });
+    process.emit('SIGTERM');
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(exitSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('runMcp', () => {
   afterEach(() => {
     vi.restoreAllMocks();
