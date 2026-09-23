@@ -952,6 +952,11 @@ function healthcheckHint(args: {
  * `bridge` projection has — used on the path-aware route, where the probe
  * did not go through `runProbe`. Tolerates a pre-2.5.0 server (no `session`).
  */
+/** Redact + truncate a bridge failure reason, keeping `null`/absent as-is. */
+function redactReason<T>(reason: T): T {
+  return (typeof reason === 'string' ? truncateErrorMessage(reason) : reason) as T;
+}
+
 function projectBridgeStatus(
   health: ReturnType<FetchproxyTransport['status']>,
 ): NonNullable<BridgeHealthcheckResult['bridge']> {
@@ -963,7 +968,7 @@ function projectBridgeStatus(
     fetch_timeout_ms: health.fetchTimeoutMs,
     last_success_at: health.lastSuccessAt,
     last_failure_at: health.lastFailureAt,
-    last_failure_reason: health.lastFailureReason,
+    last_failure_reason: redactReason(health.lastFailureReason),
     consecutive_failures: health.consecutiveFailures,
     last_extension_message_at: health.lastExtensionMessageAt,
     ...(session
@@ -1077,9 +1082,15 @@ export async function runBridgeHealthcheck(
     // 2.5.0; read it off the live status snapshot (same call, so it's current).
     bridge = {
       ...probeResult.bridge,
+      last_failure_reason: redactReason(probeResult.bridge.last_failure_reason),
       last_extension_message_at: transport.status().lastExtensionMessageAt,
     };
-    rawError = probeResult.error;
+    // `runProbe` copies the thrown message verbatim; `probeFn` is consumer
+    // code whose errors can quote upstream bodies. Same redaction as the
+    // direct route.
+    rawError = probeResult.error
+      ? { ...probeResult.error, message: truncateErrorMessage(probeResult.error.message) }
+      : undefined;
   }
 
   const probe: BridgeHealthcheckResult['probe'] = ok
