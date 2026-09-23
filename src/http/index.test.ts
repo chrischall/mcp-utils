@@ -1165,6 +1165,34 @@ describe('createApiClient path confinement', () => {
       'https://api.example.com/v1/a?q=%40evil.test',
     ]);
   });
+
+  it('accepts a baseUrl that carries its own userinfo, sending it unchanged', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({}), jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://u:pw@api.example.com/v1', getToken: () => 't', fetchImpl: fn });
+    await client.fetchJson('GET', '/users/1');
+    await client.fetchJson('GET', '?page=2');
+    expect(calls.map((c) => c.url)).toEqual([
+      'https://u:pw@api.example.com/v1/users/1',
+      'https://u:pw@api.example.com/v1?page=2',
+    ]);
+  });
+
+  const userinfoPaths = ['@api.example.com/x', ':other@api.example.com/x', '@evil.test/x', 'x:y@evil.test/x'];
+  for (const path of userinfoPaths) {
+    it(`refuses a path (${JSON.stringify(path)}) that changes a userinfo-carrying base's userinfo or origin`, async () => {
+      const { fn, calls } = stubFetch([jsonResponse({})]);
+      const client = createApiClient({ baseUrl: 'https://u:pw@api.example.com', getToken: () => 'SECRET', fetchImpl: fn });
+      await expect(client.fetchJson('GET', path)).rejects.toThrow(/origin|path/i);
+      expect(calls).toHaveLength(0);
+    });
+  }
+
+  it('still refuses a path that introduces userinfo on a base without any', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://api.example.com', getToken: () => 'SECRET', fetchImpl: fn });
+    await expect(client.fetchJson('GET', '@api.example.com/x')).rejects.toThrow(/origin|path/i);
+    expect(calls).toHaveLength(0);
+  });
 });
 
 // --- audit 2026-09: the timeout covers the body read (BUG-5) ----------------

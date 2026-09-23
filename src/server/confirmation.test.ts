@@ -280,13 +280,34 @@ describe('requireConfirmation with binding', () => {
     ).toBeUndefined();
   });
 
-  it('re-asks (does not proceed) when an acceptance arrives with no state', () => {
-    const r = requireConfirmation(ctxWith(accepted, undefined), {
+  it.each([
+    ['undefined state', ctxWith(accepted, undefined)],
+    ['null state', ctxWith(accepted, null)],
+    ['no requestState accessor', { mcpReq: { inputResponses: accepted } } as unknown as ServerContext],
+  ])('fails with an explicit error (not a re-ask loop) when an acceptance arrives with %s', (_label, ctx) => {
+    const r = requireConfirmation(ctx, {
       action: 'mail.send',
       message: 'Send?',
       binding: { key: KEY, args: { to: 'a@x.test' } },
-    });
-    expect(r).toMatchObject({ resultType: 'input_required' });
+    }) as CallToolResult;
+    expect(r).toBeDefined();
+    expect(r).not.toMatchObject({ resultType: 'input_required' });
+    expect(r.isError).toBe(true);
+    const text = r.content[0]?.type === 'text' ? r.content[0].text : '';
+    expect(text).toMatch(/requestState/);
+    expect(text).toMatch(/round-trip|echo/i);
+    expect(text).toContain('mail.send');
+  });
+
+  it('re-asks (does not error) when a present state is empty or malformed', () => {
+    for (const s of ['', 'mcpu.confirm.v1.nodot']) {
+      const r = requireConfirmation(ctxWith(accepted, s), {
+        action: 'mail.send',
+        message: 'Send?',
+        binding: { key: KEY, args: { to: 'a@x.test' } },
+      });
+      expect(r).toMatchObject({ resultType: 'input_required' });
+    }
   });
 
   it('re-asks when the acceptance was for different arguments (replay)', () => {
@@ -421,6 +442,43 @@ describe('requireConfirmation binding — faithful canonicalisation', () => {
       expect(passes(state, b)).toBe(false);
     });
   }
+
+  // A plain object whose keys look like a type tag must never share a
+  // commitment with the typed value it imitates (in either direction).
+  const lookalikes: Array<[string, unknown, unknown]> = [
+    ['Buffer', { blob: Buffer.from('two') }, { blob: { $bytes: 'dHdv' } }],
+    ['Uint8Array', { blob: new Uint8Array([1, 2]) }, { blob: { $bytes: Buffer.from([1, 2]).toString('base64') } }],
+    ['ArrayBuffer', { blob: new Uint8Array([3]).buffer }, { blob: { $bytes: Buffer.from([3]).toString('base64') } }],
+    ['Date', { when: new Date('2026-01-01T00:00:00Z') }, { when: { $date: '2026-01-01T00:00:00.000Z' } }],
+    ['invalid Date', { when: new Date(Number.NaN) }, { when: { $date: 'Invalid Date' } }],
+    ['Map', { m: new Map([['k', 1]]) }, { m: { $map: [['k', 1]] } }],
+    ['Set', { s: new Set([1]) }, { s: { $set: [1] } }],
+    ['bigint', { n: 1n }, { n: { $bigint: '1' } }],
+    ['NaN', { n: Number.NaN }, { n: { $num: 'NaN' } }],
+    ['Infinity', { n: Number.POSITIVE_INFINITY }, { n: { $num: 'Infinity' } }],
+    ['-Infinity', { n: Number.NEGATIVE_INFINITY }, { n: { $num: '-Infinity' } }],
+  ];
+  for (const [label, typed, plain] of lookalikes) {
+    it(`a plain object imitating the ${label} tag does not share its commitment`, () => {
+      expect(passes(stateFor(typed), typed)).toBe(true);
+      expect(passes(stateFor(plain), plain)).toBe(true);
+      expect(passes(stateFor(typed), plain)).toBe(false);
+      expect(passes(stateFor(plain), typed)).toBe(false);
+    });
+  }
+
+  it('keeps distinct $-prefixed plain keys distinct after escaping', () => {
+    const pairsOfKeys: Array<[unknown, unknown]> = [
+      [{ $x: 1 }, { $$x: 1 }],
+      [{ $bytes: 'dHdv' }, { $$bytes: 'dHdv' }],
+      [{ $: 1 }, { $$: 1 }],
+    ];
+    for (const [a, b] of pairsOfKeys) {
+      expect(passes(stateFor(a), a)).toBe(true);
+      expect(passes(stateFor(a), b)).toBe(false);
+      expect(passes(stateFor(b), a)).toBe(false);
+    }
+  });
 
   it('treats Map and Set insertion order as irrelevant', () => {
     const state = stateFor({ m: new Map([['a', 1], ['b', 2]]), s: new Set(['x', 'y']) });

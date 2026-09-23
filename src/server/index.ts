@@ -337,10 +337,21 @@ export interface GracefulShutdownOptions {
    * Must be a finite number > 0. Only meaningful with `exit` on.
    */
   timeoutMs?: number;
+  /**
+   * Grace window (ms) after the first signal during which a repeat signal is
+   * ignored rather than treated as "exit now". Under `npx` a single Ctrl-C can
+   * deliver SIGINT twice within a few milliseconds (once to the process group,
+   * once forwarded by npx); without the window that duplicate would skip the
+   * cleanup. A repeat arriving after the window still forces an immediate
+   * exit. Default `500`. `0` disables the window. Must be a finite number >= 0.
+   */
+  repeatSignalGraceMs?: number;
 }
 
 /** Default bound on graceful-shutdown cleanup. */
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5000;
+/** Default window in which a repeat signal is treated as a duplicate delivery. */
+const DEFAULT_REPEAT_SIGNAL_GRACE_MS = 500;
 
 /**
  * Wire SIGINT/SIGTERM to a one-shot graceful shutdown: run `onSignal` (e.g.
@@ -349,9 +360,12 @@ const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5000;
  * cleanly, and cleanup that never settles is abandoned after `timeoutMs`
  * (default 5s), so a wedged cleanup can't hang the host. A second signal while
  * shutdown is in progress forces an immediate exit (with `exit: false` it is
- * ignored, as before). Note that under `npx` a single Ctrl-C can deliver
- * SIGINT twice (once to the process group, once forwarded by npx), which
- * takes that immediate-exit path and skips the rest of the cleanup.
+ * ignored, as before) — but only once `repeatSignalGraceMs` (default 500ms)
+ * has passed since the first. Under `npx` a single Ctrl-C can deliver SIGINT
+ * twice (once to the process group, once forwarded by npx) within a few
+ * milliseconds; that duplicate lands inside the window and is ignored, so the
+ * cleanup still runs. A deliberate second Ctrl-C after the window still exits
+ * at once.
  *
  * `target` is the {@link StdioServerHandle} when called from {@link runMcp} —
  * closing the handle closes whichever instance the connection pinned *and* the
@@ -367,7 +381,15 @@ export function withGracefulShutdown(
     throw new RangeError('withGracefulShutdown: timeoutMs must be a finite number greater than 0.');
   }
   const timeoutMs = opts.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+  if (
+    opts.repeatSignalGraceMs !== undefined &&
+    !(Number.isFinite(opts.repeatSignalGraceMs) && opts.repeatSignalGraceMs >= 0)
+  ) {
+    throw new RangeError('withGracefulShutdown: repeatSignalGraceMs must be a finite number >= 0.');
+  }
+  const repeatGraceMs = opts.repeatSignalGraceMs ?? DEFAULT_REPEAT_SIGNAL_GRACE_MS;
   let shuttingDown = false;
+  let firstSignalAt = 0;
   let exited = false;
 
   const exitOnce = (): void => {
@@ -378,6 +400,10 @@ export function withGracefulShutdown(
 
   const handler = (signal: ShutdownSignal): void => {
     if (shuttingDown) {
+      // A repeat inside the grace window is a duplicate delivery of the same
+      // interrupt (npx forwards SIGINT to a child that already got it), not a
+      // second request: let the cleanup finish.
+      if (Date.now() - firstSignalAt < repeatGraceMs) return;
       // The host asked again: stop waiting on cleanup.
       if (shouldExit) {
         console.error(`[mcp-utils] second ${signal} during shutdown — exiting now`);
@@ -386,6 +412,7 @@ export function withGracefulShutdown(
       return;
     }
     shuttingDown = true;
+    firstSignalAt = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     if (shouldExit) {
       timer = setTimeout(() => {
