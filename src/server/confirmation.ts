@@ -85,7 +85,10 @@ const STATE_PREFIX = 'mcpu.confirm.v1.';
  * `Date` as its ISO string, bytes (`Buffer`, typed arrays, `ArrayBuffer`) as
  * base64, a `Map`/`Set` as its entries sorted by canonical form, a `bigint` as
  * its digits — so two calls that differ only in such a value never share a
- * commitment. Anything else that is not plain data (a class instance, a
+ * commitment. Each typed value is a one-key `{"$tag":…}` object; a plain
+ * object's `$`-prefixed keys are escaped (see {@link escapeKey}), so a plain
+ * object that imitates a tag (`{ $bytes: 'dHdv' }`) never encodes the same as
+ * the typed value it imitates (`Buffer.from('two')`). Anything else that is not plain data (a class instance, a
  * function, a symbol) cannot be compared honestly and is refused.
  */
 function canonicalJson(value: unknown): string {
@@ -119,7 +122,18 @@ function canonicalJson(value: unknown): string {
   const entries = Object.entries(value as Record<string, unknown>)
     .filter(([, v]) => v !== undefined)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(',')}}`;
+  return `{${entries.map(([k, v]) => `${JSON.stringify(escapeKey(k))}:${canonicalJson(v)}`).join(',')}}`;
+}
+
+/**
+ * Escape a plain-object key so it can never collide with a type tag. Tags are
+ * `$` followed by a letter (`$bytes`, `$date`, …); every plain key that starts
+ * with `$` gains one more, so plain keys starting with `$` always start with
+ * `$$` and never match a tag. Prefixing is injective, so distinct keys stay
+ * distinct (`$x` → `$$x`, `$$x` → `$$$x`).
+ */
+function escapeKey(key: string): string {
+  return key.startsWith('$') ? `$${key}` : key;
 }
 
 function bindingKey(binding: ConfirmationBinding): Buffer {
