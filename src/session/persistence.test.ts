@@ -1145,3 +1145,51 @@ describe('TokenManager — transient proactive-refresh failure inside the skew w
     expect(logins).toBe(2);
   });
 });
+
+describe('TokenManager — a refresher whose rotation could not be persisted', () => {
+  it('surfaces the error without wiping the store or re-logging in', async () => {
+    const { createOAuth2Refresher } = await import('../auth/index.js');
+    const c = clock();
+    let n = 0;
+    const r = createOAuth2Refresher({
+      endpoint: 'https://auth.test/token',
+      refreshToken: 'good',
+      fetchImpl: (async () => {
+        n += 1;
+        return new Response(JSON.stringify({ access_token: `at-${n}`, refresh_token: `rt-${n}` }), { status: 200 });
+      }) as unknown as typeof fetch,
+      onRotate: () => {
+        throw new Error('disk full');
+      },
+    });
+    let logins = 0;
+    let cleared = 0;
+    const store: StatePersistence<BearerTokens> & { value: BearerTokens | null } = {
+      value: { accessToken: 'a1', refreshToken: 'good', expiresAt: c.now() - 1 },
+      load: () => store.value,
+      save: (t) => {
+        store.value = t;
+      },
+      clear: () => {
+        cleared += 1;
+        store.value = null;
+      },
+    };
+    const mgr = new TokenManager({
+      initial: async () => {
+        logins += 1;
+        return { accessToken: 'fresh', expiresAt: c.now() + 3_600_000 };
+      },
+      refresh: async (rt) => {
+        const out = await r(rt);
+        return { accessToken: out.accessToken, refreshToken: out.refreshToken, expiresAt: c.now() + 3_600_000 };
+      },
+      persistence: store,
+      now: c.now,
+    });
+    await expect(mgr.getAccessToken()).rejects.toThrow(/disk full|rotat/i);
+    expect(logins).toBe(0);
+    expect(cleared).toBe(0);
+    expect(n).toBe(1);
+  });
+});

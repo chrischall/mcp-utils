@@ -535,7 +535,9 @@ export interface OAuth2RefresherOptions {
   /**
    * Called with each rotated refresh token, after the exchange succeeds and
    * before the result is returned. Persist it here if the refresher outlives
-   * the process's memory of it. A throw fails the refresh.
+   * the process's memory of it. It is never retried. A throw fails the refresh
+   * with {@link OAuth2RotationPersistError} (carrying the result); the
+   * refresher still uses the new token next time.
    */
   onRotate?: (refreshToken: string) => void | Promise<void>;
   /** OAuth2 grant type. Defaults to `'refresh_token'`. */
@@ -587,6 +589,30 @@ export class OAuth2RefreshError extends McpToolError {
   }
 }
 
+/**
+ * Thrown by {@link createOAuth2Refresher} when the exchange SUCCEEDED and the
+ * server rotated the refresh token, but {@link OAuth2RefresherOptions.onRotate}
+ * threw (typically a failed write). The old refresh token is already spent
+ * upstream, so this is not a dead credential: the refresher keeps the new token
+ * for its next exchange, and `result` carries the full exchange result so the
+ * caller can still use (or persist) it. `persistenceFailure` lets
+ * {@link TokenManager} recognise it without importing this module, so it
+ * surfaces the error instead of wiping the store and re-logging in.
+ */
+export class OAuth2RotationPersistError extends McpToolError {
+  readonly persistenceFailure = true as const;
+  readonly result: OAuth2RefreshResult;
+  constructor(result: OAuth2RefreshResult, cause: unknown) {
+    super(`OAuth2 refresh token rotated, but saving it failed: ${truncateErrorMessage(messageOf(cause), 200)}`, {
+      hint: 'The new refresh token is still held in memory; fix the storage problem before the process restarts.',
+      cause,
+    });
+    this.name = 'OAuth2RotationPersistError';
+    this.result = result;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 /** Whether a failed exchange is worth another attempt (not a rejected grant). */
 function isRetryable(err: unknown): boolean {
   if (!(err instanceof OAuth2RefreshError)) return true;
@@ -628,6 +654,11 @@ export function createOAuth2Refresher(
 
   let inFlight: Promise<OAuth2RefreshResult> | null = null;
   let currentRefreshToken = opts.refreshToken;
+  // Tokens the server has rotated away. A caller that passes one back (e.g. a
+  // TokenManager whose copy is stale because onRotate failed) gets the current
+  // token instead — re-sending a spent token trips reuse detection.
+  const spent = new Set<string>();
+  let rotatedTo: string | undefined;
 
   async function exchangeOnce(): Promise<OAuth2RefreshResult> {
     const body = new URLSearchParams({
@@ -667,8 +698,11 @@ export function createOAuth2Refresher(
       result.refreshToken = data.refresh_token;
       if (data.refresh_token !== currentRefreshToken) {
         // The old token is spent upstream the moment the server rotates it.
+        // onRotate runs AFTER the retry loop (see refresh()), never inside it:
+        // a failing hook retried here would burn a fresh rotation each time.
+        spent.add(currentRefreshToken);
         currentRefreshToken = data.refresh_token;
-        await opts.onRotate?.(data.refresh_token);
+        rotatedTo = data.refresh_token;
       }
     }
     if (typeof data?.expires_in === 'number') {
@@ -696,8 +730,21 @@ export function createOAuth2Refresher(
     // Coalesce concurrent callers onto one exchange; clear on settle so the
     // next call starts fresh (and a rejection doesn't stick).
     if (inFlight) return inFlight;
-    if (typeof refreshToken === 'string' && refreshToken.length > 0) currentRefreshToken = refreshToken;
-    const p = exchangeWithRetry().finally(() => {
+    if (typeof refreshToken === 'string' && refreshToken.length > 0 && !spent.has(refreshToken)) {
+      currentRefreshToken = refreshToken;
+    }
+    const p = (async () => {
+      rotatedTo = undefined;
+      const result = await exchangeWithRetry();
+      if (rotatedTo !== undefined && opts.onRotate) {
+        try {
+          await opts.onRotate(rotatedTo);
+        } catch (err) {
+          throw new OAuth2RotationPersistError(result, err);
+        }
+      }
+      return result;
+    })().finally(() => {
       if (inFlight === p) inFlight = null;
     });
     inFlight = p;

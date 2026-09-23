@@ -5,6 +5,7 @@ import {
   sessionLoginFlow,
   createOAuth2Refresher,
   OAuth2RefreshError,
+  OAuth2RotationPersistError,
 } from './index.js';
 import { McpToolError, SessionNotAuthenticatedError } from '../errors/index.js';
 
@@ -850,5 +851,55 @@ describe('createOAuth2Refresher — rotation and failure status', () => {
     expect(err).toBeInstanceOf(McpToolError);
     expect(err).toBeInstanceOf(OAuth2RefreshError);
     expect(err.status).toBe(503);
+  });
+});
+
+// Review follow-up: an onRotate failure must not be retried (each retry would
+// burn another rotation) and must not lose the freshly rotated token.
+describe('createOAuth2Refresher — onRotate failure', () => {
+  function rotatingFetch(sent: string[]) {
+    let n = 0;
+    return vi.fn(async (_url: string, init?: RequestInit) => {
+      sent.push(new URLSearchParams(String(init?.body)).get('refresh_token') ?? '');
+      n += 1;
+      return new Response(JSON.stringify({ access_token: `at-${n}`, refresh_token: `rt-${n + 1}` }), { status: 200 });
+    }) as unknown as typeof fetch;
+  }
+
+  it('does not retry the exchange when onRotate throws, and surfaces a persistence error carrying the result', async () => {
+    const sent: string[] = [];
+    const refresh = createOAuth2Refresher({
+      endpoint: 'https://svc.test/token',
+      refreshToken: 'rt-1',
+      retry: { count: 3, delayMs: 0 },
+      fetchImpl: rotatingFetch(sent),
+      onRotate: () => {
+        throw new Error('disk full');
+      },
+    });
+    const err = (await refresh().catch((e: unknown) => e)) as OAuth2RotationPersistError;
+    expect(err).toBeInstanceOf(OAuth2RotationPersistError);
+    expect(err).toBeInstanceOf(McpToolError);
+    expect(err.persistenceFailure).toBe(true);
+    expect(err.result.accessToken).toBe('at-1');
+    expect(err.result.refreshToken).toBe('rt-2');
+    expect(sent).toEqual(['rt-1']); // exactly one exchange
+  });
+
+  it('keeps the rotated token: the next exchange sends it, even if a stale token is passed in', async () => {
+    const sent: string[] = [];
+    let fail = true;
+    const refresh = createOAuth2Refresher({
+      endpoint: 'https://svc.test/token',
+      refreshToken: 'rt-1',
+      fetchImpl: rotatingFetch(sent),
+      onRotate: () => {
+        if (fail) throw new Error('disk full');
+      },
+    });
+    await refresh().catch(() => undefined);
+    fail = false;
+    await refresh('rt-1'); // a caller (e.g. TokenManager) still holding the spent token
+    expect(sent).toEqual(['rt-1', 'rt-2']);
   });
 });

@@ -1098,6 +1098,11 @@ function defaultIsRefreshRevoked(err: unknown): boolean {
   return !isTransientFailure(err);
 }
 
+/** An error flagged as "the exchange worked, saving its result did not". */
+function isPersistenceFailure(err: unknown): boolean {
+  return err !== null && typeof err === 'object' && (err as { persistenceFailure?: unknown }).persistenceFailure === true;
+}
+
 /** Socket / DNS error codes that say nothing about the credential. */
 const TRANSIENT_NETWORK_CODES = new Set([
   'ECONNRESET',
@@ -1337,6 +1342,10 @@ export class TokenManager {
     // that produced it SUCCEEDED, spending the old token upstream. Clearing the
     // store here would destroy the only surviving copy.
     if (err instanceof StatePersistenceError) throw err.cause;
+    // Same for a refresher that rotated successfully but could not save the
+    // new token (createOAuth2Refresher's OAuth2RotationPersistError,
+    // duck-typed so this module does not import auth).
+    if (isPersistenceFailure(err)) throw err;
     if (this.bootstrapFn === undefined) throw err;
     // Only a credential we believe is DEAD is worth destroying. A 5xx or a
     // timeout leaves a perfectly good refresh token that the next call can use.

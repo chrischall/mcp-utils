@@ -668,6 +668,9 @@ supporting `FetchproxySession` / `AuthPattern` types.
 refresh token, later exchanges send the new one, and `onRotate(token)` is
 called so you can persist it. A non-2xx throws `OAuth2RefreshError` (an
 `McpToolError` with `status`), and a 4xx other than 408/429 is never retried.
+If `onRotate` throws, the exchange is not retried; the refresher keeps the new
+token and throws `OAuth2RotationPersistError` (carrying the `result`), which
+`TokenManager` surfaces without wiping its store.
 
 `createCachedTokenSource({ mint, bufferMs })` caches any minted token until
 shortly before expiry with a single-flight mint and an `invalidate()` hook for
