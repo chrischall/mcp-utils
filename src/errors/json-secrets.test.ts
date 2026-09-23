@@ -71,3 +71,75 @@ describe('redactSecrets — AWS SigV4 presigned-URL params', () => {
     expect(out).toContain('X-Amz-Expires=900');
   });
 });
+
+// ---------------------------------------------------------------------------
+// audit 2026-09 (SEC-2): camelCase / kebab JSON keys, form passwords, API-key headers
+// ---------------------------------------------------------------------------
+
+describe('redactSecrets — separator- and case-insensitive secret keys', () => {
+  const V = 'SUPERSECRETVALUE123456';
+  for (const key of [
+    'accessToken',
+    'refreshToken',
+    'clientSecret',
+    'sessionToken',
+    'idToken',
+    'authToken',
+    'access-token',
+    'client-secret',
+    'API_KEY',
+    'x-api-key',
+    'privateKey',
+  ]) {
+    it(`redacts "${key}" in a JSON body`, () => {
+      const out = redactSecrets(`{"${key}":"${V}","ok":1}`);
+      expect(out).not.toContain(V);
+      expect(out).toContain('"ok":1');
+    });
+  }
+
+  it('redacts a JSON value containing escaped quotes, all the way to the real closing quote', () => {
+    const out = redactSecrets('{"password":"abc\\"defSECRETTAIL","ok":1}');
+    expect(out).not.toContain('SECRETTAIL');
+    expect(out).toBe('{"password":"[REDACTED]","ok":1}');
+  });
+
+  it('still leaves non-secret keys alone', () => {
+    const body = '{"token_type":"Bearer","tokenType":"Bearer","sessionId":"s-1","expires_in":3600}';
+    expect(redactSecrets(body)).toBe(body);
+  });
+});
+
+describe('redactSecrets — form and query passwords', () => {
+  it('redacts a password field in an echoed form body', () => {
+    const out = redactSecrets('username=a&password=hunter2xyz&remember=1');
+    expect(out).not.toContain('hunter2xyz');
+    expect(out).toContain('username=a');
+    expect(out).toContain('remember=1');
+  });
+
+  it('redacts a password that is the first form field', () => {
+    expect(redactSecrets('password=hunter2xyz&username=a')).not.toContain('hunter2xyz');
+    expect(redactSecrets('body: passwd=hunter2xyz')).not.toContain('hunter2xyz');
+  });
+
+  it('redacts camelCase secret query params and an OAuth code', () => {
+    const out = redactSecrets('https://x.test/cb?accessToken=AAA111BBB&clientSecret=CCC222&code=DDD333&page=2');
+    expect(out).not.toMatch(/AAA111BBB|CCC222|DDD333/);
+    expect(out).toContain('page=2');
+  });
+});
+
+describe('redactSecrets — API-key and token headers', () => {
+  for (const header of ['X-Api-Key', 'x-api-key', 'Api-Key', 'X-Auth-Token', 'X-Access-Token', 'X-Goog-Api-Key']) {
+    it(`redacts a ${header} header value`, () => {
+      const out = redactSecrets(`${header}: 0123456789abcdef\nContent-Type: text/plain`);
+      expect(out).not.toContain('0123456789abcdef');
+      expect(out).toContain('Content-Type: text/plain');
+    });
+  }
+
+  it('does not mangle an ordinary Authorization: Bearer header', () => {
+    expect(redactSecrets('Authorization: Bearer abcdefghijklmnop')).toBe('Authorization: Bearer [REDACTED]');
+  });
+});

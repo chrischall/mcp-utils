@@ -173,8 +173,19 @@ const API_KEY_RE = new RegExp(
 // Secret-bearing query params — the value after `=` up to `&`/`#`/quote/space/end.
 // Anchored on `?`/`&` so plain prose like `key=primary` (no URL context) never
 // matches; that constraint is what makes short names like `key`/`sig` safe.
+// Key names allow `_`, `-` or no separator and any case (`accessToken`,
+// `client-secret`), since camelCase APIs echo them that way. `code` is the
+// OAuth authorization code; `password`/`passwd` catch an echoed login form.
 const QUERY_SECRET_RE =
-  /([?&](?:access_token|refresh_token|client_secret|api_?key|signature|token|key|sig)=)[^&#\s"'<>`]+/gi;
+  /([?&](?:(?:access|refresh|id|auth|session)[_-]?token|client[_-]?secret|api[_-]?key|password|passwd|signature|token|key|sig|code)=)[^&#\s"'<>`]+/gi;
+// A form body echoed without URL context (`password=…&user=…`, or after a
+// space/newline): only the password names, which are never non-secret.
+const FORM_PASSWORD_RE = /((?:^|[\s,;:])(?:password|passwd)=)[^&#\s"'<>`]+/gim;
+// Credential-bearing headers beyond Authorization/Cookie: `X-Api-Key: …`,
+// `Api-Key: …`, `X-Auth-Token: …`, `X-Goog-Api-Key: …`. Anchored on an `x-`
+// prefix (or a bare `api-key`) so prose like `token: expired` is untouched.
+const HEADER_SECRET_RE =
+  /(\b(?:x-[a-z0-9-]*?(?:api-?key|token|secret|auth)[a-z0-9-]*|api-?key)\s*:\s*)[^\s,;"'<>`]+/gi;
 // AWS SigV4 presigned-URL credential params. Their `X-Amz-` prefix defeats the
 // short-name anchoring in QUERY_SECRET_RE (`&X-Amz-Security-Token=` has `-`, not
 // `&`, before `token`), so match the full param names explicitly — an S3 error
@@ -192,9 +203,15 @@ const AWS_SIGV4_RE =
 // apostrophe inside a double-quoted value (`"password":"hunter's2"` → leaks
 // `'s2`). `client_id` is deliberately NOT in the key set: RFC 6749 §2.2 treats
 // it as a public identifier, not a credential (QUERY_SECRET_RE omits it too).
-const JSON_SECRET_KEYS = 'access_token|refresh_token|client_secret|api_?key|password|passwd|secret|token';
-const JSON_SECRET_DQ_RE = new RegExp(`("(?:${JSON_SECRET_KEYS})"\\s*:\\s*")[^"]*(")`, 'gi');
-const JSON_SECRET_SQ_RE = new RegExp(`('(?:${JSON_SECRET_KEYS})'\\s*:\\s*')[^']*(')`, 'gi');
+//
+// Key names are separator- and case-insensitive (`accessToken`,
+// `client-secret`, `API_KEY`) because GraphQL and JS backends echo camelCase.
+// Values honour backslash escapes so `"a\"b"` is redacted up to the REAL
+// closing quote.
+const JSON_SECRET_KEYS =
+  '(?:access|refresh|id|auth|session|bearer)[_-]?token|client[_-]?secret|(?:x-)?api[_-]?key|private[_-]?key|password|passwd|secret|token';
+const JSON_SECRET_DQ_RE = new RegExp(`("(?:${JSON_SECRET_KEYS})"\\s*:\\s*")(?:[^"\\\\]|\\\\.)*(")`, 'gi');
+const JSON_SECRET_SQ_RE = new RegExp(`('(?:${JSON_SECRET_KEYS})'\\s*:\\s*')(?:[^'\\\\]|\\\\.)*(')`, 'gi');
 
 /**
  * Redact secrets that commonly leak into upstream error bodies before the text
@@ -202,10 +219,12 @@ const JSON_SECRET_SQ_RE = new RegExp(`('(?:${JSON_SECRET_KEYS})'\\s*:\\s*')[^']*
  * `Cookie:` / `Set-Cookie:` header values (cookie names stay visible), standalone
  * JWTs, well-known API-key shapes (OpenAI/Anthropic `sk-…`, GitHub `ghp_…`,
  * Slack `xox?-…`, Google `AIza…`, AWS `AKIA…`, `whsec_…`), secret-bearing
- * URL query params (`access_token`, `api_key`, `token`, `key`, `sig`, …), and
- * quote-wrapped JSON secret values (`"refresh_token":"…"` in an OAuth/error
- * body — the key must be an exact secret name, so `"token_type":"Bearer"` and
- * other non-secret keys stay visible).
+ * URL query params (`access_token`/`accessToken`, `api_key`, `token`, `key`,
+ * `sig`, `code`, `password`, …), echoed form passwords, `X-Api-Key`-style
+ * headers, and quote-wrapped JSON secret values (`"refresh_token":"…"` /
+ * `"accessToken":"…"` in an OAuth/error body — the key must be a secret name
+ * in any case or separator style, so `"token_type":"Bearer"` and other
+ * non-secret keys stay visible).
  *
  * Exported so fleet repos can redact custom strings (log lines, debug payloads)
  * without taking on {@link truncateErrorMessage}'s length cap.
@@ -220,7 +239,9 @@ export function redactSecrets(text: string): string {
       (_m, prefix: string, pairs: string) => `${prefix}${pairs.replace(/=[^;,\s]*/g, '=[REDACTED]')}`,
     )
     .replace(API_KEY_RE, '[REDACTED]')
+    .replace(HEADER_SECRET_RE, '$1[REDACTED]')
     .replace(QUERY_SECRET_RE, '$1[REDACTED]')
+    .replace(FORM_PASSWORD_RE, '$1[REDACTED]')
     .replace(AWS_SIGV4_RE, '$1[REDACTED]')
     .replace(JSON_SECRET_DQ_RE, '$1[REDACTED]$2')
     .replace(JSON_SECRET_SQ_RE, '$1[REDACTED]$2')
