@@ -174,18 +174,24 @@ const API_KEY_RE = new RegExp(
 // Anchored on `?`/`&` so plain prose like `key=primary` (no URL context) never
 // matches; that constraint is what makes short names like `key`/`sig` safe.
 // Key names allow `_`, `-` or no separator and any case (`accessToken`,
-// `client-secret`), since camelCase APIs echo them that way. `code` is the
-// OAuth authorization code; `password`/`passwd` catch an echoed login form.
+// `client-secret`), since camelCase APIs echo them that way.
+// `password`/`passwd` catch an echoed login form.
 const QUERY_SECRET_RE =
-  /([?&](?:(?:access|refresh|id|auth|session)[_-]?token|client[_-]?secret|api[_-]?key|password|passwd|signature|token|key|sig|code)=)[^&#\s"'<>`]+/gi;
-// A form body echoed without URL context (`password=…&user=…`, or after a
-// space/newline): only the password names, which are never non-secret.
-const FORM_PASSWORD_RE = /((?:^|[\s,;:])(?:password|passwd)=)[^&#\s"'<>`]+/gim;
+  /([?&](?:(?:access|refresh|id|auth|session|csrf|xsrf)[_-]?token|client[_-]?secret|api[_-]?secret|api[_-]?key|password|passwd|signature|token|key|sig)=)[^&#\s"'<>`]+/gi;
+// An OAuth authorization code (`?code=…` on a redirect). Only values of 16+
+// characters: real authorization codes are long opaque strings, while a short
+// `code=E123` is an error/status code worth keeping for diagnosis.
+const OAUTH_CODE_RE = /([?&]code=)(?=[^&#\s"'<>`]{16,})[^&#\s"'<>`]+/gi;
+// A form body echoed without URL context (`password=…&user=…`, after a
+// space/newline/quote/bracket): only the password names, which are never
+// non-secret.
+const FORM_PASSWORD_RE = /((?:^|[\s,;:"'(\[{])(?:password|passwd)=)[^&#\s"'<>`]+/gim;
 // Credential-bearing headers beyond Authorization/Cookie: `X-Api-Key: …`,
-// `Api-Key: …`, `X-Auth-Token: …`, `X-Goog-Api-Key: …`. Anchored on an `x-`
-// prefix (or a bare `api-key`) so prose like `token: expired` is untouched.
+// `x_api_key: …`, `Api-Key: …`, `X-Auth-Token: …`, `X-Goog-Api-Key: …`.
+// Anchored on an `x-`/`x_` prefix (or a bare `api-key`) so prose like
+// `token: expired` is untouched.
 const HEADER_SECRET_RE =
-  /(\b(?:x-[a-z0-9-]*?(?:api-?key|token|secret|auth)[a-z0-9-]*|api-?key)\s*:\s*)[^\s,;"'<>`]+/gi;
+  /(\b(?:x[-_][a-z0-9_-]*?(?:api[-_]?key|token|secret|auth)[a-z0-9_-]*|api[-_]?key)\s*:\s*)[^\s,;"'<>`]+/gi;
 // AWS SigV4 presigned-URL credential params. Their `X-Amz-` prefix defeats the
 // short-name anchoring in QUERY_SECRET_RE (`&X-Amz-Security-Token=` has `-`, not
 // `&`, before `token`), so match the full param names explicitly — an S3 error
@@ -208,8 +214,23 @@ const AWS_SIGV4_RE =
 // `client-secret`, `API_KEY`) because GraphQL and JS backends echo camelCase.
 // Values honour backslash escapes so `"a\"b"` is redacted up to the REAL
 // closing quote.
-const JSON_SECRET_KEYS =
-  '(?:access|refresh|id|auth|session|bearer)[_-]?token|client[_-]?secret|(?:x-)?api[_-]?key|private[_-]?key|password|passwd|secret|token';
+//
+// Header names used as JSON keys (`"x-auth-token"`, `"X-Goog-Api-Key"`,
+// `"authorization"`) are covered too: a request echo often serialises its
+// headers object.
+const JSON_SECRET_KEYS = [
+  '(?:access|refresh|id|auth|session|bearer|csrf|xsrf)[_-]?token',
+  'client[_-]?secret',
+  'api[_-]?secret',
+  '(?:x[_-])?api[_-]?key',
+  'private[_-]?key',
+  'x[_-][a-z0-9_-]*?(?:api[_-]?key|token|secret|auth)[a-z0-9_-]*',
+  '(?:proxy-)?authorization',
+  'password',
+  'passwd',
+  'secret',
+  'token',
+].join('|');
 const JSON_SECRET_DQ_RE = new RegExp(`("(?:${JSON_SECRET_KEYS})"\\s*:\\s*")(?:[^"\\\\]|\\\\.)*(")`, 'gi');
 const JSON_SECRET_SQ_RE = new RegExp(`('(?:${JSON_SECRET_KEYS})'\\s*:\\s*')(?:[^'\\\\]|\\\\.)*(')`, 'gi');
 
@@ -220,8 +241,8 @@ const JSON_SECRET_SQ_RE = new RegExp(`('(?:${JSON_SECRET_KEYS})'\\s*:\\s*')(?:[^
  * JWTs, well-known API-key shapes (OpenAI/Anthropic `sk-…`, GitHub `ghp_…`,
  * Slack `xox?-…`, Google `AIza…`, AWS `AKIA…`, `whsec_…`), secret-bearing
  * URL query params (`access_token`/`accessToken`, `api_key`, `token`, `key`,
- * `sig`, `code`, `password`, …), echoed form passwords, `X-Api-Key`-style
- * headers, and quote-wrapped JSON secret values (`"refresh_token":"…"` /
+ * `sig`, `password`, …) and long OAuth `code=` values, echoed form passwords,
+ * `X-Api-Key`-style headers (also as JSON keys, like `"authorization"`), and quote-wrapped JSON secret values (`"refresh_token":"…"` /
  * `"accessToken":"…"` in an OAuth/error body — the key must be a secret name
  * in any case or separator style, so `"token_type":"Bearer"` and other
  * non-secret keys stay visible).
@@ -241,6 +262,7 @@ export function redactSecrets(text: string): string {
     .replace(API_KEY_RE, '[REDACTED]')
     .replace(HEADER_SECRET_RE, '$1[REDACTED]')
     .replace(QUERY_SECRET_RE, '$1[REDACTED]')
+    .replace(OAUTH_CODE_RE, '$1[REDACTED]')
     .replace(FORM_PASSWORD_RE, '$1[REDACTED]')
     .replace(AWS_SIGV4_RE, '$1[REDACTED]')
     .replace(JSON_SECRET_DQ_RE, '$1[REDACTED]$2')

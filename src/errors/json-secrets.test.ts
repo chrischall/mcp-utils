@@ -124,7 +124,7 @@ describe('redactSecrets — form and query passwords', () => {
   });
 
   it('redacts camelCase secret query params and an OAuth code', () => {
-    const out = redactSecrets('https://x.test/cb?accessToken=AAA111BBB&clientSecret=CCC222&code=DDD333&page=2');
+    const out = redactSecrets('https://x.test/cb?accessToken=AAA111BBB&clientSecret=CCC222&code=DDD333EEE444FFF555&page=2');
     expect(out).not.toMatch(/AAA111BBB|CCC222|DDD333/);
     expect(out).toContain('page=2');
   });
@@ -141,5 +141,48 @@ describe('redactSecrets — API-key and token headers', () => {
 
   it('does not mangle an ordinary Authorization: Bearer header', () => {
     expect(redactSecrets('Authorization: Bearer abcdefghijklmnop')).toBe('Authorization: Bearer [REDACTED]');
+  });
+});
+
+// Review follow-up: header-named JSON keys, x_api_key, quoted form bodies,
+// apiSecret/csrfToken, and no over-redaction of short `code=` values.
+describe('redactSecrets — review follow-up gaps', () => {
+  const V = 'SUPERSECRETVALUE123456';
+  for (const key of ['x-auth-token', 'X-Goog-Api-Key', 'x_api_key', 'apiSecret', 'api_secret', 'csrfToken', 'xsrf-token']) {
+    it(`redacts JSON key "${key}"`, () => {
+      const out = redactSecrets(`{"${key}":"${V}","ok":1}`);
+      expect(out).not.toContain(V);
+      expect(out).toContain('"ok":1');
+    });
+  }
+
+  it('redacts a JSON authorization value including the Basic credential', () => {
+    const out = redactSecrets('{"authorization":"Basic dXNlcjpwYXNzd29yZA==","ok":1}');
+    expect(out).not.toContain('dXNlcjpwYXNzd29yZA');
+    expect(out).toContain('"ok":1');
+  });
+
+  it('redacts an x_api_key header-style line', () => {
+    expect(redactSecrets(`x_api_key: ${V}`)).not.toContain(V);
+  });
+
+  it('redacts a form body that starts right after a quote', () => {
+    const out = redactSecrets(`body was "password=hunter2xyz&u=a"`);
+    expect(out).not.toContain('hunter2xyz');
+    expect(out).toContain('u=a');
+  });
+
+  it('redacts query apiSecret / csrfToken', () => {
+    const out = redactSecrets('https://x.test/?apiSecret=AAA111BBB&csrfToken=CCC222DDD&page=1');
+    expect(out).not.toMatch(/AAA111BBB|CCC222DDD/);
+  });
+
+  it('keeps a short non-OAuth code= value', () => {
+    expect(redactSecrets('GET /x?code=E123&page=2 failed')).toContain('code=E123');
+  });
+
+  it('still redacts an OAuth authorization code', () => {
+    const out = redactSecrets('https://app.test/cb?code=4/0AbCdEfGhIjKlMnOpQrStUv&state=xyz');
+    expect(out).not.toContain('4/0AbCdEfGhIjKlMnOpQrStUv');
   });
 });
