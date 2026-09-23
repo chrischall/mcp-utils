@@ -510,3 +510,11 @@ describe('tool error hints', () => {
     await close();
   });
 });
+
+describe('withGracefulShutdown — option validation', () => {
+  it.each([[0], [-1], [Number.NaN], [Number.POSITIVE_INFINITY]])('rejects timeoutMs %s', (t) => {
+    expect(() => withGracefulShutdown({ close: async () => undefined }, { exit: false, timeoutMs: t })).toThrow(
+      RangeError,
+    );
+  });
+});
