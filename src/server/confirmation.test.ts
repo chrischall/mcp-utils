@@ -242,3 +242,143 @@ describe('requireConfirmation with a caller that cannot be asked', () => {
     }
   });
 });
+
+// ============================================================================
+// audit 2026-09 (SEC-4): opt-in binding of the confirmation to the arguments.
+// Without `binding` any accepted `confirmation` response passes; with it, the
+// acceptance must arrive with the integrity-protected requestState minted for
+// THIS action and THESE arguments.
+// ============================================================================
+describe('requireConfirmation with binding', () => {
+  const KEY = 'k'.repeat(32);
+  const accepted = { confirmation: { action: 'accept', content: { confirmed: true } } };
+
+  function ctxWith(inputResponses: unknown, state: unknown): ServerContext {
+    return { mcpReq: { inputResponses, requestState: () => state } } as unknown as ServerContext;
+  }
+
+  function mintFor(args: unknown, action = 'mail.send'): string {
+    const first = requireConfirmation(ctxWith(undefined, undefined), {
+      action,
+      message: 'Send?',
+      binding: { key: KEY, args },
+    }) as { resultType: string; requestState?: string };
+    expect(first.resultType).toBe('input_required');
+    expect(typeof first.requestState).toBe('string');
+    return first.requestState!;
+  }
+
+  it('proceeds when the acceptance carries the state minted for the same action and arguments', () => {
+    const state = mintFor({ to: 'a@x.test', body: 'hi' });
+    expect(
+      requireConfirmation(ctxWith(accepted, state), {
+        action: 'mail.send',
+        message: 'Send?',
+        // key order must not matter
+        binding: { key: KEY, args: { body: 'hi', to: 'a@x.test' } },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('re-asks (does not proceed) when an acceptance arrives with no state', () => {
+    const r = requireConfirmation(ctxWith(accepted, undefined), {
+      action: 'mail.send',
+      message: 'Send?',
+      binding: { key: KEY, args: { to: 'a@x.test' } },
+    });
+    expect(r).toMatchObject({ resultType: 'input_required' });
+  });
+
+  it('re-asks when the acceptance was for different arguments (replay)', () => {
+    const state = mintFor({ to: 'a@x.test' });
+    const r = requireConfirmation(ctxWith(accepted, state), {
+      action: 'mail.send',
+      message: 'Send?',
+      binding: { key: KEY, args: { to: 'attacker@x.test' } },
+    });
+    expect(r).toMatchObject({ resultType: 'input_required' });
+  });
+
+  it('re-asks when the acceptance was for a different action', () => {
+    const state = mintFor({ id: 1 }, 'event.update');
+    const r = requireConfirmation(ctxWith(accepted, state), {
+      action: 'event.delete',
+      message: 'Delete?',
+      binding: { key: KEY, args: { id: 1 } },
+    });
+    expect(r).toMatchObject({ resultType: 'input_required' });
+  });
+
+  it('re-asks on a tampered or foreign state', () => {
+    const state = mintFor({ to: 'a@x.test' });
+    const tampered = state.slice(0, -2) + (state.endsWith('AA') ? 'BB' : 'AA');
+    for (const s of [tampered, 'garbage', 42]) {
+      const r = requireConfirmation(ctxWith(accepted, s), {
+        action: 'mail.send',
+        message: 'Send?',
+        binding: { key: KEY, args: { to: 'a@x.test' } },
+      });
+      expect(r).toMatchObject({ resultType: 'input_required' });
+    }
+  });
+
+  it('re-asks once the state has expired', () => {
+    vi.useFakeTimers();
+    try {
+      const state = mintFor({ to: 'a@x.test' });
+      vi.advanceTimersByTime(601_000);
+      const r = requireConfirmation(ctxWith(accepted, state), {
+        action: 'mail.send',
+        message: 'Send?',
+        binding: { key: KEY, args: { to: 'a@x.test' } },
+      });
+      expect(r).toMatchObject({ resultType: 'input_required' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still returns the cancelled result for a declined prompt', () => {
+    const state = mintFor({ to: 'a@x.test' });
+    const r = requireConfirmation(ctxWith({ confirmation: { action: 'decline' } }, state), {
+      action: 'mail.send',
+      message: 'Send?',
+      binding: { key: KEY, args: { to: 'a@x.test' } },
+    });
+    expect(r).toMatchObject({ content: [{ type: 'text' }] });
+    expect(JSON.stringify(r)).toContain('cancelled');
+  });
+
+  it('rejects a key shorter than 32 bytes', () => {
+    expect(() =>
+      requireConfirmation(ctxWith(undefined, undefined), {
+        action: 'a',
+        message: 'm',
+        binding: { key: 'short', args: {} },
+      }),
+    ).toThrow(RangeError);
+  });
+
+  it('works end to end through the real client/server path', async () => {
+    const write = vi.fn(() => textResult({ sent: true }));
+    const harness = await createTestHarness(
+      (server) => {
+        server.registerTool('send', { inputSchema: z.object({ to: z.string() }) }, async (args, ctx) => {
+          const confirmation = requireConfirmation(ctx, {
+            action: 'mail.send',
+            message: 'Send?',
+            binding: { key: KEY, args },
+          });
+          return confirmation ?? write();
+        });
+      },
+      { elicitation: async () => ({ action: 'accept', content: { confirmed: true } }) },
+    );
+    try {
+      expect(parseToolResult(await harness.callTool('send', { to: 'a@x.test' }))).toEqual({ sent: true });
+      expect(write).toHaveBeenCalledOnce();
+    } finally {
+      await harness.close();
+    }
+  });
+});

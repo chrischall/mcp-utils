@@ -143,6 +143,13 @@ server.registerTool('calendar_delete', config, async ({ eventId }, ctx) => {
 The details are a preview, not trusted retry state. Recompute authorization and
 the write from the tool's original validated arguments each round.
 
+By default any accepted `confirmation` response on the request is honoured.
+Pass `binding: { key, args }` (key ≥ 32 bytes, shared by every process that
+may receive the retry) to tie the acceptance to this action and these
+arguments: the prompt carries an HMAC-protected `requestState`, and an
+acceptance without a matching, unexpired state is asked again. Don't combine
+it with a `ServerOptions.requestState.verify` hook.
+
 ### `response` — tool-result formatting
 
 `textResult` / `jsonResult` (alias), `rawTextResult`, `imageResult`,
