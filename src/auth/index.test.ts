@@ -52,7 +52,7 @@ describe('createAuthResolver', () => {
       envVar: 'Z_REFRESH_TOKEN',
       bootstrap,
       bootstrapOptions: { domains: ['zola.com'], declare: { cookies: ['usr'] } },
-      parseTokens,
+      parseTokens: parseTokens as unknown as Parameters<typeof createAuthResolver>[0]['parseTokens'],
       env: {},
     });
     const result = await resolve();
@@ -575,7 +575,7 @@ describe('createOAuth2Refresher', () => {
       refreshToken: 'rt',
       fetchImpl,
     });
-    const err = await refresh().catch((e: unknown) => e as Error);
+    const err = (await refresh().catch((e: unknown) => e)) as Error;
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toContain('401');
     expect(err.message).not.toContain(longSecret); // bearer token redacted

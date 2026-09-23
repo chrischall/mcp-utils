@@ -412,7 +412,7 @@ describe('tool error hints', () => {
 
   it('appends the hint of an McpToolError rejected asynchronously', async () => {
     const { client, close } = await harness((s) =>
-      s.registerTool('t', { inputSchema: z.object({ a: z.string() }) }, async () => {
+      void s.registerTool('t', { inputSchema: z.object({ a: z.string() }) }, async () => {
         throw new McpToolError('no such option 999', { hint: 'Available: 1 (Bus), 2 (Walker)' });
       }),
     );
@@ -424,7 +424,7 @@ describe('tool error hints', () => {
 
   it('appends the hint of an McpToolError thrown synchronously', async () => {
     const { client, close } = await harness((s) =>
-      s.registerTool('t', {}, (() => {
+      void s.registerTool('t', {}, (() => {
         throw new McpToolError('bad', { hint: 'do the thing' });
       }) as never),
     );
@@ -436,7 +436,7 @@ describe('tool error hints', () => {
   // `(args, extra)`; the wrapper forwards whatever arrived, so both work.
   it('leaves a zero-argument tool callable', async () => {
     const { client, close } = await harness((s) =>
-      s.registerTool('t', {}, async () => ({ content: [{ type: 'text' as const, text: 'ok' }] })),
+      void s.registerTool('t', {}, async () => ({ content: [{ type: 'text' as const, text: 'ok' }] })),
     );
     expect(textOf(await client.callTool({ name: 't' }))).toBe('ok');
     await close();
@@ -445,7 +445,7 @@ describe('tool error hints', () => {
   it('passes a tool with an inputSchema its arguments unchanged', async () => {
     const seen: unknown[] = [];
     const { client, close } = await harness((s) =>
-      s.registerTool('t', { inputSchema: z.object({ a: z.string() }) }, async (args) => {
+      void s.registerTool('t', { inputSchema: z.object({ a: z.string() }) }, async (args) => {
         seen.push(args);
         return { content: [{ type: 'text' as const, text: 'ok' }] };
       }),
@@ -457,7 +457,7 @@ describe('tool error hints', () => {
 
   it('leaves an McpToolError with no hint as the bare message', async () => {
     const { client, close } = await harness((s) =>
-      s.registerTool('t', {}, async () => {
+      void s.registerTool('t', {}, async () => {
         throw new McpToolError('just this');
       }),
     );
@@ -469,7 +469,7 @@ describe('tool error hints', () => {
   // one rather than being flattened into advice.
   it('leaves a non-McpToolError untouched', async () => {
     const { client, close } = await harness((s) =>
-      s.registerTool('t', {}, async () => {
+      void s.registerTool('t', {}, async () => {
         throw new TypeError('undefined is not a function');
       }),
     );
@@ -483,7 +483,7 @@ describe('tool error hints', () => {
   it('can be opted out of', async () => {
     const { client, close } = await harness(
       (s) =>
-        s.registerTool('t', {}, async () => {
+        void s.registerTool('t', {}, async () => {
           throw new McpToolError('bad', { hint: 'do the thing' });
         }),
       false,
@@ -501,7 +501,7 @@ describe('tool error hints', () => {
       shutdown: false,
       tools: [
         (s) =>
-          s.registerTool('t', {}, async () => {
+          void s.registerTool('t', {}, async () => {
             throw new McpToolError('bad', { hint: 'do the thing' });
           }),
       ],
