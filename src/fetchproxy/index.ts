@@ -153,6 +153,14 @@ export interface FetchproxyFetchInit {
   subdomain?: string;
   /** Per-call base-domain selector (required only for multi-domain MCPs). */
   domain?: string;
+  /**
+   * Re-send this request once if it times out (fetchproxy >= 3.2.0). Omit it to
+   * keep fetchproxy's default: GET/HEAD/OPTIONS retry, writes are sent exactly
+   * once. Pass `true` ONLY for a read that uses POST (a search, a GraphQL
+   * query) — re-sending a real write after a timeout can double-book or
+   * double-pay. `false` turns the retry off for a read.
+   */
+  retryOnTimeout?: boolean;
 }
 
 /** The success-arm `{status, body, url}` triple every consumer returns. */
@@ -164,6 +172,8 @@ export interface FetchproxyRequestJsonInit {
   body?: unknown;
   subdomain?: string;
   domain?: string;
+  /** See {@link FetchproxyFetchInit.retryOnTimeout}. */
+  retryOnTimeout?: boolean;
 }
 
 /**
@@ -486,6 +496,7 @@ export function createFetchproxyTransport<T = FetchproxyTransport>(
         ...(init.body !== undefined ? { body: init.body } : {}),
         ...(init.subdomain !== undefined ? { subdomain: init.subdomain } : {}),
         ...(init.domain !== undefined ? { domain: init.domain } : {}),
+        ...(init.retryOnTimeout !== undefined ? { retryOnTimeout: init.retryOnTimeout } : {}),
       }));
       return { status: response.status, body: response.body, url: response.url };
     },
@@ -495,6 +506,7 @@ export function createFetchproxyTransport<T = FetchproxyTransport>(
         ...(init.body !== undefined ? { body: init.body } : {}),
         ...(init.subdomain !== undefined ? { subdomain: init.subdomain } : {}),
         ...(init.domain !== undefined ? { domain: init.domain } : {}),
+        ...(init.retryOnTimeout !== undefined ? { retryOnTimeout: init.retryOnTimeout } : {}),
       }));
       return {
         data,
