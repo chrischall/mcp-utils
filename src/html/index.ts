@@ -20,6 +20,7 @@
  */
 
 import { parse, type HTMLElement } from 'node-html-parser';
+import { asciiLower } from '../internal/ascii.js';
 
 export type { HTMLElement };
 
@@ -268,16 +269,6 @@ export function extractPlainTextFromHtml(html: string): string {
   });
   // Collapse whitespace runs and trim.
   return text.replace(/\s+/g, ' ').trim();
-}
-
-/**
- * Lowercase ASCII letters only. Unlike `String#toLowerCase`, this is
- * length-preserving (`'İ'` lowercases to TWO UTF-16 units), so offsets found in
- * the result index the original string correctly. HTML tag and attribute
- * names are ASCII, so nothing is lost.
- */
-function asciiLower(s: string): string {
-  return s.replace(/[A-Z]+/g, (m) => m.toLowerCase());
 }
 
 /**

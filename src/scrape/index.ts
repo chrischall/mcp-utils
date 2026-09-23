@@ -16,6 +16,8 @@
  * carries that optional peer dep; this module is safe for the core barrel.
  */
 
+import { asciiLower } from '../internal/ascii.js';
+
 // ---------------------------------------------------------------------------
 // Entity decoding / tag stripping
 // ---------------------------------------------------------------------------
@@ -237,16 +239,6 @@ function nextTagOpen(lowerHtml: string, name: string, from: number): number {
     }
   }
   return -1;
-}
-
-/**
- * Lowercase ASCII letters only. Unlike `String#toLowerCase`, this is
- * length-preserving (`'İ'` lowercases to TWO UTF-16 units), so offsets found in
- * the result index the original string correctly. HTML tag and attribute
- * names are ASCII, so nothing is lost.
- */
-function asciiLower(s: string): string {
-  return s.replace(/[A-Z]+/g, (m) => m.toLowerCase());
 }
 
 /**
