@@ -648,6 +648,11 @@ injection.
 `createOAuth2Refresher`, `createCachedTokenSource`, `signEs256Jwt`, and the
 supporting `FetchproxySession` / `AuthPattern` types.
 
+`createOAuth2Refresher` is stateful: when the token endpoint rotates the
+refresh token, later exchanges send the new one, and `onRotate(token)` is
+called so you can persist it. A non-2xx throws `OAuth2RefreshError` (an
+`McpToolError` with `status`), and a 4xx other than 408/429 is never retried.
+
 `createCachedTokenSource({ mint, bufferMs })` caches any minted token until
 shortly before expiry with a single-flight mint and an `invalidate()` hook for
 401-replay — wrap it around `createOAuth2Refresher` (musicbrainz), an ES256
