@@ -382,3 +382,67 @@ describe('requireConfirmation with binding', () => {
     }
   });
 });
+
+// Review follow-up: non-plain argument values must change the commitment, and
+// bad TTLs are refused.
+describe('requireConfirmation binding — faithful canonicalisation', () => {
+  const KEY = 'k'.repeat(32);
+  const accepted = { confirmation: { action: 'accept', content: { confirmed: true } } };
+  const ctxWith = (inputResponses: unknown, state: unknown): ServerContext =>
+    ({ mcpReq: { inputResponses, requestState: () => state } }) as unknown as ServerContext;
+
+  function stateFor(args: unknown): string {
+    const r = requireConfirmation(ctxWith(undefined, undefined), {
+      action: 'a',
+      message: 'm',
+      binding: { key: KEY, args },
+    }) as { requestState?: string };
+    return r.requestState!;
+  }
+  function passes(state: string, args: unknown): boolean {
+    return (
+      requireConfirmation(ctxWith(accepted, state), { action: 'a', message: 'm', binding: { key: KEY, args } }) ===
+      undefined
+    );
+  }
+
+  const pairs: Array<[string, unknown, unknown]> = [
+    ['Date', { when: new Date('2026-01-01T00:00:00Z') }, { when: new Date('2027-06-01T00:00:00Z') }],
+    ['Buffer', { blob: Buffer.from('one') }, { blob: Buffer.from('two') }],
+    ['Uint8Array', { blob: new Uint8Array([1]) }, { blob: new Uint8Array([2]) }],
+    ['Map', { m: new Map([['k', 1]]) }, { m: new Map([['k', 2]]) }],
+    ['Set', { s: new Set([1]) }, { s: new Set([2]) }],
+    ['bigint', { n: 1n }, { n: 2n }],
+  ];
+  for (const [label, a, b] of pairs) {
+    it(`an acceptance for one ${label} does not verify for a different ${label}`, () => {
+      const state = stateFor(a);
+      expect(passes(state, a)).toBe(true);
+      expect(passes(state, b)).toBe(false);
+    });
+  }
+
+  it('treats Map and Set insertion order as irrelevant', () => {
+    const state = stateFor({ m: new Map([['a', 1], ['b', 2]]), s: new Set(['x', 'y']) });
+    expect(passes(state, { m: new Map([['b', 2], ['a', 1]]), s: new Set(['y', 'x']) })).toBe(true);
+  });
+
+  it('refuses to bind a value it cannot canonicalise (class instance, function)', () => {
+    class Thing {
+      constructor(readonly v: number) {}
+    }
+    for (const args of [{ t: new Thing(1) }, { f: () => 1 }]) {
+      expect(() => stateFor(args)).toThrow(TypeError);
+    }
+  });
+
+  it.each([[0], [-5], [Number.NaN], [Number.POSITIVE_INFINITY]])('rejects ttlSeconds %s', (ttl) => {
+    expect(() =>
+      requireConfirmation(ctxWith(undefined, undefined), {
+        action: 'a',
+        message: 'm',
+        binding: { key: KEY, args: {}, ttlSeconds: ttl },
+      }),
+    ).toThrow(RangeError);
+  });
+});

@@ -50,6 +50,15 @@ export interface RequireConfirmationOptions {
    * `key` must be at least 32 bytes and the same for every process that may
    * receive the retry. Don't combine with a `ServerOptions.requestState.verify`
    * hook: that hook would reject this helper's state.
+   *
+   * **Not single-use.** The state is stateless by design: within `ttlSeconds`
+   * the same state plus acceptance can be replayed for IDENTICAL arguments
+   * (it can never authorise different ones). A caller that must not run the
+   * same action twice — a payment, a send — should record each consumed
+   * state (e.g. its hash, until expiry) and refuse a repeat.
+   *
+   * Argument values are canonicalised with their types (`Date`, bytes,
+   * `Map`, `Set`, `bigint`); a class instance or function in `args` throws.
    */
   binding?: ConfirmationBinding;
 }
@@ -60,25 +69,63 @@ export interface ConfirmationBinding {
   key: string | Uint8Array;
   /** The tool's validated arguments. Hashed with keys sorted; never embedded. */
   args: unknown;
-  /** How long the prompt stays answerable, in seconds. Default 600. */
+  /**
+   * How long the prompt stays answerable, in seconds. Default 600. Must be a
+   * finite number > 0.
+   */
   ttlSeconds?: number;
 }
 
 const STATE_PREFIX = 'mcpu.confirm.v1.';
 
-/** JSON with object keys sorted, so `{a,b}` and `{b,a}` hash the same. */
+/**
+ * A canonical, type-tagged serialisation of tool arguments for the binding
+ * commitment. Object keys are sorted, so `{a,b}` and `{b,a}` hash the same.
+ * Values JSON would flatten to `{}` are serialised faithfully instead — a
+ * `Date` as its ISO string, bytes (`Buffer`, typed arrays, `ArrayBuffer`) as
+ * base64, a `Map`/`Set` as its entries sorted by canonical form, a `bigint` as
+ * its digits — so two calls that differ only in such a value never share a
+ * commitment. Anything else that is not plain data (a class instance, a
+ * function, a symbol) cannot be compared honestly and is refused.
+ */
 function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (value !== null && typeof value === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .filter(([, v]) => v !== undefined)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(',')}}`;
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
+  if (value === undefined) return 'null';
+  if (typeof value === 'number') return Number.isFinite(value) ? JSON.stringify(value) : `{"$num":"${String(value)}"}`;
+  if (typeof value === 'bigint') return `{"$bigint":"${value.toString()}"}`;
+  if (typeof value === 'function' || typeof value === 'symbol') {
+    throw new TypeError(`requireConfirmation: cannot bind a ${typeof value} argument value.`);
   }
-  return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value instanceof Date) {
+    return `{"$date":${JSON.stringify(Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString())}}`;
+  }
+  if (ArrayBuffer.isView(value)) {
+    const bytes = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    return `{"$bytes":${JSON.stringify(bytes.toString('base64'))}}`;
+  }
+  if (value instanceof ArrayBuffer) return `{"$bytes":${JSON.stringify(Buffer.from(value).toString('base64'))}}`;
+  if (value instanceof Map) {
+    const entries = [...value.entries()].map(([k, v]) => `[${canonicalJson(k)},${canonicalJson(v)}]`).sort();
+    return `{"$map":[${entries.join(',')}]}`;
+  }
+  if (value instanceof Set) {
+    return `{"$set":[${[...value].map(canonicalJson).sort().join(',')}]}`;
+  }
+  const proto = Object.getPrototypeOf(value) as unknown;
+  if (proto !== Object.prototype && proto !== null) {
+    throw new TypeError('requireConfirmation: cannot bind a non-plain object argument value (class instance).');
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(',')}}`;
 }
 
 function bindingKey(binding: ConfirmationBinding): Buffer {
+  if (binding.ttlSeconds !== undefined && !(Number.isFinite(binding.ttlSeconds) && binding.ttlSeconds > 0)) {
+    throw new RangeError('requireConfirmation: binding.ttlSeconds must be a finite number greater than 0.');
+  }
   const key = typeof binding.key === 'string' ? Buffer.from(binding.key, 'utf8') : Buffer.from(binding.key);
   if (key.length < 32) {
     throw new RangeError('requireConfirmation: binding.key must be at least 32 bytes.');

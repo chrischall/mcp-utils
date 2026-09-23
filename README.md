@@ -148,7 +148,10 @@ Pass `binding: { key, args }` (key ≥ 32 bytes, shared by every process that
 may receive the retry) to tie the acceptance to this action and these
 arguments: the prompt carries an HMAC-protected `requestState`, and an
 acceptance without a matching, unexpired state is asked again. Don't combine
-it with a `ServerOptions.requestState.verify` hook.
+it with a `ServerOptions.requestState.verify` hook. The state is **not
+single-use**: within `ttlSeconds` (default 600) the same acceptance can be
+replayed for identical arguments, never for different ones. If the action must
+not run twice (a payment, a send), record consumed states and refuse repeats.
 
 ### `response` — tool-result formatting
 
