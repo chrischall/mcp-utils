@@ -147,7 +147,10 @@ By default any accepted `confirmation` response on the request is honoured.
 Pass `binding: { key, args }` (key ≥ 32 bytes, shared by every process that
 may receive the retry) to tie the acceptance to this action and these
 arguments: the prompt carries an HMAC-protected `requestState`, and an
-acceptance without a matching, unexpired state is asked again. Don't combine
+acceptance with a mismatched, invalid or expired state is asked again. An
+acceptance with no state at all returns an error result instead of re-asking,
+because it means the client or host doesn't round-trip `requestState` and
+asking again would loop. Don't combine
 it with a `ServerOptions.requestState.verify` hook. The state is **not
 single-use**: within `ttlSeconds` (default 600) the same acceptance can be
 replayed for identical arguments, never for different ones. If the action must

@@ -9,7 +9,7 @@ import {
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { callerAcceptsFormElicitation } from '../caller/index.js';
-import { textResult } from '../response/index.js';
+import { errorResult, textResult } from '../response/index.js';
 
 const DEFAULT_REQUEST_KEY = 'confirmation';
 const DEFAULT_CONFIRMATION_LABEL = 'Confirm this action should proceed.';
@@ -45,7 +45,10 @@ export interface RequireConfirmationOptions {
    * gets through. With it, the prompt is returned with an HMAC-protected
    * `requestState` committing to `action` and a hash of `args`, and an
    * acceptance only counts when it arrives with a valid, unexpired state that
-   * matches the current call. Anything else is asked again.
+   * matches the current call. A present but invalid, mismatched or expired
+   * state is asked again; an acceptance with no state at all returns an error
+   * result (`isError: true`), since it means the client or host does not
+   * round-trip `requestState` and re-asking would loop forever.
    *
    * `key` must be at least 32 bytes and the same for every process that may
    * receive the retry. Don't combine with a `ServerOptions.requestState.verify`
@@ -258,9 +261,21 @@ export function requireConfirmation(
 
   if (response.kind === 'elicit' && response.action === 'accept' && accepted?.confirmed === true) {
     // Bound mode: an acceptance only counts for the prompt minted for this
-    // exact action + arguments. A replayed or pre-filled one is asked again.
-    if (key && options.binding && !verifyState(key, options.action, options.binding, echoedState(ctx))) {
-      return ask();
+    // exact action + arguments. A replayed, pre-filled or expired one is asked
+    // again. An acceptance with NO state at all is not re-asked: a client or
+    // host that never round-trips `requestState` would loop accept → re-ask
+    // forever, so it gets an explicit error naming the likely cause instead.
+    if (key && options.binding) {
+      const state = echoedState(ctx);
+      if (state === undefined || state === null) {
+        return errorResult(
+          `Confirmation for ${options.action} was accepted, but the retry carried no requestState, so it cannot be `
+            + 'checked against the prompt that was shown. Nothing was done. The likely cause is that the MCP client or '
+            + 'host does not round-trip requestState (it must echo the requestState from the input_required result '
+            + 'back on the retry); asking again would loop.',
+        );
+      }
+      if (!verifyState(key, options.action, options.binding, state)) return ask();
     }
     return undefined;
   }

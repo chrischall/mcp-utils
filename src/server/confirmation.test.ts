@@ -280,13 +280,34 @@ describe('requireConfirmation with binding', () => {
     ).toBeUndefined();
   });
 
-  it('re-asks (does not proceed) when an acceptance arrives with no state', () => {
-    const r = requireConfirmation(ctxWith(accepted, undefined), {
+  it.each([
+    ['undefined state', ctxWith(accepted, undefined)],
+    ['null state', ctxWith(accepted, null)],
+    ['no requestState accessor', { mcpReq: { inputResponses: accepted } } as unknown as ServerContext],
+  ])('fails with an explicit error (not a re-ask loop) when an acceptance arrives with %s', (_label, ctx) => {
+    const r = requireConfirmation(ctx, {
       action: 'mail.send',
       message: 'Send?',
       binding: { key: KEY, args: { to: 'a@x.test' } },
-    });
-    expect(r).toMatchObject({ resultType: 'input_required' });
+    }) as CallToolResult;
+    expect(r).toBeDefined();
+    expect(r).not.toMatchObject({ resultType: 'input_required' });
+    expect(r.isError).toBe(true);
+    const text = r.content[0]?.type === 'text' ? r.content[0].text : '';
+    expect(text).toMatch(/requestState/);
+    expect(text).toMatch(/round-trip|echo/i);
+    expect(text).toContain('mail.send');
+  });
+
+  it('re-asks (does not error) when a present state is empty or malformed', () => {
+    for (const s of ['', 'mcpu.confirm.v1.nodot']) {
+      const r = requireConfirmation(ctxWith(accepted, s), {
+        action: 'mail.send',
+        message: 'Send?',
+        binding: { key: KEY, args: { to: 'a@x.test' } },
+      });
+      expect(r).toMatchObject({ resultType: 'input_required' });
+    }
   });
 
   it('re-asks when the acceptance was for different arguments (replay)', () => {
