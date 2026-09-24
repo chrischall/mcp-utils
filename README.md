@@ -550,7 +550,10 @@ const rows = await runBoundedBatch(ids, (id, signal) => fetchRow(id, signal), {
 `runBoundedBatch(items, worker, opts)` races the whole batch against one overall
 `deadlineMs`; any item still unsettled when it fires is filled by
 `onTimeout(item, index)` (and its worker abandoned + `AbortSignal`-signalled) so
-a single hung row can't wedge the call. It always returns a full-length,
+a single hung row can't wedge the call. Queued items that had not started are
+never dispatched after the deadline, so a worker need not check the signal just
+to avoid fetching abandoned rows (check it anyway to stop between retries
+inside one item). It always returns a full-length,
 input-ordered array. `setTimer`/`clearTimer` are injectable for tests. This
 hoists zillow's bulk-tool deadline + `pending`-backfill primitive.
 

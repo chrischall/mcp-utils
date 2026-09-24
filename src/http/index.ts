@@ -1023,7 +1023,9 @@ export interface RunBoundedBatchOptions<T, R> {
  * `onTimeout(item, index)` and the batch resolves immediately — the in-flight
  * workers are abandoned (and signalled via their `AbortSignal`) rather than
  * awaited, so a single hung row can't keep the whole call (and the MCP request
- * deadline behind it) pinned open. When everything settles before the deadline,
+ * deadline behind it) pinned open. Queued items not yet started are never
+ * dispatched after the deadline; a worker that retries or loops internally
+ * should still check `signal.aborted` itself to stop mid-item. When everything settles before the deadline,
  * the timer is cleared and every slot holds its real result.
  *
  * Generalises zillow's bulk-tool `runWithDeadline` (`zillow_bulk_get` /
@@ -1061,6 +1063,11 @@ export function runBoundedBatch<T, R>(
     let cursor = 0;
     const runner = async (): Promise<void> => {
       for (;;) {
+        // Once the deadline has answered (finish() aborts the controller),
+        // stop dequeuing: nobody will read the remaining slots, so dispatching
+        // them only burns upstream requests. Checked before EVERY dequeue, so
+        // a worker that settles after the abort also ends its runner.
+        if (controller.signal.aborted) return;
         const index = cursor;
         cursor += 1;
         if (index >= items.length) return;
