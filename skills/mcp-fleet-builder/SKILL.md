@@ -520,7 +520,12 @@ things to drift. What follows is only what it means for building one.
   `node scripts/audit-fleet-annotations.mjs ~/git` walks every built
   `*-mcp`, applies the spec defaults, and flags the one direction that costs
   safety: a tool NAMED for an irreversible act that claims to be read-only
-  or additive. It exits non-zero on a hit.
+  or additive. It exits non-zero on a hit. Both scripts also read each
+  tool's `inputSchema`: a boolean `confirm` input is an ERROR (the
+  deprecated gate — the grep-driven confirmToken migration missed three
+  servers that declared `confirm: z.boolean()` by hand instead of importing
+  `schemaConfirm`), and a non-read tool with no `confirmToken` input is
+  listed as an ungated write for you to judge.
 
   Run it because a source scan answers the wrong question. "Which repos use
   `toolAnnotations`" is not "which repos are annotated correctly", and the

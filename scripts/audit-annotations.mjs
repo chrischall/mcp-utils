@@ -23,9 +23,16 @@
  * between what you scanned and what is served. untappd-mcp served 45 against
  * a scan of 41 and four friend tools — each of which reaches another person —
  * shipped unannotated because that gap was noticed and not followed.
+ *
+ * Confirm gates (fleet audit 2026-09-24 REF-1) are read off the same wire:
+ * a boolean `confirm` input is an ERROR (the deprecated, model-satisfiable
+ * gate) and makes the run exit non-zero; a non-read tool without a
+ * `confirmToken` input is marked `ungated?` for a human to judge. See
+ * lib/confirm-gates.mjs.
  */
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import { confirmGateFinding, summariseConfirmGates } from './lib/confirm-gates.mjs';
 
 const entry = process.argv[2];
 if (!entry) {
@@ -74,11 +81,17 @@ if (!summaryOnly) {
     const cls = classOf(t.annotations);
     // Flag the case that is nearly always an oversight rather than a decision.
     const why = t.annotations ? '' : '  <- no annotations; destructive BY DEFAULT';
-    console.log(`  ${cls.padEnd(11)} ${t.name}${why}`);
+    const gate = confirmGateFinding(t);
+    const gateNote = !gate ? ''
+      : gate.code === 'confirm-boolean' ? '  <- ERROR: `confirm` boolean; use confirmToken + requireConfirmationWithFallback'
+      : '  <- ungated? (no confirmToken)';
+    console.log(`  ${cls.padEnd(11)} ${t.name}${why}${gateNote}`);
   }
   console.log('');
 }
 console.log(`${tools.length} tools   read ${counts.read}   additive ${counts.additive}   destructive ${counts.DESTRUCTIVE}   unannotated ${counts.unannotated}`);
+const gates = summariseConfirmGates(tools);
+console.log(`confirm gates   confirm-boolean ${gates.errors.length}   ungated writes ${gates.suspects.length}`);
 
 if (expected !== undefined && tools.length !== expected) {
   console.error(
@@ -88,3 +101,11 @@ if (expected !== undefined && tools.length !== expected) {
   );
   process.exit(1);
 }
+if (gates.errors.length) {
+  console.error(
+    `\nERROR: ${gates.errors.map((e) => e.name).join(', ')} take a boolean \`confirm\` input. `
+    + 'Gate with confirmToken: confirmTokenParam + requireConfirmationWithFallback(ctx, confirmationFromEnv({...})).',
+  );
+  process.exit(1);
+}
+
