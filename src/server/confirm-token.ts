@@ -289,6 +289,14 @@ function rejection(data: Record<string, unknown>): CallToolResult {
 async function tokenConfirmation(action: string, fb: ConfirmTokenFallback): Promise<CallToolResult | undefined> {
   const subject = await fb.subject();
   if (isToolResult(subject)) return subject;
+  if (subject.payload === undefined) {
+    // hashConfirmPayload(undefined) is a constant, so the token would bind only
+    // the target and authorise ANY content (fleet audit 2026-09-24 SEC-2).
+    throw new TypeError(
+      `confirm token: ${fb.tool}'s subject() returned no payload. Bind what the call will do (the arguments or `
+      + 'the request body), or pass `args` to confirmationFromEnv.',
+    );
+  }
   const binding: ConfirmTokenBinding = {
     tool: fb.tool,
     ...(fb.account === undefined ? {} : { account: fb.account }),

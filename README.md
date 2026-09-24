@@ -220,20 +220,25 @@ returns `isError: true` and acts on nothing:
 | `TOKEN_INVALID` | tampered, issued for another tool, account or target, or signed with another key |
 
 **Fleet env layer.** `confirmationFromEnv({ ...requireConfirmationOptions, tool,
-account?, confirmToken, subject, instruction?, spent? })` turns three standard
+account?, confirmToken, subject, args?, instruction?, spent? })` turns three standard
 variables into those options, so every server reads and documents them the same
-way:
+way. Pass `args` (optional but recommended: the tool's validated arguments): it binds BOTH rails to them —
+the elicitation acceptance (`binding`, keyed from `MCP_CONFIRM_SECRET`) and the
+token (which then commits to `{ payload, args }`, so a `subject()` whose payload
+covers only some arguments cannot authorise different ones). `confirmToken` is
+dropped from `args` before hashing. A `subject()` that returns no `payload`
+throws rather than binding only the target.
 
 | variable | default | |
 |---|---|---|
 | `MCP_CONFIRM_MODE` | `ask-user` | What a gated write does on a client that cannot show a prompt. `ask-user`: two steps, and the model must get the user's approval in chat before using the token. `auto`: two steps, but the model may use the token after reviewing the preview itself. `refuse`: refused on such clients. An unrecognised value is treated as `refuse` (with a stderr warning). A client that can be prompted always is. |
-| `MCP_CONFIRM_TTL_SECONDS` | `600` | token lifetime |
+| `MCP_CONFIRM_TTL_SECONDS` | `600` | token lifetime, a positive whole number of seconds. Anything else (`60s`, `1e3`) warns on stderr and is treated as `refuse`, never silently as the default. |
 | `MCP_CONFIRM_SECRET` | random per process | HMAC key (any length, stretched through SHA-256); set only if tokens must survive a restart |
 
 ```ts
 const gate = await requireConfirmationWithFallback(ctx, confirmationFromEnv({
   action: 'thing.delete', message: 'Review and confirm this deletion.', details: { id },
-  tool: 'thing_delete', confirmToken,
+  tool: 'thing_delete', confirmToken, args,
   subject: () => ({ target: id, payload: { id }, preview: { id } }),
 }));
 if (gate) return gate;
@@ -359,8 +364,16 @@ plus `createHelpfulError`, `wrapToolError`, `truncateErrorMessage`,
 confirmations (short values are fully hidden). `redactSecrets` scrubs `Bearer`/`Basic` auth
 headers, `Cookie`/`Set-Cookie` values (cookie names stay visible), JWTs,
 well-known API-key shapes (`sk-…`, `ghp_…`, `xox?-…`, `AIza…`, `AKIA…`,
-`whsec_…`), and secret-bearing URL query params; `truncateErrorMessage` applies
-it before truncating, and `errorResult` applies it (without truncating). This core module has **no runtime dependencies** — the fetchproxy
+`whsec_…`), secret-bearing URL query params (including cookie-style session
+ids such as `sessionid`/`PHPSESSID`/`JSESSIONID`/`sid` and `x-api-key`-style
+names), and secret JSON values — quoted or numeric — plus the values under
+`"cookie"`/`"set-cookie"` JSON keys (names kept); `truncateErrorMessage` applies
+it before truncating, and `errorResult` applies it (without truncating). Every
+pattern is linear in the input (`redos.test.ts` times each against 200 KB
+adversarial runs), and `truncateErrorMessage` hands the redactor at most
+`ERROR_REDACTION_INPUT_MAX` (64 KB) of the body as defence in depth, because
+`formatApiError` feeds it the WHOLE upstream body and a hostile upstream must
+not be able to pin the process with one response. This core module has **no runtime dependencies** — the fetchproxy
 typed-error hierarchy (`Fetchproxy*Error`), the raw `classifyBridgeError` /
 `classifyRowError` re-exports, and the `bridgeErrorInfo` envelope helper live in
 the [`/fetchproxy`](#fetchproxy) subpath instead, so
@@ -537,7 +550,10 @@ const rows = await runBoundedBatch(ids, (id, signal) => fetchRow(id, signal), {
 `runBoundedBatch(items, worker, opts)` races the whole batch against one overall
 `deadlineMs`; any item still unsettled when it fires is filled by
 `onTimeout(item, index)` (and its worker abandoned + `AbortSignal`-signalled) so
-a single hung row can't wedge the call. It always returns a full-length,
+a single hung row can't wedge the call. Queued items that had not started are
+never dispatched after the deadline, so a worker need not check the signal just
+to avoid fetching abandoned rows (check it anyway to stop between retries
+inside one item). It always returns a full-length,
 input-ordered array. `setTimer`/`clearTimer` are injectable for tests. This
 hoists zillow's bulk-tool deadline + `pending`-backfill primitive.
 

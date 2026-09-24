@@ -909,6 +909,36 @@ describe('UpstreamHttpError', () => {
 // ---------------------------------------------------------------------------
 
 describe('runBoundedBatch', () => {
+  // Fleet audit 2026-09-24 RB-1 (fleet-audit#1183): after the deadline
+  // aborts the batch, the runners must stop dequeuing — before, each runner
+  // kept calling the worker for every remaining item, and consumers that did
+  // not check the signal themselves (redfin compare/climate) kept fetching
+  // rows nobody would read.
+  it('stops dispatching queued items once the deadline has aborted the batch', async () => {
+    let fireTimer: () => void = () => {};
+    const setTimer = (_ms: number, cb: () => void): unknown => { fireTimer = cb; return 0; };
+    let releaseFirst: () => void = () => {};
+    const called: number[] = [];
+    const promise = runBoundedBatch(
+      [0, 1, 2, 3],
+      async (n) => {
+        called.push(n);
+        if (n === 0) await new Promise<void>((r) => { releaseFirst = r; });
+        return n * 10;
+      },
+      { deadlineMs: 1000, concurrency: 1, onTimeout: () => -1, setTimer, clearTimer: () => {} },
+    );
+    await Promise.resolve();
+    expect(called).toEqual([0]);
+    fireTimer();
+    expect(await promise).toEqual([-1, -1, -1, -1]);
+    // The in-flight worker settles after the abort: its runner must return,
+    // not pull item 1, 2, 3.
+    releaseFirst();
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    expect(called).toEqual([0]);
+  });
+
   it('returns real results when everything settles before the deadline', async () => {
     const result = await runBoundedBatch([1, 2, 3], async (n) => n * 10, {
       deadlineMs: 1000,

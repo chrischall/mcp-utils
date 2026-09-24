@@ -54,9 +54,46 @@ describe('readConfirmMode', () => {
 
 describe('confirmTtlFromEnv', () => {
   it('reads a positive integer MCP_CONFIRM_TTL_SECONDS, else 600', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     expect(confirmTtlFromEnv({})).toBe(600);
     expect(confirmTtlFromEnv({ MCP_CONFIRM_TTL_SECONDS: '45' })).toBe(45);
     for (const bad of ['0', '-1', '1.5', 'soon']) expect(confirmTtlFromEnv({ MCP_CONFIRM_TTL_SECONDS: bad })).toBe(600);
+  });
+});
+
+// Fleet audit 2026-09-24 BUG-1 (fleet-audit#1055): a typo in the TTL must not
+// silently become a 10-minute token window. Like MCP_CONFIRM_MODE, it warns
+// once on stderr and the gate fails CLOSED.
+describe('an unparseable MCP_CONFIRM_TTL_SECONDS', () => {
+  it.each(['60s', '1e3', '30.0', '000', '-5', ' 4 5 '])('%j warns once on stderr, naming the rejected value', (bad) => {
+    const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    expect(confirmTtlFromEnv({ MCP_CONFIRM_TTL_SECONDS: bad })).toBe(600);
+    expect(confirmTtlFromEnv({ MCP_CONFIRM_TTL_SECONDS: bad })).toBe(600);
+    const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('MCP_CONFIRM_TTL_SECONDS'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain(`"${bad.trim()}"`);
+    expect(lines[0]).toMatch(/refuse/);
+  });
+
+  it('turns the token fallback off (refuse), and the refusal names the variable', async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const opts = confirmationFromEnv({
+      action: 'thing.pay', message: 'Pay?', tool: 'thing_pay',
+      subject: () => ({ target: 't1', payload: { id: 't1' }, preview: { id: 't1' } }),
+      env: { MCP_CONFIRM_TTL_SECONDS: '60s' },
+    });
+    expect(opts.tokenFallback).toBeUndefined();
+    const r = text(await requireConfirmationWithFallback(CANNOT_BE_ASKED, opts));
+    expect(r.reason).toBe('confirmation-unsupported');
+    expect(r.note).toMatch(/MCP_CONFIRM_TTL_SECONDS/);
+  });
+
+  it('a valid or absent TTL never warns', () => {
+    const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    confirmTtlFromEnv({});
+    confirmTtlFromEnv({ MCP_CONFIRM_TTL_SECONDS: ' 45 ' });
+    confirmTtlFromEnv({ MCP_CONFIRM_TTL_SECONDS: '${user_config.confirm_ttl}' });
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 
@@ -151,5 +188,62 @@ describe('confirmationFromEnv', () => {
       if (before === undefined) delete process.env.MCP_CONFIRM_MODE;
       else process.env.MCP_CONFIRM_MODE = before;
     }
+  });
+});
+
+// Fleet audit 2026-09-24 SEC-2 (fleet-audit#1059): with `args`, both rails are
+// bound to the tool's validated arguments without per-tool judgement.
+describe('confirmationFromEnv with args', () => {
+  const subjectIdOnly = () => ({ target: 'm1', payload: { id: 'm1' }, preview: { id: 'm1' } });
+  const opts = (args: Record<string, unknown>, extra: Record<string, unknown> = {}) => confirmationFromEnv({
+    action: 'message.send', message: 'Send?', tool: 'message_send',
+    subject: subjectIdOnly, args, spent: createSpentTokenStore(), env: {}, ...extra,
+  });
+
+  it('elicitation rail: binds the acceptance to the action and the arguments (minus confirmToken)', async () => {
+    const o = opts({ id: 'm1', body: 'hello', confirmToken: 'ignored' });
+    expect(o.binding?.key).toHaveLength(32);
+    expect(o.binding?.args).toEqual({ id: 'm1', body: 'hello' });
+    expect(o.binding?.ttlSeconds).toBe(600);
+    const r = await requireConfirmationWithFallback(CAN_BE_ASKED, o);
+    expect(r).toMatchObject({ resultType: 'input_required' });
+    expect(typeof (r as { requestState?: unknown }).requestState).toBe('string');
+  });
+
+  it('elicitation rail is bound in refuse mode too, and an explicit binding wins', () => {
+    expect(opts({ id: 'm1' }, { env: { MCP_CONFIRM_MODE: 'refuse' } }).binding?.args).toEqual({ id: 'm1' });
+    const own = { key: 'k'.repeat(32), args: { mine: true } };
+    expect(opts({ id: 'm1' }, { binding: own }).binding).toBe(own);
+  });
+
+  it('token rail: a token issued for one body does not authorise another, even when subject.payload omits it', async () => {
+    const spent = createSpentTokenStore();
+    const p1 = text(await requireConfirmationWithFallback(CANNOT_BE_ASKED, opts({ id: 'm1', body: 'hello' }, { spent })));
+    expect(p1.status).toBe('confirmation-required');
+    const swapped = await requireConfirmationWithFallback(
+      CANNOT_BE_ASKED,
+      opts({ id: 'm1', body: 'something else', confirmToken: p1.confirmToken }, { spent, confirmToken: p1.confirmToken }),
+    );
+    expect(text(swapped)).toMatchObject({ error: 'DRAFT_CHANGED', reason: 'payload-changed', dispatched: false });
+  });
+
+  it('token rail: the same arguments plus the token (which is not itself bound) proceed', async () => {
+    const spent = createSpentTokenStore();
+    const p1 = text(await requireConfirmationWithFallback(CANNOT_BE_ASKED, opts({ id: 'm1', body: 'hello' }, { spent })));
+    expect(await requireConfirmationWithFallback(
+      CANNOT_BE_ASKED,
+      opts({ body: 'hello', id: 'm1', confirmToken: p1.confirmToken }, { spent, confirmToken: p1.confirmToken }),
+    )).toBeUndefined();
+  });
+
+  it('token rail: passes a subject read failure back unchanged', async () => {
+    const failure: CallToolResult = { content: [{ type: 'text', text: 'Error: gone' }], isError: true };
+    const o = confirmationFromEnv({ action: 'a', message: 'm', tool: 't', subject: async () => failure, args: { id: 1 }, env: {} });
+    expect(await requireConfirmationWithFallback(CANNOT_BE_ASKED, o)).toBe(failure);
+  });
+
+  it('without args, nothing new is bound (back-compatible)', () => {
+    const o = confirmationFromEnv({ action: 'a', message: 'm', tool: 't', subject: subjectIdOnly, env: {} });
+    expect(o.binding).toBeUndefined();
   });
 });

@@ -21,11 +21,19 @@
  * tool's description, because the rule is "is there an inverse in this same
  * tool set?" and no keyword knows that. `resy_remove_favorite` looks alarming
  * and is correctly additive; `send_message` looks ordinary and is not.
+ *
+ * It also reads each tool's inputSchema for the confirm gate (fleet audit
+ * 2026-09-24 REF-1; see lib/confirm-gates.mjs): a boolean `confirm` input is
+ * listed as an ERROR, a non-read tool without `confirmToken` as an ungated
+ * write for a human to judge. Confirm-boolean errors exit non-zero, like
+ * the annotation suspects; ungated writes are informational only (many
+ * additive writes are ungated on purpose), matching audit-annotations.mjs.
  */
 import { readdirSync, existsSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import { summariseConfirmGates } from './lib/confirm-gates.mjs';
 
 const args = process.argv.slice(2);
 const showAll = args.includes('--all');
@@ -77,6 +85,8 @@ const repos = readdirSync(parent, { withFileTypes: true })
 
 const totals = { read: 0, additive: 0, DESTRUCTIVE: 0 };
 const suspects = [];
+const confirmBooleans = [];
+const ungatedWrites = [];
 let servers = 0;
 const unreadable = [];
 
@@ -94,6 +104,9 @@ for (const repo of repos) {
     if (cls !== 'DESTRUCTIVE' && IRREVERSIBLE.test(t.name)) suspects.push([repo, cls, t.name]);
     if (showAll) console.log(`  ${cls.padEnd(11)} ${repo.padEnd(24)} ${t.name}`);
   }
+  const gates = summariseConfirmGates(tools);
+  for (const e of gates.errors) confirmBooleans.push([repo, e.name]);
+  for (const e of gates.suspects) ungatedWrites.push([repo, e.name]);
 }
 
 if (showAll) console.log('');
@@ -103,4 +116,11 @@ if (unreadable.length) console.log(`could not start: ${unreadable.join(', ')}`);
 console.log(`\n${suspects.length} SUSPECT${suspects.length === 1 ? '' : 'S'} — named for an irreversible act, annotated safe.`);
 console.log('Read each description; the test is whether an inverse exists in the same tool set.\n');
 for (const [repo, cls, name] of suspects) console.log(`  ${cls.padEnd(9)} ${repo.padEnd(24)} ${name}`);
-process.exit(suspects.length ? 1 : 0);
+
+console.log(`\n${confirmBooleans.length} CONFIRM-BOOLEAN ERROR${confirmBooleans.length === 1 ? '' : 'S'} — a model-satisfiable \`confirm\` input; migrate to confirmToken.\n`);
+for (const [repo, name] of confirmBooleans) console.log(`  ${repo.padEnd(24)} ${name}`);
+
+console.log(`\n${ungatedWrites.length} UNGATED WRITE${ungatedWrites.length === 1 ? '' : 'S'} — not read-only, no confirmToken input. Read each; many additive writes are fine ungated.\n`);
+for (const [repo, name] of ungatedWrites) console.log(`  ${repo.padEnd(24)} ${name}`);
+
+process.exit(suspects.length || confirmBooleans.length ? 1 : 0);
