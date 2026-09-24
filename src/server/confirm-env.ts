@@ -24,7 +24,7 @@
  * server uses when it wants the fleet defaults.
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { readEnvVar } from '../config/index.js';
+import { readEnvVar, type EnvSource } from '../config/index.js';
 import type { RequireConfirmationOptions } from './confirmation.js';
 import {
   CONFIRM_TOKEN_INSTRUCTION,
@@ -36,14 +36,12 @@ import {
 /** See the module header. */
 export type ConfirmMode = 'ask-user' | 'auto' | 'refuse';
 
-type Env = Record<string, string | undefined>;
-
 const MODES: ReadonlySet<string> = new Set<ConfirmMode>(['ask-user', 'auto', 'refuse']);
 const DEFAULT_TTL_SECONDS = 600;
 const warned = new Set<string>();
 
 /** `MCP_CONFIRM_MODE`, defaulting to `ask-user`; an unrecognised value is `refuse`. */
-export function readConfirmMode(env: Env = process.env): ConfirmMode {
+export function readConfirmMode(env: EnvSource = process.env): ConfirmMode {
   const raw = readEnvVar('MCP_CONFIRM_MODE', { env })?.trim().toLowerCase();
   if (!raw) return 'ask-user';
   if (MODES.has(raw)) return raw as ConfirmMode;
@@ -57,7 +55,7 @@ export function readConfirmMode(env: Env = process.env): ConfirmMode {
 }
 
 /** `MCP_CONFIRM_TTL_SECONDS` as a positive integer, else 600. */
-export function confirmTtlFromEnv(env: Env = process.env): number {
+export function confirmTtlFromEnv(env: EnvSource = process.env): number {
   const raw = readEnvVar('MCP_CONFIRM_TTL_SECONDS', { env })?.trim();
   return raw && /^[1-9]\d*$/.test(raw) ? Number(raw) : DEFAULT_TTL_SECONDS;
 }
@@ -69,7 +67,7 @@ let processKey: Uint8Array | undefined;
  * the 32 bytes the token functions require, or 32 random bytes fixed for the
  * life of the process (so a restart invalidates every outstanding token).
  */
-export function confirmKeyFromEnv(env: Env = process.env): Uint8Array {
+export function confirmKeyFromEnv(env: EnvSource = process.env): Uint8Array {
   const secret = readEnvVar('MCP_CONFIRM_SECRET', { env });
   if (secret) return createHash('sha256').update(secret, 'utf8').digest();
   processKey ??= randomBytes(32);
@@ -98,7 +96,7 @@ export interface ConfirmationFromEnvOptions extends RequireConfirmationOptions {
   /** Spent-token store; defaults to the process-wide one. */
   spent?: SpentTokenStore;
   /** Environment to read; defaults to `process.env`. */
-  env?: Env;
+  env?: EnvSource;
 }
 
 /**
