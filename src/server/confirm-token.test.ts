@@ -256,6 +256,15 @@ describe('requireConfirmationWithFallback', () => {
       .toMatchObject({ instruction: 'Send only after approval.' });
   });
 
+  // Fleet audit 2026-09-24 SEC-2: a subject with no payload binds only the
+  // target (hashConfirmPayload(undefined) is a constant), so a token would
+  // authorise any content. That is a programming error, not a runtime state.
+  it('throws when subject.payload is undefined rather than binding nothing', async () => {
+    await expect(requireConfirmationWithFallback(CANNOT_BE_ASKED, {
+      ...base, tokenFallback: fallback({ subject: () => subject({ payload: undefined }) }),
+    })).rejects.toThrow(/payload/);
+  });
+
   it('uses the process-wide store when none is given', async () => {
     const fb = (confirmToken?: string) => fallback({ spent: undefined, confirmToken, subject: () => subject({ target: 'default-store-2' }) });
     const { confirmToken } = parse(await requireConfirmationWithFallback(CANNOT_BE_ASKED, { ...base, tokenFallback: fb() }));

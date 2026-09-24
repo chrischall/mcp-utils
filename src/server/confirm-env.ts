@@ -6,7 +6,7 @@
  * | variable | default | |
  * |---|---|---|
  * | `MCP_CONFIRM_MODE` | `ask-user` | what a gated write does on a client that CANNOT show a confirmation prompt |
- * | `MCP_CONFIRM_TTL_SECONDS` | `600` | how long a token stays valid |
+ * | `MCP_CONFIRM_TTL_SECONDS` | `600` | how long a token stays valid; unparseable → `refuse` + a stderr warning |
  * | `MCP_CONFIRM_SECRET` | random per process | HMAC key; set only if tokens must survive a restart |
  *
  * `MCP_CONFIRM_MODE`:
@@ -54,10 +54,35 @@ export function readConfirmMode(env: EnvSource = process.env): ConfirmMode {
   return 'refuse';
 }
 
-/** `MCP_CONFIRM_TTL_SECONDS` as a positive integer, else 600. */
-export function confirmTtlFromEnv(env: EnvSource = process.env): number {
+/**
+ * `MCP_CONFIRM_TTL_SECONDS`: absent → the default; a positive integer → that;
+ * anything else → `undefined`, with a once-per-value stderr warning. Invalid
+ * is NOT silently the default: an operator who typed `60s` for a payment tool
+ * must not get a 10-minute token window without knowing (fleet audit
+ * 2026-09-24 BUG-1).
+ */
+function readConfirmTtl(env: EnvSource): number | undefined {
   const raw = readEnvVar('MCP_CONFIRM_TTL_SECONDS', { env })?.trim();
-  return raw && /^[1-9]\d*$/.test(raw) ? Number(raw) : DEFAULT_TTL_SECONDS;
+  if (!raw) return DEFAULT_TTL_SECONDS;
+  if (/^[1-9]\d*$/.test(raw)) return Number(raw);
+  const key = `ttl:${raw}`;
+  if (!warned.has(key)) {
+    warned.add(key);
+    process.stderr.write(
+      `MCP_CONFIRM_TTL_SECONDS="${raw}" is not a positive whole number of seconds; `
+      + 'gated writes will refuse on clients that cannot show a confirmation prompt until it is fixed.\n',
+    );
+  }
+  return undefined;
+}
+
+/**
+ * `MCP_CONFIRM_TTL_SECONDS` as a positive integer, else 600. An unparseable
+ * value warns once on stderr, and {@link confirmationFromEnv} treats it as
+ * `refuse` (fail closed, like an unrecognised `MCP_CONFIRM_MODE`).
+ */
+export function confirmTtlFromEnv(env: EnvSource = process.env): number {
+  return readConfirmTtl(env) ?? DEFAULT_TTL_SECONDS;
 }
 
 let processKey: Uint8Array | undefined;
@@ -80,6 +105,16 @@ export const CONFIRM_TOKEN_AUTO_INSTRUCTION =
   + 'plus confirmToken. (This server runs with MCP_CONFIRM_MODE=auto, so the user\'s approval in chat is not required.)';
 
 const REFUSE_HINT = 'Set MCP_CONFIRM_MODE=ask-user on the server to allow two-step confirmation instead.';
+const BAD_TTL_HINT = 'MCP_CONFIRM_TTL_SECONDS on the server is not a positive whole number of seconds; fix it to allow '
+  + 'two-step confirmation.';
+
+/** The arguments a binding commits to: the tool's input minus the token itself (it differs between phases). */
+function boundArgs(args: unknown): unknown {
+  if (args === null || typeof args !== 'object' || Array.isArray(args) || !('confirmToken' in args)) return args;
+  const { confirmToken, ...rest } = args as Record<string, unknown>;
+  void confirmToken;
+  return rest;
+}
 
 /** {@link confirmationFromEnv}'s input: the confirmation options plus what the token binds. */
 export interface ConfirmationFromEnvOptions extends RequireConfirmationOptions {
@@ -97,6 +132,18 @@ export interface ConfirmationFromEnvOptions extends RequireConfirmationOptions {
   spent?: SpentTokenStore;
   /** Environment to read; defaults to `process.env`. */
   env?: EnvSource;
+  /**
+   * The tool's validated arguments. Pass them: both rails are then bound to
+   * them without per-tool judgement (fleet audit 2026-09-24 SEC-2).
+   * - Elicitation: sets {@link RequireConfirmationOptions.binding} (unless one
+   *   is given) with the env key and TTL, so an acceptance minted for one call
+   *   cannot be replayed on a call with different arguments.
+   * - Token: the token binds `{ payload: subject().payload, args }`, so a
+   *   `subject()` whose payload covers only some arguments (say `{ id }` while
+   *   the body is a separate argument) still cannot authorise a different body.
+   * A `confirmToken` key is dropped first: it differs between the two phases.
+   */
+  args?: unknown;
 }
 
 /**
@@ -106,21 +153,35 @@ export interface ConfirmationFromEnvOptions extends RequireConfirmationOptions {
  * ```ts
  * const gate = await requireConfirmationWithFallback(ctx, confirmationFromEnv({
  *   action: 'thing.delete', message: 'Review and confirm this deletion.', details: { id },
- *   tool: 'thing_delete', confirmToken,
+ *   tool: 'thing_delete', confirmToken, args,
  *   subject: () => ({ target: id, payload: { id }, preview: { id } }),
  * }));
  * if (gate) return gate;
  * ```
  */
 export function confirmationFromEnv(options: ConfirmationFromEnvOptions): RequireConfirmationWithFallbackOptions {
-  const { tool, account, confirmToken, subject, instruction, spent, env = process.env, ...confirmation } = options;
+  const { tool, account, confirmToken, subject, instruction, spent, args, env = process.env, ...rest } = options;
   const mode = readConfirmMode(env);
-  if (mode === 'refuse') {
+  const ttlSeconds = readConfirmTtl(env);
+  const bound = args === undefined ? undefined : boundArgs(args);
+  const confirmation: RequireConfirmationOptions = bound === undefined || rest.binding
+    ? rest
+    : { ...rest, binding: { key: confirmKeyFromEnv(env), args: bound, ttlSeconds: ttlSeconds ?? DEFAULT_TTL_SECONDS } };
+  if (mode === 'refuse' || ttlSeconds === undefined) {
+    const hint = mode === 'refuse' ? REFUSE_HINT : BAD_TTL_HINT;
     return {
       ...confirmation,
-      unsupportedNote: confirmation.unsupportedNote ? `${confirmation.unsupportedNote} ${REFUSE_HINT}` : REFUSE_HINT,
+      unsupportedNote: confirmation.unsupportedNote ? `${confirmation.unsupportedNote} ${hint}` : hint,
     };
   }
+  const boundSubject: ConfirmTokenFallback['subject'] = bound === undefined
+    ? subject
+    : async () => {
+      const read = await subject();
+      // A CallToolResult (a failed read) passes back unchanged.
+      if ('content' in read) return read;
+      return { ...read, payload: { payload: read.payload, args: bound } };
+    };
   return {
     ...confirmation,
     tokenFallback: {
@@ -128,8 +189,8 @@ export function confirmationFromEnv(options: ConfirmationFromEnvOptions): Requir
       tool,
       ...(account === undefined ? {} : { account }),
       ...(confirmToken === undefined ? {} : { confirmToken }),
-      subject,
-      ttlSeconds: confirmTtlFromEnv(env),
+      subject: boundSubject,
+      ttlSeconds,
       instruction: mode === 'auto' ? CONFIRM_TOKEN_AUTO_INSTRUCTION : (instruction ?? CONFIRM_TOKEN_INSTRUCTION),
       ...(spent === undefined ? {} : { spent }),
     },

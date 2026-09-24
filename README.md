@@ -220,20 +220,25 @@ returns `isError: true` and acts on nothing:
 | `TOKEN_INVALID` | tampered, issued for another tool, account or target, or signed with another key |
 
 **Fleet env layer.** `confirmationFromEnv({ ...requireConfirmationOptions, tool,
-account?, confirmToken, subject, instruction?, spent? })` turns three standard
+account?, confirmToken, subject, args, instruction?, spent? })` turns three standard
 variables into those options, so every server reads and documents them the same
-way:
+way. Pass `args` (the tool's validated arguments): it binds BOTH rails to them —
+the elicitation acceptance (`binding`, keyed from `MCP_CONFIRM_SECRET`) and the
+token (which then commits to `{ payload, args }`, so a `subject()` whose payload
+covers only some arguments cannot authorise different ones). `confirmToken` is
+dropped from `args` before hashing. A `subject()` that returns no `payload`
+throws rather than binding only the target.
 
 | variable | default | |
 |---|---|---|
 | `MCP_CONFIRM_MODE` | `ask-user` | What a gated write does on a client that cannot show a prompt. `ask-user`: two steps, and the model must get the user's approval in chat before using the token. `auto`: two steps, but the model may use the token after reviewing the preview itself. `refuse`: refused on such clients. An unrecognised value is treated as `refuse` (with a stderr warning). A client that can be prompted always is. |
-| `MCP_CONFIRM_TTL_SECONDS` | `600` | token lifetime |
+| `MCP_CONFIRM_TTL_SECONDS` | `600` | token lifetime, a positive whole number of seconds. Anything else (`60s`, `1e3`) warns on stderr and is treated as `refuse`, never silently as the default. |
 | `MCP_CONFIRM_SECRET` | random per process | HMAC key (any length, stretched through SHA-256); set only if tokens must survive a restart |
 
 ```ts
 const gate = await requireConfirmationWithFallback(ctx, confirmationFromEnv({
   action: 'thing.delete', message: 'Review and confirm this deletion.', details: { id },
-  tool: 'thing_delete', confirmToken,
+  tool: 'thing_delete', confirmToken, args,
   subject: () => ({ target: id, payload: { id }, preview: { id } }),
 }));
 if (gate) return gate;
