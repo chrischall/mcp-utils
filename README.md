@@ -156,6 +156,77 @@ single-use**: within `ttlSeconds` (default 600) the same acceptance can be
 replayed for identical arguments, never for different ones. If the action must
 not run twice (a payment, a send), record consumed states and refuse repeats.
 
+#### Clients that cannot be prompted: the confirm-token fallback
+
+A caller that declares no elicitation (claude.ai, measured) cannot see the
+prompt, so `requireConfirmation` refuses it (`"reason":
+"confirmation-unsupported"`). `requireConfirmationWithFallback` takes the same
+options plus an opt-in `tokenFallback`, and runs a two-phase flow there instead.
+A client that can be prompted is still prompted, and the fallback's `subject`
+is never called.
+
+1. **Phase 1**: called without `confirmToken`, nothing happens. The result has
+   `status: "confirmation-required"`, the full `preview`, a `confirmToken`, and
+   an instruction to show the preview to the user and call again only after
+   they approve in chat.
+2. **Phase 2**: the same call plus `confirmToken`. `subject()` re-reads what the
+   tool would act on, and the helper returns `undefined` (proceed) only if that
+   still matches the token.
+
+```ts
+import { confirmTokenParam, requireConfirmationWithFallback, textResult } from '@chrischall/mcp-utils';
+
+server.registerTool('draft_send', {
+  inputSchema: z.object({ draftId: z.string(), confirmToken: confirmTokenParam }),
+}, async ({ draftId, confirmToken }, ctx) => {
+  const draft = await api.getDraft(draftId);           // read on EVERY call
+  const gate = await requireConfirmationWithFallback(ctx, {
+    action: 'draft.send',
+    message: 'Review and confirm this send.',
+    details: { to: draft.to, subject: draft.subject },
+    // Opt-in: omit tokenFallback to keep the refusal.
+    tokenFallback: process.env.CONFIRM_FALLBACK === 'token' ? {
+      key: confirmKey,                                  // >= 32 bytes
+      tool: 'draft_send',
+      account,
+      confirmToken,
+      subject: () => ({
+        target: draftId,
+        revision: draft.messageId,                      // rotates on edit
+        payload: draft,                                 // hashed into the token
+        preview: draft,                                 // shown to the user
+      }),
+    } : undefined,
+  });
+  if (gate) return gate;
+  await api.sendDraft(draftId);
+  return textResult({ sent: true });
+});
+```
+
+The token is an HMAC over the tool, account, target, revision and a hash of the
+canonical payload (the same canonical form `binding` commits to), expires after
+`ttlSeconds` (default 600), and is **single-use** through a spent-token store
+(process-wide by default; pass `spent: createSpentTokenStore()` to scope it).
+The store is in memory, so with a key shared across processes a restart or
+another instance accepts a spent token again until it expires. A refused token
+returns `isError: true` and acts on nothing:
+
+| `error` | meaning |
+|---|---|
+| `DRAFT_CHANGED` | `reason: "revision-changed"` or `"payload-changed"`: the target moved since the preview. Carries the new preview and a fresh token. |
+| `TOKEN_EXPIRED` | older than `ttlSeconds` |
+| `TOKEN_REUSED` | already used |
+| `TOKEN_INVALID` | tampered, issued for another tool, account or target, or signed with another key |
+
+**It is weaker than elicitation.** The approval is a tool argument, so "a human
+approved" rests on the model following the instruction. The token guarantees a
+preview call came first, that what happens is exactly what was previewed, and
+that it happens once. That is still stronger than a bare `confirm: true`, which
+a model can pass on its first call. Make it opt-in. `issueConfirmToken`,
+`verifyConfirmToken` and `hashConfirmPayload` are exported for a flow that
+needs the primitives directly.
+
 ### `response` — tool-result formatting
 
 `textResult` / `jsonResult` (alias), `rawTextResult`, `imageResult`,
