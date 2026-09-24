@@ -219,6 +219,28 @@ returns `isError: true` and acts on nothing:
 | `TOKEN_REUSED` | already used |
 | `TOKEN_INVALID` | tampered, issued for another tool, account or target, or signed with another key |
 
+**Fleet env layer.** `confirmationFromEnv({ ...requireConfirmationOptions, tool,
+account?, confirmToken, subject, instruction?, spent? })` turns three standard
+variables into those options, so every server reads and documents them the same
+way:
+
+| variable | default | |
+|---|---|---|
+| `MCP_CONFIRM_MODE` | `ask-user` | What a gated write does on a client that cannot show a prompt. `ask-user`: two steps, and the model must get the user's approval in chat before using the token. `auto`: two steps, but the model may use the token after reviewing the preview itself. `refuse`: refused on such clients. An unrecognised value is treated as `refuse` (with a stderr warning). A client that can be prompted always is. |
+| `MCP_CONFIRM_TTL_SECONDS` | `600` | token lifetime |
+| `MCP_CONFIRM_SECRET` | random per process | HMAC key (any length, stretched through SHA-256); set only if tokens must survive a restart |
+
+```ts
+const gate = await requireConfirmationWithFallback(ctx, confirmationFromEnv({
+  action: 'thing.delete', message: 'Review and confirm this deletion.', details: { id },
+  tool: 'thing_delete', confirmToken,
+  subject: () => ({ target: id, payload: { id }, preview: { id } }),
+}));
+if (gate) return gate;
+```
+
+This replaces `schemaConfirm` (`confirm: true`), which is deprecated.
+
 **It is weaker than elicitation.** The approval is a tool argument, so "a human
 approved" rests on the model following the instruction. The token guarantees a
 preview call came first, that what happens is exactly what was previewed, and
