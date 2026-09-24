@@ -39,6 +39,14 @@ describe('redactSecrets ReDoS resistance', () => {
     ['cookie:', 'cookie:'.repeat(28_000)], // header starts with no `=`: each scan must stop at the next `:`
     ['set-cookie:', 'set-cookie:'.repeat(18_000)],
     ['aaaaaaaaaaa.', 'aaaaaaaaaaa.'.repeat(16_000)],
+    // PRIV-1 additions: the `x-` query-param branch, and the JSON cookie
+    // rules with an unterminated array/string after every key.
+    ['?x-', `?${'x-'.repeat(100_000)}`],
+    ['&x-a-', '&x-a-'.repeat(40_000)],
+    ['"cookie":[', '"cookie":['.repeat(20_000)],
+    ['"cookie":["', '"cookie":["'.repeat(18_000)],
+    ['"set-cookie":"\\', '"set-cookie":"\\'.repeat(14_000)],
+    ['"token":1', '"token":1'.repeat(22_000)],
   ])('is linear on 200 KB of `%s` runs', (_label, evil) => {
     expect(elapsedMs(() => redactSecrets(evil))).toBeLessThan(100);
   });

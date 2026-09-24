@@ -359,7 +359,10 @@ plus `createHelpfulError`, `wrapToolError`, `truncateErrorMessage`,
 confirmations (short values are fully hidden). `redactSecrets` scrubs `Bearer`/`Basic` auth
 headers, `Cookie`/`Set-Cookie` values (cookie names stay visible), JWTs,
 well-known API-key shapes (`sk-…`, `ghp_…`, `xox?-…`, `AIza…`, `AKIA…`,
-`whsec_…`), and secret-bearing URL query params; `truncateErrorMessage` applies
+`whsec_…`), secret-bearing URL query params (including cookie-style session
+ids such as `sessionid`/`PHPSESSID`/`JSESSIONID`/`sid` and `x-api-key`-style
+names), and secret JSON values — quoted or numeric — plus the values under
+`"cookie"`/`"set-cookie"` JSON keys (names kept); `truncateErrorMessage` applies
 it before truncating, and `errorResult` applies it (without truncating). Every
 pattern is linear in the input (`redos.test.ts` times each against 200 KB
 adversarial runs), and `truncateErrorMessage` hands the redactor at most
