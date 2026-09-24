@@ -22,7 +22,7 @@ export function canonicalJson(value: unknown): string {
   if (typeof value === 'number') return Number.isFinite(value) ? JSON.stringify(value) : `{"$num":"${String(value)}"}`;
   if (typeof value === 'bigint') return `{"$bigint":"${value.toString()}"}`;
   if (typeof value === 'function' || typeof value === 'symbol') {
-    throw new TypeError(`cannot bind a ${typeof value} argument value.`);
+    throw new TypeError(`confirmation: cannot bind a ${typeof value} argument value.`);
   }
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (value instanceof Date) {
@@ -42,7 +42,7 @@ export function canonicalJson(value: unknown): string {
   }
   const proto = Object.getPrototypeOf(value) as unknown;
   if (proto !== Object.prototype && proto !== null) {
-    throw new TypeError('cannot bind a non-plain object argument value (class instance).');
+    throw new TypeError('confirmation: cannot bind a non-plain object argument value (class instance).');
   }
   const entries = Object.entries(value as Record<string, unknown>)
     .filter(([, v]) => v !== undefined)
