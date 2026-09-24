@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.6.0](https://github.com/chrischall/mcp-utils/compare/v2.5.0...v2.6.0) (2026-09-24)
+
+
+### Features
+
+* **server:** read MCP_CONFIRM_MODE, _TTL_SECONDS and _SECRET for the confirm-token fallback ([#290](https://github.com/chrischall/mcp-utils/issues/290)) ([5e80bb0](https://github.com/chrischall/mcp-utils/commit/5e80bb0153228cddc4a73b743bfed9b942e94dc6))
+
+
+### Refactor
+
+* **server:** use the exported EnvSource type in confirm-env ([#293](https://github.com/chrischall/mcp-utils/issues/293)) ([b4177cc](https://github.com/chrischall/mcp-utils/commit/b4177cc5e03ae34e545c06c531bd36c272fbb616)), closes [#291](https://github.com/chrischall/mcp-utils/issues/291)
+
 ## [2.5.0](https://github.com/chrischall/mcp-utils/compare/v2.4.0...v2.5.0) (2026-09-24)
 
 
