@@ -55,6 +55,15 @@ describe('hashConfirmPayload', () => {
   });
 });
 
+describe('canonicalisation errors say where they came from', () => {
+  it.each([
+    ['a function', { f: () => 1 }, /^confirmation: cannot bind a function argument value\.$/],
+    ['a class instance', { d: new (class Thing {})() }, /^confirmation: cannot bind a non-plain object argument value \(class instance\)\.$/],
+  ])('%s', (_label, payload, message) => {
+    expect(() => hashConfirmPayload(payload)).toThrow(message);
+  });
+});
+
 describe('issueConfirmToken / verifyConfirmToken', () => {
   const store = () => createSpentTokenStore();
 
