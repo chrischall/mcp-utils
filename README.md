@@ -220,9 +220,9 @@ returns `isError: true` and acts on nothing:
 | `TOKEN_INVALID` | tampered, issued for another tool, account or target, or signed with another key |
 
 **Fleet env layer.** `confirmationFromEnv({ ...requireConfirmationOptions, tool,
-account?, confirmToken, subject, args, instruction?, spent? })` turns three standard
+account?, confirmToken, subject, args?, instruction?, spent? })` turns three standard
 variables into those options, so every server reads and documents them the same
-way. Pass `args` (the tool's validated arguments): it binds BOTH rails to them —
+way. Pass `args` (optional but recommended: the tool's validated arguments): it binds BOTH rails to them —
 the elicitation acceptance (`binding`, keyed from `MCP_CONFIRM_SECRET`) and the
 token (which then commits to `{ payload, args }`, so a `subject()` whose payload
 covers only some arguments cannot authorise different ones). `confirmToken` is

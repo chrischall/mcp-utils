@@ -25,8 +25,9 @@
  * It also reads each tool's inputSchema for the confirm gate (fleet audit
  * 2026-09-24 REF-1; see lib/confirm-gates.mjs): a boolean `confirm` input is
  * listed as an ERROR, a non-read tool without `confirmToken` as an ungated
- * write for a human to judge. Both exit non-zero, like the annotation
- * suspects.
+ * write for a human to judge. Confirm-boolean errors exit non-zero, like
+ * the annotation suspects; ungated writes are informational only (many
+ * additive writes are ungated on purpose), matching audit-annotations.mjs.
  */
 import { readdirSync, existsSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
@@ -122,4 +123,4 @@ for (const [repo, name] of confirmBooleans) console.log(`  ${repo.padEnd(24)} ${
 console.log(`\n${ungatedWrites.length} UNGATED WRITE${ungatedWrites.length === 1 ? '' : 'S'} — not read-only, no confirmToken input. Read each; many additive writes are fine ungated.\n`);
 for (const [repo, name] of ungatedWrites) console.log(`  ${repo.padEnd(24)} ${name}`);
 
-process.exit(suspects.length || confirmBooleans.length || ungatedWrites.length ? 1 : 0);
+process.exit(suspects.length || confirmBooleans.length ? 1 : 0);
