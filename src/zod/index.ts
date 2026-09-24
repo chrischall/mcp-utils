@@ -93,7 +93,13 @@ export const schemaOrigin = z
  * `confirm: true` the tool returns a preview instead of performing the action.
  * (honeybook pay_invoice / sign_contract)
  *
- * @deprecated Prefer `requireConfirmation` where the client supports it — the
+ * @deprecated Use `requireConfirmationWithFallback(ctx, confirmationFromEnv({...}))`
+ * with `confirmTokenParam` instead: a real prompt where the client supports
+ * one, and elsewhere a preview token that forces a preview call first, binds
+ * the exact arguments and is single-use (MCP_CONFIRM_MODE: ask-user | auto |
+ * refuse). The fleet moved off this parameter in September 2026.
+ *
+ * Previously: prefer `requireConfirmation` where the client supports it — the
  * confirmation is then a protocol exchange rather than a tool argument, so a
  * model cannot satisfy the gate itself by setting a boolean. The description
  * below is the weakness made literal: it tells an attacker-controlled model

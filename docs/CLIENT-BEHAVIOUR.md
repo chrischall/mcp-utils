@@ -80,10 +80,23 @@ description do not match how someone would search is effectively unreachable.
 ### There is no in-band human gate on claude.ai
 
 Neither elicitation nor the annotation. A hosted MCP cannot make claude.ai
-stop and ask. A preview→confirm token was scoped and declined (2026-09-21):
-it is only an anti-*mistake* device, since a model that intends to send can
-call both rounds, and the condition justifying it is the same one whose
-reversal makes it unnecessary.
+stop and ask. A preview→confirm token was scoped and declined on 2026-09-21,
+because it is only an anti-*mistake* device: a model that intends to send can
+call both rounds.
+
+**Reversed on 2026-09-24, with that limitation accepted.** The token shipped as
+`requireConfirmationWithFallback` plus `confirmationFromEnv`, and the fleet moved
+onto it from `schemaConfirm`. It still cannot make claude.ai stop and ask. What
+it adds over `confirm: true`:
+- a preview call must come first (`confirm: true` can be passed blind on the
+  first call);
+- the approval is bound to the exact arguments and to a fresh read of the target,
+  so a draft or event edited in between is refused;
+- it is single-use.
+
+`MCP_CONFIRM_MODE=ask-user` (the default) *instructs* the model to get the user's
+approval in chat. That is an instruction, not a gate. A client that declares
+elicitation still gets the real prompt.
 
 ### The canonical failure string
 
