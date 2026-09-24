@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.5.0](https://github.com/chrischall/mcp-utils/compare/v2.4.0...v2.5.0) (2026-09-24)
+
+
+### Features
+
+* **server:** add a confirm-token fallback for clients that cannot show an elicitation prompt ([#286](https://github.com/chrischall/mcp-utils/issues/286)) ([a4213a2](https://github.com/chrischall/mcp-utils/commit/a4213a292a14f6a25b6f36f591c0304b7e5bd214))
+
+
+### Bug Fixes
+
+* **server:** say where a confirmation canonicalisation error came from ([#289](https://github.com/chrischall/mcp-utils/issues/289)) ([0a79efb](https://github.com/chrischall/mcp-utils/commit/0a79efb64fa9f4268d681ec324fafa7557166df8)), closes [#287](https://github.com/chrischall/mcp-utils/issues/287)
+
 ## [2.4.0](https://github.com/chrischall/mcp-utils/compare/v2.3.0...v2.4.0) (2026-09-23)
 
 
