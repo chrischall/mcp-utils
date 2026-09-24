@@ -360,7 +360,12 @@ confirmations (short values are fully hidden). `redactSecrets` scrubs `Bearer`/`
 headers, `Cookie`/`Set-Cookie` values (cookie names stay visible), JWTs,
 well-known API-key shapes (`sk-…`, `ghp_…`, `xox?-…`, `AIza…`, `AKIA…`,
 `whsec_…`), and secret-bearing URL query params; `truncateErrorMessage` applies
-it before truncating, and `errorResult` applies it (without truncating). This core module has **no runtime dependencies** — the fetchproxy
+it before truncating, and `errorResult` applies it (without truncating). Every
+pattern is linear in the input (`redos.test.ts` times each against 200 KB
+adversarial runs), and `truncateErrorMessage` hands the redactor at most
+`ERROR_REDACTION_INPUT_MAX` (64 KB) of the body as defence in depth, because
+`formatApiError` feeds it the WHOLE upstream body and a hostile upstream must
+not be able to pin the process with one response. This core module has **no runtime dependencies** — the fetchproxy
 typed-error hierarchy (`Fetchproxy*Error`), the raw `classifyBridgeError` /
 `classifyRowError` re-exports, and the `bridgeErrorInfo` envelope helper live in
 the [`/fetchproxy`](#fetchproxy) subpath instead, so

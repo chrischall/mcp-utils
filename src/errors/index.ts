@@ -141,17 +141,29 @@ export function createHelpfulError(message: string, opts?: { hint?: string }): M
 
 const BEARER_RE = /(bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi;
 // A JWT-shaped triple (header.payload.signature), each segment base64url-ish.
-const JWT_RE = /\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}\b/g;
+// The scan may only START where a base64url run starts (negative lookbehind
+// over the segment charset), never at a `\b`: `-` is a non-word character
+// but a valid segment character, so `\b` fired before every `x` in a run of
+// `x-x-x-…` and each start re-scanned the run for a `.` that never came —
+// O(n²), 40 s on 200 KB (fleet audit 2026-09-24 SEC-1). Anchored on the run
+// start, each run is scanned once.
+const JWT_RE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])/g;
 // `Authorization: Basic <base64 credentials>` — anchored on the full header name
 // so prose like "basic principles" never matches.
 const BASIC_AUTH_RE = /(authorization\s*:\s*basic\s+)[A-Za-z0-9+/=_-]{6,}/gi;
 // `Set-Cookie: name=value; Path=/; …` — redact the cookie VALUE only; the name
 // and the (non-secret) attributes stay visible for debuggability.
-const SET_COOKIE_RE = /(\bset-cookie\s*:\s*)([^=;,\s]+)=[^;,\s]*/gi;
+//
+// Cookie NAMES exclude `:` (an RFC 6265 cookie-name is a token, which cannot
+// contain it). With `:` allowed, a body of `cookie:cookie:cookie:…` made every
+// `cookie:` start scan to the end of the run looking for `=` — O(n²), 5 s on
+// 200 KB (fleet audit 2026-09-24 SEC-1). Excluding it stops each scan at the
+// next header start. Values keep `:` (base64, URLs).
+const SET_COOKIE_RE = /(\bset-cookie\s*:\s*)([^=;,:\s]+)=[^;,\s]*/gi;
 // `Cookie: a=1; b=2` — redact every pair's value, keep the names. The lookbehind
 // keeps this from re-matching the `Cookie` inside `Set-Cookie:`.
 const COOKIE_HEADER_RE =
-  /((?<!set-)\bcookie\s*:\s*)((?:[^=;,\s]+=[^;,\s]*)(?:;\s*[^=;,\s]+=[^;,\s]*)*)/gi;
+  /((?<!set-)\bcookie\s*:\s*)((?:[^=;,:\s]+=[^;,\s]*)(?:;\s*[^=;,:\s]+=[^;,\s]*)*)/gi;
 // Well-known API-key shapes as standalone tokens, each anchored to its documented
 // prefix + length/charset so ordinary prose (short hex ids, version strings,
 // UUIDs) never matches. Charsets containing `-` (a non-word character) can end
@@ -190,8 +202,18 @@ const FORM_PASSWORD_RE = /((?:^|[\s,;:"'(\[{])(?:password|passwd)=)[^&#\s"'<>`]+
 // `x_api_key: …`, `Api-Key: …`, `X-Auth-Token: …`, `X-Goog-Api-Key: …`.
 // Anchored on an `x-`/`x_` prefix (or a bare `api-key`) so prose like
 // `token: expired` is untouched.
-const HEADER_SECRET_RE =
-  /(\b(?:x[-_][a-z0-9_-]*?(?:api[-_]?key|token|secret|auth)[a-z0-9_-]*|api[-_]?key)\s*:\s*)[^\s,;"'<>`]+/gi;
+//
+// The header-name quantifiers are BOUNDED ({0,40}). Unbounded, every `x-`
+// word start in a long `[a-z0-9_-]` run with no colon scanned to the end of
+// the run, so a crafted upstream body of `x-x-x-…` cost O(n²): 200 KB took
+// 7.5 s inside redactSecrets, which runs on the whole body BEFORE the 500-char
+// cut (fleet audit 2026-09-24 SEC-1). Bounded, each start scans at most 40
+// chars; no real header name is longer.
+const HEADER_NAME_RUN = '[a-z0-9_-]{0,40}';
+const HEADER_SECRET_RE = new RegExp(
+  `(\\b(?:x[-_]${HEADER_NAME_RUN}?(?:api[-_]?key|token|secret|auth)${HEADER_NAME_RUN}|api[-_]?key)\\s*:\\s*)[^\\s,;"'<>\`]+`,
+  'gi',
+);
 // AWS SigV4 presigned-URL credential params. Their `X-Amz-` prefix defeats the
 // short-name anchoring in QUERY_SECRET_RE (`&X-Amz-Security-Token=` has `-`, not
 // `&`, before `token`), so match the full param names explicitly — an S3 error
@@ -224,7 +246,7 @@ const JSON_SECRET_KEYS = [
   'api[_-]?secret',
   '(?:x[_-])?api[_-]?key',
   'private[_-]?key',
-  'x[_-][a-z0-9_-]*?(?:api[_-]?key|token|secret|auth)[a-z0-9_-]*',
+  `x[_-]${HEADER_NAME_RUN}?(?:api[_-]?key|token|secret|auth)${HEADER_NAME_RUN}`, // bounded like HEADER_SECRET_RE
   '(?:proxy-)?authorization',
   'password',
   'passwd',
@@ -271,16 +293,29 @@ export function redactSecrets(text: string): string {
 }
 
 /**
+ * The most of an upstream body {@link truncateErrorMessage} runs through
+ * {@link redactSecrets}: 64 KB. Defence in depth behind the linear patterns —
+ * a body past this is cut BEFORE redaction, so no pattern, however it
+ * regresses, can be handed megabytes by a hostile upstream. A secret
+ * straddling the 64 KB mark is not a realistic leak: the surfaced message is
+ * `max` (500) characters from the start.
+ */
+export const ERROR_REDACTION_INPUT_MAX = 64 * 1024;
+
+/**
  * Redact secrets, then cap an (upstream) error string at `max` characters,
  * appending a `… [truncated]` marker when clipped.
  *
  * Security: redaction runs BEFORE truncation so a token straddling the cut
  * boundary can't survive in a half-form. Untrusted upstream bodies must always
- * go through this before reaching a tool result.
+ * go through this before reaching a tool result. The redactor is only ever
+ * handed the first {@link ERROR_REDACTION_INPUT_MAX} characters (or `max`,
+ * whichever is larger), so a pathological body cannot pin the event loop.
  */
 export function truncateErrorMessage(text: string, max: number = DEFAULT_ERROR_MESSAGE_MAX): string {
   const str = text === null || text === undefined ? '' : String(text);
-  const redacted = redactSecrets(str);
+  const cap = Math.max(ERROR_REDACTION_INPUT_MAX, max);
+  const redacted = redactSecrets(str.length > cap ? str.slice(0, cap) : str);
   if (redacted.length <= max) return redacted;
   return `${redacted.slice(0, max)}… [truncated]`;
 }
