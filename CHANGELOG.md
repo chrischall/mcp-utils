@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.7.0](https://github.com/chrischall/mcp-utils/compare/v2.6.1...v2.7.0) (2026-09-25)
+
+
+### Features
+
+* **scripts:** add a fleet lint for file-helper calls without allowedRoots ([#297](https://github.com/chrischall/mcp-utils/issues/297)) ([96584e9](https://github.com/chrischall/mcp-utils/commit/96584e941134645edfa15f65fb68b1e64bc9b5b9))
+
 ## [2.6.1](https://github.com/chrischall/mcp-utils/compare/v2.6.0...v2.6.1) (2026-09-24)
 
 
