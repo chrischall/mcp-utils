@@ -474,6 +474,13 @@ path is resolved through symlinks and refused unless it is inside one of the
 roots (for `resolveOutputDir`, only the per-call dir is confined). Omitting it
 keeps the unconfined behaviour.
 
+The fleet CI enforces the opt-in: `scripts/audit-fs-confinement.mjs` (run by
+chrischall/workflows' `reusable-mcp-ci.yml`) fails a server whose source calls
+one of these three helpers, imported from this package, without `allowedRoots`
+in the call's own arguments. `resolveOutputDir(undefined, …)` is exempt (no
+per-call path). The scripts are not in the npm package, so run it from a
+clone of this repo: `node scripts/audit-fs-confinement.mjs ../your-mcp`.
+
 ### `http` — bearer API-client kit
 
 `createApiClient` plus building blocks: `buildQueryString`, `buildOptionalBody`,
