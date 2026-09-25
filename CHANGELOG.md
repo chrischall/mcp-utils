@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.1](https://github.com/chrischall/mcp-utils/compare/v2.6.0...v2.6.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* make secret redaction linear, bind confirmations to their arguments, stop batches after abort ([#295](https://github.com/chrischall/mcp-utils/issues/295)) ([c4ba889](https://github.com/chrischall/mcp-utils/commit/c4ba889f1676c0cfb0b70052b8bb218c0c0e3301))
+
 ## [2.6.0](https://github.com/chrischall/mcp-utils/compare/v2.5.0...v2.6.0) (2026-09-24)
 
 
