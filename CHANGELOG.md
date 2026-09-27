@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.7.1](https://github.com/chrischall/mcp-utils/compare/v2.7.0...v2.7.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* **server:** exit on stdin EOF when the host hangs up; require SDK 2.1 ([#299](https://github.com/chrischall/mcp-utils/issues/299)) ([817c6ba](https://github.com/chrischall/mcp-utils/commit/817c6bafff92d97b9c3954868381599c9e809020))
+
 ## [2.7.0](https://github.com/chrischall/mcp-utils/compare/v2.6.1...v2.7.0) (2026-09-25)
 
 
