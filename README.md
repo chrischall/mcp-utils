@@ -79,7 +79,9 @@ await runMcp({
 ```
 
 `runMcp` serves stdio through the SDK's `serveStdio` entry and installs
-`SIGINT`/`SIGTERM` handlers via `withGracefulShutdown`. Use `createMcpServer`
+`SIGINT`/`SIGTERM` handlers via `withGracefulShutdown` — plus a stdin-EOF
+handler, so the process runs `onSignal` and exits when the host hangs up the
+pipe instead of lingering on an open bridge socket. Use `createMcpServer`
 directly if you need the instance itself — but hand it to a serving entry
 (`serveStdio(() => createMcpServer({…}))` or
 `createMcpHandler(() => createMcpServer({…}))`) rather than calling

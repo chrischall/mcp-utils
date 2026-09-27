@@ -8,7 +8,7 @@
  *
  * This module collapses that 30–120 lines/MCP into three calls:
  *  - {@link createMcpServer} — build the server and apply the registrars.
- *  - {@link withGracefulShutdown} — SIGINT/SIGTERM → cleanup → exit.
+ *  - {@link withGracefulShutdown} — SIGINT/SIGTERM (and stdin EOF) → cleanup → exit.
  *  - {@link runMcp} — bootstrap + banner + serve + shutdown, the whole boot.
  *
  * It is deliberately transport- and domain-agnostic. The
@@ -311,6 +311,13 @@ export async function createMcpServer<TDeps = unknown>(
 export type ShutdownSignal = 'SIGINT' | 'SIGTERM';
 
 /**
+ * What triggered a graceful shutdown: one of the {@link ShutdownSignal}s, or
+ * `'stdin-eof'` — the host hung up its end of the stdio pipe (see
+ * {@link GracefulShutdownOptions.stdin}).
+ */
+export type ShutdownReason = ShutdownSignal | 'stdin-eof';
+
+/**
  * Anything {@link withGracefulShutdown} can tear down. Both shapes it is handed
  * in practice satisfy it identically: an {@link McpServer}, and the
  * {@link StdioServerHandle} {@link runMcp} returns.
@@ -324,10 +331,10 @@ export interface GracefulShutdownOptions {
   /**
    * Extra cleanup to run on shutdown, before the server is closed — typically
    * `() => client.close()` to release the fetchproxy WebSocket bridge / direct
-   * sockets so ports don't leak between host restarts. Receives the signal that
-   * triggered shutdown. Errors are logged, never fatal.
+   * sockets so ports don't leak between host restarts. Receives what triggered
+   * shutdown — a signal name, or `'stdin-eof'`. Errors are logged, never fatal.
    */
-  onSignal?: (signal: ShutdownSignal) => void | Promise<void>;
+  onSignal?: (reason: ShutdownReason) => void | Promise<void>;
   /**
    * Call `process.exit(0)` after cleanup completes. Default `true` (matches the
    * fleet's `process.exit(0)`). Set `false` in tests so the process survives.
@@ -348,6 +355,18 @@ export interface GracefulShutdownOptions {
    * exit. Default `500`. `0` disables the window. Must be a finite number >= 0.
    */
   repeatSignalGraceMs?: number;
+  /**
+   * Also shut down when this stream ends or closes. {@link runMcp} passes
+   * `process.stdin` when it serves stdio: the MCP stdio binding makes stdin EOF
+   * the primary shutdown signal — the host hanging up (window closed, session
+   * restarted, host crashed) — and on Windows the only one, since no signal
+   * reaches the child. SDK 2.1's `StdioServerTransport` closes itself on EOF,
+   * but that alone exits only a process holding nothing else: a fleet MCP's
+   * fetchproxy bridge socket keeps the loop alive, so without running
+   * `onSignal` here the process lingers as a zombie until killed by hand.
+   * An EOF during a shutdown already in progress is ignored.
+   */
+  stdin?: NodeJS.ReadableStream;
 }
 
 /** Default bound on graceful-shutdown cleanup. */
@@ -356,7 +375,8 @@ const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5000;
 const DEFAULT_REPEAT_SIGNAL_GRACE_MS = 500;
 
 /**
- * Wire SIGINT/SIGTERM to a one-shot graceful shutdown: run `onSignal` (e.g.
+ * Wire SIGINT/SIGTERM (and, with `stdin`, its EOF) to a one-shot graceful
+ * shutdown: run `onSignal` (e.g.
  * close the client/transport), close `target`, then `process.exit(0)` (unless
  * `exit: false`). A throwing `onSignal`/`close` is logged but still exits
  * cleanly, and cleanup that never settles is abandoned after `timeoutMs`
@@ -400,8 +420,10 @@ export function withGracefulShutdown(
     process.exit(0);
   };
 
-  const handler = (signal: ShutdownSignal): void => {
+  const handler = (signal: ShutdownReason): void => {
     if (shuttingDown) {
+      // A hang-up is not a request to hurry: only a repeated signal is.
+      if (signal === 'stdin-eof') return;
       // A repeat inside the grace window is a duplicate delivery of the same
       // interrupt (npx forwards SIGINT to a child that already got it), not a
       // second request: let the cleanup finish.
@@ -442,15 +464,23 @@ export function withGracefulShutdown(
 
   process.on('SIGINT', () => handler('SIGINT'));
   process.on('SIGTERM', () => handler('SIGTERM'));
+  if (opts.stdin) {
+    // 'end' is a clean EOF; 'close' also covers a pipe torn down without one.
+    // The second to fire lands in the shuttingDown guard above.
+    opts.stdin.once('end', () => handler('stdin-eof'));
+    opts.stdin.once('close', () => handler('stdin-eof'));
+  }
 }
 
 /** Options for {@link runMcp} — {@link createMcpServer}'s plus lifecycle wiring. */
 export interface RunMcpOptions<TDeps = unknown> extends CreateMcpServerOptions<TDeps> {
   /**
    * Graceful-shutdown wiring. `true` (default) installs SIGINT/SIGTERM handlers
-   * that close the {@link StdioServerHandle}. `false` skips them. An object is
-   * passed straight to {@link withGracefulShutdown}
-   * (e.g. `{ onSignal: () => client.close() }`).
+   * that close the {@link StdioServerHandle}, plus — when serving the process's
+   * own stdio — a stdin-EOF handler, so the process exits when the host hangs
+   * up. `false` skips them. An object is passed to {@link withGracefulShutdown}
+   * (e.g. `{ onSignal: () => client.close() }`), with `stdin` defaulted the
+   * same way.
    */
   shutdown?: boolean | GracefulShutdownOptions;
   /**
@@ -551,7 +581,10 @@ export function runMcp<TDeps = unknown>(opts: RunMcpOptions<TDeps>): StdioServer
 
   const shutdown = opts.shutdown ?? true;
   if (shutdown !== false) {
-    withGracefulShutdown(handle, shutdown === true ? {} : shutdown);
+    // Only our own stdio: a caller-supplied transport's EOF is not this
+    // process's stdin, and its lifetime is the caller's to decide.
+    const stdinDefault = spec === 'stdio' ? { stdin: process.stdin } : {};
+    withGracefulShutdown(handle, { ...stdinDefault, ...(shutdown === true ? {} : shutdown) });
   }
 
   return handle;

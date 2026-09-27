@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import { PassThrough } from 'node:stream';
 import { Client } from '@modelcontextprotocol/client';
 import { McpServer, InMemoryTransport } from '@modelcontextprotocol/server';
 import type { Transport } from '@modelcontextprotocol/server';
@@ -200,6 +201,54 @@ describe('withGracefulShutdown', () => {
     process.emit('SIGINT');
     await new Promise((r) => setImmediate(r));
     expect(closeSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+// SDK 2.1 closes the stdio transport on stdin EOF, but a process holding a
+// bridge socket stays alive unless shutdown runs `onSignal` on EOF too.
+describe('withGracefulShutdown — stdin EOF', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    process.removeAllListeners('SIGINT');
+    process.removeAllListeners('SIGTERM');
+  });
+
+  it("runs onSignal('stdin-eof'), closes, and exits once when the stream ends", async () => {
+    const stdin = new PassThrough();
+    const target = { close: vi.fn(async () => undefined) };
+    const onSignal = vi.fn(async () => undefined);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    withGracefulShutdown(target, { onSignal, stdin });
+    stdin.resume(); // flowing, as the transport's 'data' listener makes it
+    stdin.end();
+    await new Promise((r) => setTimeout(r, 10)); // 'end' then 'close' both fire
+    expect(onSignal).toHaveBeenCalledTimes(1);
+    expect(onSignal).toHaveBeenCalledWith('stdin-eof');
+    expect(target.close).toHaveBeenCalledTimes(1);
+    expect(exitSpy).toHaveBeenCalledTimes(1);
+    expect(exitSpy).toHaveBeenCalledWith(0);
+  });
+
+  it('an EOF during a stuck signal-driven shutdown does not force an early exit', async () => {
+    vi.useFakeTimers();
+    const stdin = new PassThrough();
+    const target = { close: () => new Promise<void>(() => {}) };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    withGracefulShutdown(target, { stdin, timeoutMs: 60_000 });
+    process.emit('SIGTERM');
+    await vi.advanceTimersByTimeAsync(1000); // well past the repeat-signal grace window
+    stdin.emit('end');
+    stdin.emit('close');
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it('ignores stdin entirely when no stream is given', async () => {
+    const target = { close: vi.fn(async () => undefined) };
+    const endListeners = process.stdin.listenerCount('end');
+    withGracefulShutdown(target, { exit: false });
+    expect(process.stdin.listenerCount('end')).toBe(endListeners);
   });
 });
 
