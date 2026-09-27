@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.8.0](https://github.com/chrischall/mcp-utils/compare/v2.7.1...v2.8.0) (2026-09-27)
+
+
+### Features
+
+* **fetchproxy:** say when the browser can't serve a verb, and name ContextMint Bridge in bridge hints ([#302](https://github.com/chrischall/mcp-utils/issues/302)) ([d39f0db](https://github.com/chrischall/mcp-utils/commit/d39f0db70e5d18fc7259a3f5e13ab58da908f0bf))
+
 ## [2.7.1](https://github.com/chrischall/mcp-utils/compare/v2.7.0...v2.7.1) (2026-09-27)
 
 
