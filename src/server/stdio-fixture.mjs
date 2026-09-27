@@ -23,6 +23,7 @@
  *  - `deps` is built OUTSIDE the call, so the test can prove one `deps` is
  *    shared by every instance the factory produces.
  */
+import { createServer } from 'node:net';
 import { z } from 'zod';
 import { runMcp } from '../../dist/index.js';
 
@@ -33,8 +34,22 @@ import { runMcp } from '../../dist/index.js';
  */
 const deps = { greeting: 'hello', builtAt: process.hrtime.bigint().toString() };
 
+/**
+ * Stands in for the fetchproxy WebSocket bridge a Pattern-A MCP listens on: a
+ * ref'd socket that keeps the event loop alive after stdio has gone. With it
+ * open, the process only exits on stdin EOF if shutdown closes it — which is
+ * exactly what `onSignal: () => client.close()` does in the fleet.
+ */
+const bridge = process.env.FIXTURE_HOLD_OPEN ? createServer().listen(0, '127.0.0.1') : undefined;
+
 await runMcp({
   name: 'fixture-mcp',
+  shutdown: {
+    onSignal: (reason) => {
+      console.error(`fixture:cleanup ${reason}`);
+      bridge?.close();
+    },
+  },
   version: '9.9.9',
   banner: 'fixture-mcp banner',
   deps,

@@ -237,6 +237,38 @@ describe('runMcp over real stdio', () => {
     expect(code).toBe(0);
   });
 
+  // The MCP stdio binding's primary shutdown signal is stdin EOF — the host
+  // hanging up its end of the pipe (window closed, session restarted, host
+  // crashed) — and on Windows it is the only one, since no signal arrives.
+  // SDK 2.1 closes the transport on EOF, but a fleet MCP holding a fetchproxy
+  // bridge socket keeps its event loop alive regardless, so without shutdown
+  // wiring the process lingers as a zombie. The fixture holds a real listening
+  // socket to stand in for that bridge.
+  it('runs cleanup and exits on stdin EOF, even with a socket holding the loop open', async () => {
+    const mcp = start({ FIXTURE_HOLD_OPEN: '1' });
+    await mcp.stderrSettles((lines) => lines.includes('fixture:handlers-installed'));
+    await mcp.request('server/discover');
+    const exited = once(mcp.child, 'exit') as Promise<[number | null, NodeJS.Signals | null]>;
+    mcp.child.stdin.end();
+    const [code] = await Promise.race([
+      exited,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('still running 5s after stdin EOF')), 5000)),
+    ]);
+    expect(code).toBe(0);
+    expect(mcp.stderr).toContain('fixture:cleanup stdin-eof');
+  });
+
+  // The same fixture, signalled rather than hung up on: the reason handed to
+  // `onSignal` distinguishes the two, and SIGTERM still names itself.
+  it('hands onSignal the signal name on SIGTERM', async () => {
+    const mcp = start({ FIXTURE_HOLD_OPEN: '1' });
+    await mcp.stderrSettles((lines) => lines.includes('fixture:handlers-installed'));
+    mcp.terminate();
+    const [code] = (await once(mcp.child, 'exit')) as [number | null, NodeJS.Signals | null];
+    expect(code).toBe(0);
+    expect(mcp.stderr).toContain('fixture:cleanup SIGTERM');
+  });
+
   // `legacy` is a new public option and this is the branch that turns hosts
   // away; the default `'serve'` is covered by the legacy-era cases above.
   // Without this, half of a public option ships unexercised.
