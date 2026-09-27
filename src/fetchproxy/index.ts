@@ -40,6 +40,7 @@ import {
   FetchproxyBridgeDownError,
   FetchproxySessionNotReadyError,
   classifyBridgeError as classifyBridgeErrorKind,
+  classifyFetchError as classifyFetchErrorKind,
   type FetchproxyServerOpts,
   // Type-only — erased at compile, no runtime `@fetchproxy/server` reference
   // beyond the values already imported above.
@@ -688,10 +689,133 @@ export function createBootstrapOpts(
 
 /** Discriminated classification of a tool-boundary error. */
 export interface BridgeErrorInfo {
-  type: 'session_not_ready' | 'bridge_down' | 'timeout' | 'http' | 'protocol' | 'unknown';
+  /**
+   * `capability_unavailable` (the BROWSER can't serve the verb — not the
+   * MCP's fault) and `capability_denied` (the MCP used a capability it never
+   * declared — a bug in the MCP) arrived with @fetchproxy 3.3 support; a consumer that
+   * `switch`es exhaustively on this union gains two cases.
+   */
+  type:
+    | 'session_not_ready'
+    | 'bridge_down'
+    | 'timeout'
+    | 'http'
+    | 'protocol'
+    | 'capability_unavailable'
+    | 'capability_denied'
+    | 'unknown';
   message: string;
   hint?: string;
 }
+
+/** Where users get the extension. No store listing exists yet — never invent one. */
+const CONTEXTMINT_BRIDGE_RELEASES = 'https://github.com/nullnet-app/contextmint-bridge/releases';
+
+/**
+ * The fixed wire wording for a capability the browser lacks
+ * (`@fetchproxy/protocol`'s `capabilityUnavailableMessage`), matched anywhere
+ * in the message because callers wrap it. Also accepts the pre-3.3 form that
+ * named no browser. Duplicated rather than imported so this works against a
+ * `@fetchproxy/server` that predates it.
+ */
+const CAPABILITY_UNAVAILABLE_RE = /capability "([^"]{1,64})" is not available in this browser(?: \(([^)]{1,32})\))?/;
+/** The `hello-rejected` reason sent when NOTHING the MCP declared is servable here. */
+const UNSUPPORTED_CAPABILITY_RE = /unsupported-capability:\s*([^()]+?)\s*\(not available in this browser\)/;
+/** The extension's wording for a capability the MCP never declared (`capability_denied`). */
+const CAPABILITY_DENIED_RE = /\bcapability \S.* not granted/;
+
+/**
+ * The server-classifier kinds a capability error can arrive under: a bare or
+ * hinted protocol error, a refused hello, or (from a foreign copy of the
+ * package) nothing it recognises. Never an upstream HTTP error, a timeout or a
+ * dead service worker — their messages can quote anything.
+ */
+function mayBeCapabilityError(kind: string): boolean {
+  return kind === 'protocol' || kind === 'hello_rejected' || kind === 'other';
+}
+
+/** What a browser-gap error tells us: the capabilities it lacks and which browser, when known. */
+interface CapabilityGap {
+  capabilities: string[];
+  platform: string | null;
+  /** The extension's raw rejection, when the error carried it apart from a folded-in hint. */
+  originalError?: string;
+}
+
+function stringField(err: unknown, key: string): string | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const v = (err as Record<string, unknown>)[key];
+  return typeof v === 'string' && v.length > 0 ? v : undefined;
+}
+
+/**
+ * Detect "this browser cannot serve that capability" (@fetchproxy 3.3+, #418)
+ * on ANY installed `@fetchproxy/server`: by the typed error's name and fields,
+ * by the wire `code`, by the `unsupported-capability:` hello rejection, and by
+ * the fixed wording — the last being all a pre-3.3 server passes through (as a
+ * bare `FetchproxyProtocolError`, which its classifier calls `'protocol'`).
+ * Duck-typed on purpose: importing the 3.3 classes would fail to link against
+ * the older servers the peer range still accepts.
+ */
+function capabilityGapOf(err: unknown): CapabilityGap | null {
+  const name = err instanceof Error ? err.name : undefined;
+  const message = messageOf(err);
+  const originalError = stringField(err, 'originalError');
+  const platformField = stringField(err, 'platform') ?? null;
+
+  if (name === 'FetchproxyHelloRejectedError') {
+    const listed = (err as { unavailableCapabilities?: unknown }).unavailableCapabilities;
+    const parsed = UNSUPPORTED_CAPABILITY_RE.exec(stringField(err, 'reason') ?? message);
+    const capabilities =
+      Array.isArray(listed) && listed.length > 0
+        ? listed.map(String)
+        : parsed
+          ? parsed[1]!.split(',').map((c) => c.trim()).filter(Boolean)
+          : [];
+    return capabilities.length > 0 ? { capabilities, platform: platformField } : null;
+  }
+
+  const wording = CAPABILITY_UNAVAILABLE_RE.exec(originalError ?? message);
+  const typed = name === 'FetchproxyCapabilityUnavailableError';
+  const coded = stringField(err, 'code') === 'capability_unavailable';
+  // The server's own string classifier, where the installed one knows the kind
+  // (3.3+). Harmless on older servers — it answers something else.
+  const classified = classifyFetchErrorKind(originalError ?? message) === ('capability_unavailable' as string);
+  if (!typed && !coded && !wording && !classified) return null;
+
+  const capability = stringField(err, 'capability') ?? wording?.[1];
+  return {
+    capabilities: capability ? [capability] : [],
+    platform: platformField ?? wording?.[2] ?? null,
+    ...(originalError !== undefined ? { originalError } : {}),
+  };
+}
+
+/** `capability_denied`: the MCP asked for a capability it never declared. */
+function isCapabilityDenied(err: unknown): boolean {
+  const text = stringField(err, 'originalError') ?? messageOf(err);
+  if (CAPABILITY_UNAVAILABLE_RE.test(text)) return false;
+  return classifyFetchErrorKind(text) === 'capability_denied' || CAPABILITY_DENIED_RE.test(text);
+}
+
+function capabilityUnavailableHint(gap: { capabilities: string[]; platform: string | null }): string {
+  const where = gap.platform ? `This browser (${gap.platform})` : 'This browser';
+  const what =
+    gap.capabilities.length === 0
+      ? 'what this tool needs'
+      : gap.capabilities.length === 1
+        ? `the "${gap.capabilities[0]}" capability this tool needs`
+        : `the capabilities this MCP needs (${gap.capabilities.map((c) => `"${c}"`).join(', ')})`;
+  return (
+    `${where} can't serve ${what} — ContextMint Bridge checked for the browser API and it is missing. ` +
+    `The MCP isn't at fault, and re-pairing or updating won't change it: use a browser that supports it ` +
+    `(for example Chrome) for this.`
+  );
+}
+
+const CAPABILITY_DENIED_HINT =
+  'The MCP asked ContextMint Bridge for a capability it never declared, so the request was refused. ' +
+  'This is a bug in the MCP, not in your browser or pairing — please report it to the maintainer of the MCP.';
 
 /**
  * Thin discriminator over the `@fetchproxy/server` typed-error hierarchy. Folds
@@ -701,6 +825,10 @@ export interface BridgeErrorInfo {
  * exists. The surfaced message is redacted + truncated. Use this when you want
  * the structured envelope; use the re-exported `classifyBridgeError` for the raw
  * string kind (drop-in compatible with `@fetchproxy/server`).
+ *
+ * `capability_unavailable` / `capability_denied` are detected ahead of the
+ * server's classifier, which files both under `'protocol'` (or, for a
+ * browser that refused the hello outright, `'hello_rejected'`).
  */
 export function bridgeErrorInfo(err: unknown): BridgeErrorInfo {
   if (err instanceof FetchproxySessionNotReadyError) {
@@ -715,6 +843,23 @@ export function bridgeErrorInfo(err: unknown): BridgeErrorInfo {
     };
   }
   const kind = classifyBridgeErrorKind(err);
+  const gap = mayBeCapabilityError(kind) ? capabilityGapOf(err) : null;
+  if (gap) {
+    return {
+      type: 'capability_unavailable',
+      // A hinted server error folds its own remedy into the message; keep the
+      // wire rejection so a consumer appending `hint` doesn't say it twice.
+      message: truncateErrorMessage(gap.originalError ?? messageOf(err)),
+      hint: capabilityUnavailableHint(gap),
+    };
+  }
+  if (mayBeCapabilityError(kind) && isCapabilityDenied(err)) {
+    return {
+      type: 'capability_denied',
+      message: truncateErrorMessage(stringField(err, 'originalError') ?? messageOf(err)),
+      hint: CAPABILITY_DENIED_HINT,
+    };
+  }
   const message = truncateErrorMessage(messageOf(err));
 
   switch (kind) {
@@ -722,14 +867,14 @@ export function bridgeErrorInfo(err: unknown): BridgeErrorInfo {
       return {
         type: 'timeout',
         message,
-        hint: 'The fetchproxy bridge timed out. Check the browser tab is open and responsive, then retry.',
+        hint: 'The request through ContextMint Bridge timed out. Check the browser tab is open and responsive, then retry.',
       };
     case 'bridge_down': {
       const hint = err instanceof FetchproxyBridgeDownError ? err.hint : undefined;
       return {
         type: 'bridge_down',
         message,
-        hint: hint ?? 'The fetchproxy browser bridge is offline. Open a signed-in tab so the extension can relay the request.',
+        hint: hint ?? 'ContextMint Bridge is offline. Open a signed-in tab so the extension can relay the request.',
       };
     }
     case 'http':
@@ -738,7 +883,7 @@ export function bridgeErrorInfo(err: unknown): BridgeErrorInfo {
       return {
         type: 'protocol',
         message,
-        hint: 'The fetchproxy bridge could not relay the request (e.g. no signed-in tab or denied domain).',
+        hint: 'ContextMint Bridge could not relay the request (e.g. no signed-in tab or denied domain).',
       };
     case 'other':
     default:
@@ -774,6 +919,13 @@ export interface BridgeHealthcheckResult {
     session_state?: 'not_listening' | 'linked' | 'pair_pending' | 'extension_disconnected' | 'no_session';
     pending_pair_code?: string | null;
     extension_connected?: boolean;
+    /**
+     * Capabilities the browser behind the current session said it cannot
+     * serve, and which browser that is (`@fetchproxy/server` 3.3+,
+     * `bridgeHealth().session`). Absent on older servers.
+     */
+    unavailable_capabilities?: string[];
+    platform?: string | null;
   };
   /** Which leg served the probe — present when {@link RegisterBridgeHealthcheckToolArgs.path} is supplied. */
   transport?: HealthcheckPath;
@@ -815,6 +967,8 @@ export type HealthcheckHintArm =
   | 'no_role'
   | 'timeout'
   | 'protocol'
+  | 'capability_unavailable'
+  | 'capability_denied'
   | 'direct'
   | 'unknown';
 
@@ -919,6 +1073,8 @@ function healthcheckHint(args: {
   session?: { state?: string; pairCode: string | null };
   /** Set when the probe rode a direct fetch with no bridge in play. */
   direct?: boolean;
+  /** The browser gap, when the probe failed with `capability_unavailable`. */
+  capabilityGap?: { capabilities: string[]; platform: string | null };
 }): string {
   const { hostLabel, prefix, probePath, port } = args;
   // Never a literal 37149: when no bridge exists yet there is no port to
@@ -928,20 +1084,26 @@ function healthcheckHint(args: {
     if (args.direct) {
       return `Direct fetch round-tripped ${probePath} successfully — the browser bridge wasn't used for this probe. If real tools still fail, the problem is on the ${hostLabel} side (a bot wall answering some calls but not this one, a field that moved, …), not the transport.`;
     }
-    return `Bridge round-tripped ${probePath} successfully. If real tools still fail, the problem is downstream of fetchproxy (${hostLabel} redirecting on login, a bot-wall / behavioral challenge, etc.) — not the bridge.`;
+    return `Bridge round-tripped ${probePath} successfully. If real tools still fail, the problem is downstream of ContextMint Bridge (${hostLabel} redirecting on login, a bot-wall / behavioral challenge, etc.) — not the bridge.`;
+  }
+  if (args.errorKind === 'capability_unavailable') {
+    return capabilityUnavailableHint(args.capabilityGap ?? { capabilities: [], platform: null });
+  }
+  if (args.errorKind === 'capability_denied') {
+    return CAPABILITY_DENIED_HINT;
   }
   if (args.errorKind === 'session_not_ready') {
     const s = args.session;
     if (s?.pairCode) {
-      return `The Transporter extension is waiting for you to approve pair code ${s.pairCode} for ${prefix}-mcp. Open the extension popup, approve it, then retry.`;
+      return `ContextMint Bridge is waiting for you to approve pair code ${s.pairCode} for ${prefix}-mcp. Open the ContextMint Bridge popup, approve it, then retry.`;
     }
     if (s?.state === 'extension_disconnected') {
-      return `No Transporter extension is attached to this bridge${portNote}. Open Chrome with the extension installed and a ${hostLabel} tab, then retry.`;
+      return `ContextMint Bridge isn't attached to this bridge${portNote}. Open a browser with ContextMint Bridge installed and a ${hostLabel} tab, then retry. (Chrome: load the extension from ${CONTEXTMINT_BRIDGE_RELEASES}; Safari: it ships inside the ContextMint app.)`;
     }
-    return `The Transporter extension is attached but never confirmed a session for ${prefix}-mcp — its hello got no answer within the session-ready timeout. Reload the extension (chrome://extensions) or reopen the ${hostLabel} tab, then retry. On a hosted bridge this is also what a relay that dialled the child before it bound its port${portNote} looks like.`;
+    return `ContextMint Bridge is attached but never confirmed a session for ${prefix}-mcp — its hello got no answer within the session-ready timeout. Reload the extension (chrome://extensions) or reopen the ${hostLabel} tab, then retry. On a hosted bridge this is also what a relay that dialled the child before it bound its port${portNote} looks like.`;
   }
   if (args.errorKind === 'bridge_down') {
-    const base = `The fetchproxy browser extension's service worker is not responding. Chrome evicts extension service workers after ~30s idle by default — this looks like that case. Wake it by clicking the fetchproxy extension icon (or opening any ${hostLabel} tab and reloading), then retry. If it keeps happening, reload the extension from chrome://extensions.`;
+    const base = `The ContextMint Bridge extension's service worker is not responding. Chrome evicts extension service workers after ~30s idle by default — this looks like that case. Wake it by clicking the ContextMint Bridge icon in the toolbar (or opening any ${hostLabel} tab and reloading), then retry. If it keeps happening, reload the extension from chrome://extensions.`;
     return args.bridgeHint ? `${args.bridgeHint} ${base}` : base;
   }
   if (args.direct) {
@@ -951,10 +1113,10 @@ function healthcheckHint(args: {
     return `The bridge never bound a role. listen() may have failed silently on startup. Check stderr from ${prefix}-mcp for an error during start, and confirm ${port === null ? 'the bridge port' : `port ${port}`} isn't blocked.`;
   }
   if (args.errorKind === 'timeout') {
-    return `Bridge is alive (role=${args.role}), but the request didn't get a response in time. Either (a) the fetchproxy browser extension isn't connected to this MCP yet — open the extension popup and check for a green dot next to "${prefix}-mcp", or (b) the signed-in ${hostLabel} tab is sleeping / closed. Open ${hostLabel} in your browser, then retry.`;
+    return `Bridge is alive (role=${args.role}), but the request didn't get a response in time. Either (a) ContextMint Bridge isn't connected to this MCP yet — open the ContextMint Bridge popup and check for a green dot next to "${prefix}-mcp", or (b) the signed-in ${hostLabel} tab is sleeping / closed. Open ${hostLabel} in your browser, then retry.`;
   }
   if (args.errorKind === 'protocol' || args.errorKind === 'http') {
-    return `The bridge returned a protocol error before any HTTP response. Most commonly: no ${hostLabel} tab is open, or the extension declined the request. Open ${hostLabel}, sign in, and retry.`;
+    return `The bridge returned a protocol error before any HTTP response. Most commonly: no ${hostLabel} tab is open, or ContextMint Bridge declined the request. Open ${hostLabel}, sign in, and retry.`;
   }
   return `Unexpected error — see the error.message field for details.`;
 }
@@ -972,7 +1134,17 @@ function redactReason<T>(reason: T): T {
 function projectBridgeStatus(
   health: ReturnType<FetchproxyTransport['status']>,
 ): NonNullable<BridgeHealthcheckResult['bridge']> {
-  const session = (health as { session?: { state: string; pairCode: string | null; extensionConnected: boolean } }).session;
+  const session = (
+    health as {
+      session?: {
+        state: string;
+        pairCode: string | null;
+        extensionConnected: boolean;
+        unavailableCapabilities?: string[];
+        platform?: string | null;
+      };
+    }
+  ).session;
   return {
     role: health.role,
     port: health.port,
@@ -988,6 +1160,11 @@ function projectBridgeStatus(
           session_state: session.state as NonNullable<BridgeHealthcheckResult['bridge']>['session_state'],
           pending_pair_code: session.pairCode,
           extension_connected: session.extensionConnected,
+          // 3.3+ only; absent keys stay absent on an older server.
+          ...(session.unavailableCapabilities !== undefined
+            ? { unavailable_capabilities: session.unavailableCapabilities }
+            : {}),
+          ...(session.platform !== undefined ? { platform: session.platform } : {}),
         }
       : {}),
   } as NonNullable<BridgeHealthcheckResult['bridge']>;
@@ -1027,7 +1204,7 @@ function probeDisplayUrl(hostLabel: string, probePath: string): string {
 }
 
 export function bridgeHealthcheckDescription(hostLabel: string, probePath: string): string {
-  return `Round-trips a small public ${hostLabel} URL (${probePath}) through the fetchproxy bridge and returns diagnostics: the bridge's role (host/peer/null), port, version, the extension link (linked / pair pending / not attached / never answered), the elapsed round-trip time, and a plain-English hint distinguishing 'bridge never came up' from 'extension not connected' from 'real ${hostLabel}-side problem'. Read-only, no auth required.`;
+  return `Round-trips a small public ${hostLabel} URL (${probePath}) through ContextMint Bridge (your signed-in browser tab) and returns diagnostics: the bridge's role (host/peer/null), port, version, the extension link (linked / pair pending / not attached / never answered), the elapsed round-trip time, and a plain-English hint distinguishing 'bridge never came up' from 'extension not connected' from 'this browser can't serve a capability' from 'real ${hostLabel}-side problem'. Read-only, no auth required.`;
 }
 
 /**
@@ -1113,6 +1290,7 @@ export async function runBridgeHealthcheck(
   let bridgeHint: string | undefined;
   let customHint: string | undefined;
   let customDetail: Record<string, unknown> | undefined;
+  let capabilityGap: CapabilityGap | undefined;
   if (rawError) {
     // `runProbe` (or classifyBridgeError on the direct route) already
     // classified the throw in fetchproxy's raw vocabulary. Trust that as
@@ -1125,6 +1303,16 @@ export async function runBridgeHealthcheck(
       bridgeHint = thrown.hint;
     } else if (thrown instanceof FetchproxyBridgeDownError) {
       bridgeHint = thrown.hint;
+    } else if (thrown !== undefined && mayBeCapabilityError(rawError.kind)) {
+      // The server's classifier files a browser gap under 'protocol' (or
+      // 'hello_rejected'); name it, so the ladder can say whose fault it isn't.
+      const gap = capabilityGapOf(thrown);
+      if (gap) {
+        kind = 'capability_unavailable';
+        capabilityGap = gap;
+      } else if (isCapabilityDenied(thrown)) {
+        kind = 'capability_denied';
+      }
     }
     // A consumer classifier can re-kind the thrown error (e.g. workday's
     // session_expired) and supply site-specific next-step copy.
@@ -1152,7 +1340,9 @@ export async function runBridgeHealthcheck(
   // so per-arm `hints` overrides land on the same arm the default copy would.
   const arm: HealthcheckHintArm = ok
     ? 'ok'
-    : error?.kind === 'session_not_ready'
+    : error?.kind === 'capability_unavailable' || error?.kind === 'capability_denied'
+      ? error.kind
+      : error?.kind === 'session_not_ready'
       ? 'session_not_ready'
       : error?.kind === 'bridge_down'
         ? 'bridge_down'
@@ -1183,6 +1373,15 @@ export async function runBridgeHealthcheck(
         (thrown instanceof FetchproxySessionNotReadyError ? thrown.pairCode : null),
     },
     direct,
+    ...(capabilityGap
+      ? {
+          capabilityGap: {
+            capabilities: capabilityGap.capabilities,
+            // The error may not name the browser; the session snapshot can.
+            platform: capabilityGap.platform ?? bridge?.platform ?? null,
+          },
+        }
+      : {}),
   });
 
   const result: BridgeHealthcheckResult = {
@@ -1208,10 +1407,10 @@ export function registerBridgeHealthcheckTool(args: RegisterBridgeHealthcheckToo
   args.server.registerTool(
     `${args.prefix}_healthcheck`,
     {
-      title: 'Verify the fetchproxy bridge end-to-end',
+      title: 'Verify the ContextMint Bridge connection end-to-end',
       description: `${bridgeHealthcheckDescription(args.hostLabel, args.probePath)} Call this when a real tool fails and you want to know which hop broke.`,
       annotations: {
-        title: 'Verify the fetchproxy bridge end-to-end',
+        title: 'Verify the ContextMint Bridge connection end-to-end',
         readOnlyHint: true,
         idempotentHint: true,
         openWorldHint: true,

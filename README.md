@@ -1096,6 +1096,21 @@ bridge produces when the relay dials the child before it binds. With
 `@fetchproxy/server` 2.5.0+ the `bridge` block also carries `session_state`,
 `pending_pair_code` and `extension_connected` from `bridgeHealth().session`.
 
+**When the browser can't serve a verb.** `@fetchproxy/server` 3.3+ tells a
+browser gap (`capability_unavailable` — e.g. Safari has no downloads; the MCP
+isn't at fault, and the fix is a browser that supports it, such as Chrome)
+apart from an MCP bug (`capability_denied` — the MCP used a capability it
+never declared). `bridgeErrorInfo` and the healthcheck both report these as
+their own kinds with their own hints, whichever server version is installed:
+the server's classifier files both under `'protocol'`, so they are detected
+from the error's class name, its `code`, the `unsupported-capability:` hello
+rejection, and the fixed wire wording (`… is not available in this browser`).
+With 3.3+ the `bridge` block also carries `unavailable_capabilities` and
+`platform` from `bridgeHealth().session`. The hints name the extension the user
+installs — **ContextMint Bridge** (from
+[its releases page](https://github.com/nullnet-app/contextmint-bridge/releases);
+in Safari it ships inside the ContextMint app).
+
 **Direct-first consumers** (hemnet, booli: a plain fetch that falls back to
 the bridge when a bot wall answers) pass `path: () => ({ transport, mode })`
 reporting which leg serves calls now, and may pass `transport` as a getter
