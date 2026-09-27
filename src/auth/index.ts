@@ -269,8 +269,8 @@ export function createAuthResolver(
         // upstream body — so no truncation that could clip the guidance).
         if (typedHint !== undefined && isBridgeDown(e)) {
           throw createHelpfulError(
-            `Auth: no ${envVar} set, and the fetchproxy bridge is down ` +
-              `(extension service worker unreachable). ${typedHint}`,
+            `Auth: no ${envVar} set, and ContextMint Bridge is down ` +
+              `(its extension service worker is unreachable). ${typedHint}`,
             { hint: typedHint },
           );
         }
@@ -377,7 +377,7 @@ export async function resolveAuthPattern(pattern: AuthPattern): Promise<PatternR
   }
   throw createHelpfulError(
     'No auth configured. Provide a token, OAuth credentials, login credentials, ' +
-      'or sign in in your browser (fetchproxy fallback).',
+      'or sign in in your browser (read via ContextMint Bridge).',
     { hint: 'Set one of the supported credential env vars, or sign in in your browser.' },
   );
 }

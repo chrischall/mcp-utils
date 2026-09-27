@@ -147,6 +147,8 @@ describe('createAuthResolver', () => {
     // The actionable copy must survive untruncated in the thrown message...
     expect(err.message).toContain(hint);
     expect(err.message).toMatch(/bridge is down/i);
+    // Names the thing the user installed, not the library underneath it.
+    expect(err.message).toMatch(/ContextMint Bridge is down/);
     // ...and still name the env-var escape hatch.
     expect(err.message).toContain('X_TOKEN');
     // The structured hint rides along for tool surfaces that render it.
@@ -205,12 +207,12 @@ describe('createAuthResolver', () => {
     [
       'FetchproxySessionNotReadyError',
       'fetchproxy: pairing not yet approved for "svc:1.0.0:abc".',
-      'Open the Transporter extension popup and approve pair code 482-913 for "svc:1.0.0:abc", then retry.',
+      'Open the ContextMint Bridge extension popup and approve pair code 482-913 for "svc:1.0.0:abc", then retry.',
     ],
     [
       'FetchproxyScopeError',
       'fetchproxy: cookie keys not in declared set: session.',
-      'Revoke this MCP in the Transporter popup and re-approve the new scope, then retry.',
+      'Revoke this MCP in the ContextMint Bridge popup and re-approve the new scope, then retry.',
     ],
     [
       'FetchproxyNoTabError',
@@ -361,6 +363,7 @@ describe('resolveAuthPattern', () => {
 
   it('throws an actionable error when no path is configured', async () => {
     await expect(resolveAuthPattern({})).rejects.toThrow(/auth/i);
+    await expect(resolveAuthPattern({})).rejects.toThrow(/via ContextMint Bridge/);
   });
 
   it('propagates a partial-config error from a configured path (user mistake)', async () => {

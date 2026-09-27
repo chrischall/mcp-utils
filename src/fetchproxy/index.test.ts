@@ -1021,13 +1021,17 @@ describe('registerBridgeHealthcheckTool — session state (fetchproxy 2.5+)', ()
   it('pair_pending → the hint names the pair code and the popup', async () => {
     const body = await run(sessionProbe('pair_pending', '457-035'), notReady('457-035'));
     expect(body.hint).toMatch(/approve pair code 457-035 for hemnet-mcp/);
-    expect(body.hint).toMatch(/popup/);
+    expect(body.hint).toMatch(/ContextMint Bridge popup/);
+    expect(body.hint).not.toMatch(/Transporter/);
   });
 
   it('extension_disconnected → the hint says no extension is attached, with the real port', async () => {
     const body = await run(sessionProbe('extension_disconnected', null), notReady(null));
-    expect(body.hint).toMatch(/No Transporter extension is attached/);
+    expect(body.hint).toMatch(/ContextMint Bridge isn't attached/);
     expect(body.hint).toMatch(/37150/);
+    // Where to get it — the GitHub releases page, never an invented store URL.
+    expect(body.hint).toContain('https://github.com/nullnet-app/contextmint-bridge/releases');
+    expect(body.hint).not.toMatch(/Transporter/);
   });
 
   it('no_session → the hint says the hello got no answer and mentions the hosted relay case', async () => {
