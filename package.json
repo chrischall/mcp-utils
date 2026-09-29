@@ -89,7 +89,7 @@
     "@modelcontextprotocol/client": "^2.1.0",
     "@modelcontextprotocol/server": "^2.1.0",
     "@types/node": "^26.6.3",
-    "@vitest/coverage-v8": "^5.0.1",
+    "@vitest/coverage-v8": "^5.0.2",
     "node-html-parser": "^9.0.4",
     "typescript": "^7.0.2",
     "vitest": "^5.0.0",
