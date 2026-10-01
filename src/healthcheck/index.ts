@@ -11,6 +11,7 @@
  */
 import type { McpServer } from '@modelcontextprotocol/server';
 import { truncateErrorMessage, messageOf } from '../errors/index.js';
+import { EdgeBlockedError, detectEdgeBlock, type EdgeBlockHeaders } from '../http/index.js';
 import { z } from 'zod';
 
 /**
@@ -22,6 +23,12 @@ export type CredentialHealthcheckArm =
   | 'ok'
   | 'no_credential'
   | 'credential_rejected'
+  /**
+   * A CDN/WAF in front of the API refused the request, so the credential was
+   * never judged. Checked BEFORE the status ladder: the edge answers 403 just
+   * as a rejecting API does (chrischall/mcp-host#1015).
+   */
+  | 'edge_blocked'
   /** Credentials are fine; no session is live. See {@link sessionProbe}. */
   | 'session_expired'
   /** A second factor is outstanding, so the far side is holding the sign-in. */
@@ -146,10 +153,36 @@ function statusOf(err: unknown): number | undefined {
   return typeof s === 'number' ? s : undefined;
 }
 
+/**
+ * The edge vendor a thrown error says refused the request, if anything about
+ * it does. An {@link EdgeBlockedError} says so outright; any other error is
+ * judged on what it carries — its message (which is usually
+ * `formatApiError`'s cut of the body), a `body`/`bodyPreview`/`responseBody`
+ * string, and a `headers` object — by the same {@link detectEdgeBlock} rule
+ * the API client uses, so a connector with its own client is covered too.
+ */
+function edgeBlockOf(err: unknown): { vendor: string } | null {
+  if (err instanceof EdgeBlockedError) return { vendor: err.vendor };
+  if (typeof err !== 'object' || err === null) return null;
+  const e = err as { body?: unknown; bodyPreview?: unknown; responseBody?: unknown; headers?: unknown };
+  const parts = [messageOf(err), e.body, e.bodyPreview, e.responseBody].filter(
+    (part): part is string => typeof part === 'string' && part.length > 0,
+  );
+  const headers =
+    typeof e.headers === 'object' && e.headers !== null ? (e.headers as EdgeBlockHeaders) : undefined;
+  const status = statusOf(err);
+  return detectEdgeBlock({
+    body: parts.join('\n'),
+    ...(headers !== undefined ? { headers } : {}),
+    ...(status !== undefined ? { status } : {}),
+  });
+}
+
 const CREDENTIAL_ARMS = new Set<string>([
   'ok',
   'no_credential',
   'credential_rejected',
+  'edge_blocked',
   'session_expired',
   'verification_pending',
   'timeout',
@@ -176,6 +209,8 @@ function credentialHint(
       return `No credential resolved. Nothing was available to authenticate with — sign in and reconnect the connector so ${prefix} receives a token, or set the documented environment variable.`;
     case 'credential_rejected':
       return `${hostLabel} rejected the credential from '${source}'. It is present but no longer valid — most often expired or revoked upstream. Re-authenticate and reconnect; retrying will not fix it.`;
+    case 'edge_blocked':
+      return `${hostLabel} refused the request at its CDN/WAF before it reached the API, so the credential${source !== null ? ` from '${source}'` : ''} was never judged — re-signing in or rotating it will not help. This is usually a block on this host's IP address or request fingerprint: route through the ContextMint Bridge if this connector supports it, or retry later from a different network.`;
     case 'session_expired':
       return `The credential from '${source}' is configured, but no session is live — ${hostLabel} served a sign-in page rather than the data. Sign in again; a cookie-session portal expires these on its own, so this recurs between uses.`;
     case 'verification_pending':
@@ -245,7 +280,14 @@ export async function runCredentialHealthcheck(
     // to someone whose variables are already set. So the consumer's
     // classifier is consulted here as it already is for a probe failure;
     // declining it (or not supplying one) keeps the old behaviour exactly.
-    const classified = classifyThrown?.(e);
+    // A resolver that went over the network (a token refresh) can meet the
+    // same CDN block as the probe. That is not a missing credential either,
+    // so it is named before the `no_credential` fallback — after the
+    // consumer's own classifier, which still decides first.
+    const edge = edgeBlockOf(e);
+    const classified =
+      classifyThrown?.(e) ??
+      (edge !== null ? { kind: 'edge_blocked', detail: { vendor: edge.vendor } as Record<string, unknown> } : undefined);
     const result: CredentialHealthcheckResult = {
       ok: false,
       // Still false, and still no source: a classification explains WHY
@@ -312,23 +354,31 @@ export async function runCredentialHealthcheck(
     // bare AbortController abort carries it there and NOT in the message,
     // so matching the text alone classified those as 'unknown'.
     const aborted = e instanceof Error && e.name === 'AbortError';
+    // An edge block comes first: it answers 403 (or 503, or 429) exactly as a
+    // rejecting API or a struggling one does, and the status alone would send
+    // somebody to re-sign in with a credential that was never looked at.
+    const edge = edgeBlockOf(e);
     arm =
-      status === 401 || status === 403
-        ? 'credential_rejected'
-        : status !== undefined
-          ? 'http'
-          : aborted || /timeout|timed out|ETIMEDOUT/i.test(messageOf(e))
-            ? 'timeout'
-            : /fetch failed|ENOTFOUND|ECONNREFUSED|ECONNRESET|network/i.test(messageOf(e))
-              ? 'transport'
-              : 'unknown';
+      edge !== null
+        ? 'edge_blocked'
+        : status === 401 || status === 403
+          ? 'credential_rejected'
+          : status !== undefined
+            ? 'http'
+            : aborted || /timeout|timed out|ETIMEDOUT/i.test(messageOf(e))
+              ? 'timeout'
+              : /fetch failed|ENOTFOUND|ECONNREFUSED|ECONNRESET|network/i.test(messageOf(e))
+                ? 'transport'
+                : 'unknown';
     let kind: string = arm;
-    let detail: Record<string, unknown> | undefined;
+    let detail: Record<string, unknown> | undefined = edge !== null ? { vendor: edge.vendor } : undefined;
     const custom = classifyThrown?.(e);
     if (custom) {
       kind = custom.kind;
       customHint = custom.hint;
-      detail = custom.detail;
+      // The consumer's detail wins when it gave one; otherwise the edge vendor
+      // seen above is kept, since it is a fact about the response either way.
+      detail = custom.detail ?? detail;
       // The hint has to follow the KIND, exactly as it does on the
       // resolveCredential path above. `arm` was derived from the HTTP status
       // and, left alone, selected copy that the classified kind contradicts:
@@ -470,7 +520,14 @@ export function sessionProbe(opts: SessionProbeOptions): () => Promise<string> {
     if (status >= 300 && status < 400) {
       throw new SessionNotLiveError(host, `redirected with ${status}`);
     }
-    if (status < 200 || status >= 300) throw new ProbeHttpError(host, status);
+    if (status < 200 || status >= 300) {
+      // A CDN/WAF refusal page is not the far side's answer: name it, so the
+      // healthcheck reports edge_blocked rather than an upstream error or a
+      // dead session. `sessionClassifier` passes it through to that ladder.
+      const edge = detectEdgeBlock({ body, status });
+      if (edge !== null) throw new EdgeBlockedError(status, edge.vendor, { service: host });
+      throw new ProbeHttpError(host, status);
+    }
     if (opts.signedOut(body)) throw new SessionNotLiveError(host, 'sign-in or verification page');
     return body;
   };

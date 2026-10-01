@@ -11,7 +11,7 @@ import {
   type BearerTokens,
   type StatePersistence,
 } from './index.js';
-import { ApiError, RateLimitedError, RequestTimeoutError } from '../http/index.js';
+import { ApiError, EdgeBlockedError, RateLimitedError, RequestTimeoutError } from '../http/index.js';
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -824,6 +824,10 @@ describe('TokenManager — transient vs revoked refresh failures', () => {
     ['a 5xx from the token endpoint', new ApiError(503, 'Service Unavailable')],
     ['a rate limit', new RateLimitedError('auth')],
     ['a timeout', new RequestTimeoutError('auth', 5000)],
+    // A 403 a CDN/WAF served before the request reached the token endpoint:
+    // nothing judged the refresh token, so it must not be thrown away
+    // (chrischall/mcp-host#1015).
+    ['a CDN/WAF block (403)', new EdgeBlockedError(403, 'CloudFront', { service: 'auth', method: 'POST', path: '/token' })],
   ];
 
   for (const [label, err] of transientCases) {

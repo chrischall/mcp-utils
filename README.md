@@ -490,8 +490,9 @@ clone of this repo: `node scripts/audit-fs-confinement.mjs ../your-mcp`.
 `runBoundedBatch`, `createThrottle`, `createResponseCache`, `parseRetryAfterMs`,
 `splitHost`, `buildUserAgent`, `parseContentDispositionFilename`, JWT helpers
 (`decodeJwtExp`, `decodeJwtSessionId`, `decodeJwtClaim`, `validateJwtExpiry`),
-and the `ApiError` / `UpstreamHttpError` / `UnauthorizedError` /
-`RateLimitedError` / `RequestTimeoutError` classes.
+`detectEdgeBlock`, and the `ApiError` / `UpstreamHttpError` /
+`EdgeBlockedError` / `UnauthorizedError` / `RateLimitedError` /
+`RequestTimeoutError` classes.
 
 `decodeJwtClaim(token, claim)` is the generic single-claim reader — returns the
 raw claim value (`unknown`) or `undefined` for an undecodable token / absent
@@ -545,6 +546,23 @@ status-carrying HTTP error — the manual-throw parallel to `ApiError` (which
 `instanceof UpstreamHttpError` check work. Use it from a transport/bridge code
 path that doesn't route through `createApiClient` but still needs to branch on a
 404.
+
+`EdgeBlockedError` is what `createApiClient` throws instead of a plain
+`ApiError` when a CDN/WAF in front of the API refused the request — a
+CloudFront "request could not be satisfied" page, a Cloudflare block or
+challenge (`cf-mitigated`), an Akamai or Imperva denial. It keeps the status and
+`extends ApiError`, so existing branches are unchanged; it adds `vendor` and a
+message saying the credential was never evaluated, rather than one that sends
+someone to re-sign in. `detectEdgeBlock({ body, headers })` is the rule itself,
+for a client that does not route through `createApiClient`. It matches each
+vendor's own refusal page only: `x-cache: Error from cloudfront` is set on
+every error CloudFront relays, the origin's own 401 included, so it is not
+evidence of a block. Pass `status` when you have it: a refusal page counts only
+on a 4xx, because CloudFront and Cloudflare show the same markers on their
+502/504/52x outage pages, which mean the origin is down rather than that this
+host is blocked; a challenge or `cf-mitigated` counts at any status.
+`TokenManager` treats an `EdgeBlockedError` from a refresh as transient, so a
+block never discards the refresh token.
 
 ```ts
 import { runBoundedBatch } from '@chrischall/mcp-utils';
@@ -1159,9 +1177,19 @@ registerCredentialHealthcheckTool({
 ```
 
 Arms: `ok`, `no_credential`, `credential_rejected` (401/403),
-`session_expired`, `verification_pending`, `timeout`, `http`, `transport`,
-`unknown` — with the same `classifyThrown` / `hints` hooks as the bridge
-factory.
+`edge_blocked`, `session_expired`, `verification_pending`, `timeout`, `http`,
+`transport`, `unknown` — with the same `classifyThrown` / `hints` hooks as the
+bridge factory.
+
+`edge_blocked` is decided BEFORE the status: a CDN/WAF block page answers 403
+exactly as a rejecting API does, and reporting it as `credential_rejected`
+sends people to re-sign in with a credential that was never looked at. It is
+read from an `EdgeBlockedError`, or from any thrown error's message,
+`body`/`bodyPreview`/`responseBody` and `headers` via `detectEdgeBlock`, so a
+connector with its own client is covered without a change, and so is a
+`sessionProbe` probe, which throws `EdgeBlockedError` for a refusal page. A resolver throw
+(a token refresh that met the same block) gets it too, instead of
+`no_credential`. `classifyThrown` still decides first.
 
 #### Cookie-session connectors: `sessionProbe` / `sessionClassifier`
 
