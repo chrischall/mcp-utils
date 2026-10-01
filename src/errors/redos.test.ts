@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { ERROR_REDACTION_INPUT_MAX, redactSecrets, truncateErrorMessage } from './index.js';
+import { detectEdgeBlock } from '../http/index.js';
 
 // Guards against catastrophic backtracking in the redaction chain. It is the
 // FIRST step of truncateErrorMessage, which formatApiError feeds the WHOLE
@@ -101,5 +102,15 @@ describe('truncateErrorMessage input cap (defence in depth)', () => {
   it('honours a `max` larger than the cap (the cap never clips below max)', () => {
     const body = 'b'.repeat(ERROR_REDACTION_INPUT_MAX + 10);
     expect(truncateErrorMessage(body, ERROR_REDACTION_INPUT_MAX + 10)).toBe(body);
+  });
+});
+
+describe('detectEdgeBlock ReDoS resistance', () => {
+  // createApiClient runs it on EVERY non-2xx body, and isCloudflareChallenge's
+  // `<title[^>]*>` is quadratic over repeated `<title` (2.7 s on 200 KB before
+  // the scan was bounded to the head of the body).
+  it('is linear on 200 KB of `<title` runs', () => {
+    const evil = '<title'.repeat(200_000 / 6);
+    expect(elapsedMs(() => detectEdgeBlock({ body: evil, status: 403 }))).toBeLessThan(100);
   });
 });

@@ -48,7 +48,7 @@ import { randomBytes, createHmac } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { textResult } from '../response/index.js';
 import { readEnvVar } from '../config/index.js';
-import { ApiError, RateLimitedError, RequestTimeoutError } from '../http/index.js';
+import { ApiError, EdgeBlockedError, RateLimitedError, RequestTimeoutError } from '../http/index.js';
 
 // ===========================================================================
 // 1. In-memory SessionRegistry + MCP tools
@@ -1094,6 +1094,10 @@ export interface TokenManagerOptions {
  */
 function defaultIsRefreshRevoked(err: unknown): boolean {
   if (err instanceof RateLimitedError || err instanceof RequestTimeoutError) return false;
+  // A CDN/WAF refused the refresh before it reached the token endpoint, so
+  // nothing judged the refresh token; discarding it would turn a block on this
+  // host into a lost credential (chrischall/mcp-host#1015).
+  if (err instanceof EdgeBlockedError) return false;
   if (err instanceof ApiError && err.status >= 500) return false;
   return !isTransientFailure(err);
 }
