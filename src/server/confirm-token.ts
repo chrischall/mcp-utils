@@ -69,12 +69,22 @@ export type ConfirmTokenVerdict =
 
 /**
  * Tokens already used, keyed by nonce until they would have expired anyway.
- * In memory: with a key shared across processes, a restart or a second instance
- * would accept a spent token again until it expires.
+ * {@link createSpentTokenStore} is in memory: with a key shared across
+ * processes, a restart or a second instance would accept a spent token again
+ * until it expires. `createFileSpentTokenStore` keeps them on disk.
+ *
+ * A store that cannot answer must THROW, never answer "not spent": the throw
+ * propagates out of the gate and the action does not run.
  */
 export interface SpentTokenStore {
   has(nonce: string): boolean;
   add(nonce: string, expiresAtMs: number): void;
+  /**
+   * Record the spend only if nothing has yet — atomically, where `has` then
+   * `add` is a race between two processes sharing the store. `true` means this
+   * caller spent it. Optional: without it, verification falls back to `add`.
+   */
+  claim?(nonce: string, expiresAtMs: number): boolean;
   /** Drop entries that expired before `now`. */
   prune(now: number): void;
   clear(): void;
@@ -200,7 +210,12 @@ export function verifyConfirmToken(
   if (claims.r !== binding.revision) return { ok: false, error: 'DRAFT_CHANGED', reason: 'revision-changed' };
   if (claims.h !== binding.payloadHash) return { ok: false, error: 'DRAFT_CHANGED', reason: 'payload-changed' };
 
-  spent.add(claims.n, claims.exp);
+  if (spent.claim) {
+    // Lost the race to another process sharing the store since `has` above.
+    if (!spent.claim(claims.n, claims.exp)) return { ok: false, error: 'TOKEN_REUSED' };
+  } else {
+    spent.add(claims.n, claims.exp);
+  }
   return { ok: true };
 }
 

@@ -43,6 +43,7 @@ import { errorResult } from '../response/index.js';
 export * from './confirmation.js';
 export * from './confirm-token.js';
 export * from './confirm-env.js';
+export * from './confirm-spent-file.js';
 import { withCallSignal } from '../cancel/index.js';
 import { withCallerCapabilities } from '../caller/index.js';
 import type { CallerCapabilities } from '../caller/index.js';

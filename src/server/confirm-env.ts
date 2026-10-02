@@ -8,6 +8,15 @@
  * | `MCP_CONFIRM_MODE` | `ask-user` | what a gated write does on a client that CANNOT show a confirmation prompt |
  * | `MCP_CONFIRM_TTL_SECONDS` | `600` | how long a token stays valid; unparseable → `refuse` + a stderr warning |
  * | `MCP_CONFIRM_SECRET` | random per process | HMAC key; set only if tokens must survive a restart |
+ * | `MCP_HOST_CONFIRM_SECRET` | unset | the same, set by a HOST (mcp-host); honoured only beside an absolute `MCP_DATA_DIR` |
+ *
+ * Whenever the key is stable (either secret) and `MCP_DATA_DIR` is absolute,
+ * spent tokens are recorded under `$MCP_DATA_DIR/.mcp-confirm/spent`
+ * ({@link createFileSpentTokenStore}), so a restart cannot re-accept one
+ * within its TTL. The host's secret has a name of its own so that a child on an
+ * mcp-utils that predates the durable store ignores it — keeping its random,
+ * restart-invalidated key — rather than pairing a stable key with an in-memory
+ * store, and it is ignored without a data dir for the same reason.
  *
  * `MCP_CONFIRM_MODE`:
  * - `ask-user`: two steps. Phase 1 returns the preview and a token and tells the
@@ -24,7 +33,9 @@
  * server uses when it wants the fleet defaults.
  */
 import { createHash, randomBytes } from 'node:crypto';
+import { isAbsolute, join } from 'node:path';
 import { readEnvVar, type EnvSource } from '../config/index.js';
+import { createFileSpentTokenStore } from './confirm-spent-file.js';
 import type { RequireConfirmationOptions } from './confirmation.js';
 import {
   CONFIRM_TOKEN_INSTRUCTION,
@@ -87,16 +98,51 @@ export function confirmTtlFromEnv(env: EnvSource = process.env): number {
 
 let processKey: Uint8Array | undefined;
 
+/** `MCP_DATA_DIR` when it names an absolute directory; a relative one is the process cwd's, not durable. */
+function durableDataDir(env: EnvSource): string | undefined {
+  const dir = readEnvVar('MCP_DATA_DIR', { env });
+  return dir && isAbsolute(dir) ? dir : undefined;
+}
+
+/** The stable secret in force, if any: the operator's, else the host's when spends can be recorded. */
+function stableSecret(env: EnvSource): string | undefined {
+  return readEnvVar('MCP_CONFIRM_SECRET', { env })
+    ?? (durableDataDir(env) ? readEnvVar('MCP_HOST_CONFIRM_SECRET', { env }) : undefined);
+}
+
 /**
- * The HMAC key: `MCP_CONFIRM_SECRET` of any length stretched through SHA-256 to
+ * The HMAC key: `MCP_CONFIRM_SECRET` — else `MCP_HOST_CONFIRM_SECRET`, but only
+ * beside an absolute `MCP_DATA_DIR` — of any length stretched through SHA-256 to
  * the 32 bytes the token functions require, or 32 random bytes fixed for the
  * life of the process (so a restart invalidates every outstanding token).
  */
 export function confirmKeyFromEnv(env: EnvSource = process.env): Uint8Array {
-  const secret = readEnvVar('MCP_CONFIRM_SECRET', { env });
+  const secret = stableSecret(env);
   if (secret) return createHash('sha256').update(secret, 'utf8').digest();
   processKey ??= randomBytes(32);
   return processKey;
+}
+
+const fileStores = new Map<string, SpentTokenStore>();
+
+/**
+ * Where {@link confirmationFromEnv} records spent tokens by default: a
+ * {@link createFileSpentTokenStore} under `$MCP_DATA_DIR/.mcp-confirm/spent`
+ * when the key is stable and the data dir is absolute, else `undefined` (the
+ * process-wide in-memory store — enough for a random key, whose tokens cannot
+ * outlive the process; with an operator's secret and no data dir, a restart can
+ * re-accept a spent token until it expires).
+ */
+export function spentTokenStoreFromEnv(env: EnvSource = process.env): SpentTokenStore | undefined {
+  const dataDir = durableDataDir(env);
+  if (!dataDir || !stableSecret(env)) return undefined;
+  const dir = join(dataDir, '.mcp-confirm', 'spent');
+  let store = fileStores.get(dir);
+  if (!store) {
+    store = createFileSpentTokenStore(dir);
+    fileStores.set(dir, store);
+  }
+  return store;
 }
 
 /** Phase 1's instruction under `MCP_CONFIRM_MODE=auto`. */
@@ -128,7 +174,7 @@ export interface ConfirmationFromEnvOptions extends RequireConfirmationOptions {
   subject: ConfirmTokenFallback['subject'];
   /** Phase 1's instruction in `ask-user` mode; defaults to {@link CONFIRM_TOKEN_INSTRUCTION}. */
   instruction?: string;
-  /** Spent-token store; defaults to the process-wide one. */
+  /** Spent-token store; defaults to {@link spentTokenStoreFromEnv}, else the process-wide one. */
   spent?: SpentTokenStore;
   /** Environment to read; defaults to `process.env`. */
   env?: EnvSource;
@@ -160,7 +206,8 @@ export interface ConfirmationFromEnvOptions extends RequireConfirmationOptions {
  * ```
  */
 export function confirmationFromEnv(options: ConfirmationFromEnvOptions): RequireConfirmationWithFallbackOptions {
-  const { tool, account, confirmToken, subject, instruction, spent, args, env = process.env, ...rest } = options;
+  const { tool, account, confirmToken, subject, instruction, args, env = process.env, ...rest } = options;
+  const spent = options.spent ?? spentTokenStoreFromEnv(env);
   const mode = readConfirmMode(env);
   const ttlSeconds = readConfirmTtl(env);
   const bound = args === undefined ? undefined : boundArgs(args);

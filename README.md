@@ -210,9 +210,13 @@ The token is an HMAC over the tool, account, target, revision and a hash of the
 canonical payload (the same canonical form `binding` commits to), expires after
 `ttlSeconds` (default 600), and is **single-use** through a spent-token store
 (process-wide by default; pass `spent: createSpentTokenStore()` to scope it).
-The store is in memory, so with a key shared across processes a restart or
-another instance accepts a spent token again until it expires. A refused token
-returns `isError: true` and acts on nothing:
+That store is in memory, so with a key shared across processes a restart or
+another instance accepts a spent token again until it expires.
+`createFileSpentTokenStore(dir)` keeps spends on disk instead — one 0600 file per
+nonce, claimed atomically (`O_EXCL`, so of two processes sharing the directory
+exactly one spends), pruned past expiry on every verify, and failing CLOSED: a
+lookup or a spend it cannot do throws, so the gate errors and nothing runs.
+A refused token returns `isError: true` and acts on nothing:
 
 | `error` | meaning |
 |---|---|
@@ -236,6 +240,16 @@ throws rather than binding only the target.
 | `MCP_CONFIRM_MODE` | `ask-user` | What a gated write does on a client that cannot show a prompt. `ask-user`: two steps, and the model must get the user's approval in chat before using the token. `auto`: two steps, but the model may use the token after reviewing the preview itself. `refuse`: refused on such clients. An unrecognised value is treated as `refuse` (with a stderr warning). A client that can be prompted always is. |
 | `MCP_CONFIRM_TTL_SECONDS` | `600` | token lifetime, a positive whole number of seconds. Anything else (`60s`, `1e3`) warns on stderr and is treated as `refuse`, never silently as the default. |
 | `MCP_CONFIRM_SECRET` | random per process | HMAC key (any length, stretched through SHA-256); set only if tokens must survive a restart |
+| `MCP_HOST_CONFIRM_SECRET` | unset | The same, set by a host (mcp-host derives one per child). Honoured only beside an absolute `MCP_DATA_DIR`, and `MCP_CONFIRM_SECRET` wins over it. |
+
+Whenever the key is stable (either secret) and `MCP_DATA_DIR` is absolute,
+`confirmationFromEnv` records spends under `$MCP_DATA_DIR/.mcp-confirm/spent`
+(`spentTokenStoreFromEnv`), so a restart cannot re-accept a spent token within
+its TTL; a caller's own `spent` still wins. With `MCP_CONFIRM_SECRET` and no data
+dir the store stays in memory, with the restart window above. The host's
+variable has its own name so a server on an mcp-utils without the durable store
+ignores it and keeps its random key, rather than pairing a stable key with an
+in-memory store.
 
 ```ts
 const gate = await requireConfirmationWithFallback(ctx, confirmationFromEnv({
