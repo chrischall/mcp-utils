@@ -114,6 +114,94 @@ describe('createApiClient.fetchJson', () => {
     expect((calls[0]!.init.headers as Record<string, string>)['Content-Type']).toBeUndefined();
   });
 
+  it('sends a URLSearchParams `form` as application/x-www-form-urlencoded', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({ ok: 1 })]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn });
+    const form = new URLSearchParams({ venue_id: '42', note: 'a b&c' });
+    await client.fetchJson('POST', '/a', { form });
+    expect(calls[0]!.init.body).toBe('venue_id=42&note=a+b%26c');
+    expect((calls[0]!.init.headers as Record<string, string>)['Content-Type']).toBe(
+      'application/x-www-form-urlencoded;charset=UTF-8',
+    );
+  });
+
+  it('accepts a plain record as `form`, skipping undefined values', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn });
+    await client.fetchJson('POST', '/a', { form: { email: 'a@b.c', password: 'p w', skip: undefined } });
+    expect(calls[0]!.init.body).toBe('email=a%40b.c&password=p+w');
+  });
+
+  it('sends `rawBody` verbatim with its `contentType`', async () => {
+    const { fn, calls } = stubFetch([new Response('<message><text>OK</text></message>', { status: 200 })]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn });
+    const xml = '<?xml version="1.0"?><metadata/>';
+    const text = await client.fetchHtml('POST', '/tag', { rawBody: xml, contentType: 'application/xml; charset=utf-8' });
+    expect(text).toContain('OK');
+    expect(calls[0]!.init.body).toBe(xml);
+    expect((calls[0]!.init.headers as Record<string, string>)['Content-Type']).toBe('application/xml; charset=utf-8');
+  });
+
+  it('defaults a `rawBody` Content-Type to text/plain', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn });
+    await client.fetchJson('PUT', '/a', { rawBody: 'hello' });
+    expect(calls[0]!.init.body).toBe('hello');
+    expect((calls[0]!.init.headers as Record<string, string>)['Content-Type']).toBe('text/plain; charset=utf-8');
+  });
+
+  it('sends an empty-string `rawBody` (it is a body, not an absent one)', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn });
+    await client.fetchJson('PUT', '/a', { rawBody: '' });
+    expect(calls[0]!.init.body).toBe('');
+    expect((calls[0]!.init.headers as Record<string, string>)['Content-Type']).toBe('text/plain; charset=utf-8');
+  });
+
+  it('lets a per-request Content-Type header override the body default', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn });
+    await client.fetchJson('POST', '/a', { form: { a: '1' }, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    expect((calls[0]!.init.headers as Record<string, string>)['Content-Type']).toBe('application/x-www-form-urlencoded');
+  });
+
+  it('replays the same raw body and Content-Type on a 429 retry', async () => {
+    const { fn, calls } = stubFetch([new Response('', { status: 429 }), jsonResponse({ ok: true })]);
+    const client = createApiClient({
+      baseUrl: 'https://x.test',
+      getToken: () => 't',
+      fetchImpl: fn,
+      sleep: async () => {},
+    });
+    await client.fetchJson('POST', '/a', { rawBody: '<x/>', contentType: 'application/xml' });
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(call.init.body).toBe('<x/>');
+      expect((call.init.headers as Record<string, string>)['Content-Type']).toBe('application/xml');
+    }
+  });
+
+  it.each([
+    ['form + body', { form: { a: '1' }, body: { b: 2 } }],
+    ['rawBody + body', { rawBody: 'x', body: { b: 2 } }],
+    ['form + rawBody', { form: { a: '1' }, rawBody: 'x' }],
+    ['rawBody + formData', { rawBody: 'x', formData: new FormData() }],
+  ])('refuses an ambiguous body (%s) before sending anything', async (_label, opt) => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn });
+    await expect(client.fetchJson('POST', '/a', opt)).rejects.toThrow(/only one of/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses a `contentType` with no `rawBody` to apply it to', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn });
+    await expect(client.fetchJson('POST', '/a', { body: { a: 1 }, contentType: 'application/xml' })).rejects.toThrow(
+      /contentType/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
   it('omits Authorization when neither getToken nor tokenManager is given', async () => {
     const { fn, calls } = stubFetch([jsonResponse({})]);
     const client = createApiClient({ baseUrl: 'https://x.test', fetchImpl: fn });
