@@ -58,6 +58,8 @@ export {
   type LoginPageView,
   type LoginPageSignals,
 } from './login-page.js';
+import { withFileLock, withFileLockSync } from './file-lock.js';
+export { withFileLock, withFileLockSync, type FileLockOptions } from './file-lock.js';
 
 // ===========================================================================
 // 1. In-memory SessionRegistry + MCP tools
@@ -432,6 +434,24 @@ export interface SessionStoreOptions<T> {
    * {@link normalizeOrigin}. The stored record's key field is also normalized.
    */
   normalizeKey?: (key: string) => string;
+  /**
+   * Treat the FILE, not this instance, as the source of truth: re-read it before
+   * every `get`/`list`/`getActiveSession`, and do every `add`/`remove` as a
+   * read-modify-write under a cross-process lock file (`<filePath>.lock`, see
+   * {@link withFileLockSync}).
+   *
+   * Turn this on whenever more than one process can share the file — Claude
+   * Desktop beside a Claude Code session is the everyday case. Without it each
+   * instance works from the snapshot its constructor read and rewrites the whole
+   * file from that snapshot on every write, so a sibling's sign-in is dropped and
+   * its sign-out is undone (fleet-audit#1116). simplepractice-mcp, kiaaccess-mcp
+   * and freshbooks-mcp each worked around that by re-constructing the store per
+   * access; this is that workaround, done once, plus the lock none of them had.
+   *
+   * Default `false` (the previous snapshot behaviour) — the cost is one small
+   * file read per access, and a lock file beside the store during writes.
+   */
+  fresh?: boolean;
 }
 
 /**
@@ -442,7 +462,13 @@ export interface SessionStoreOptions<T> {
  *
  * `add` marks the record most-recently-used; {@link SessionStore.getActiveSession}
  * (and `get()` with no argument) returns it, so a tool call that omits an explicit
- * key picks up the latest session automatically.
+ * key picks up the latest session automatically. Re-adding an existing key moves
+ * it to the end, so the active pointer a later process restores (the last record
+ * on disk) is the one this process last added.
+ *
+ * By default the file is read once, at construction. Pass
+ * {@link SessionStoreOptions.fresh} when other processes share the file, or call
+ * {@link SessionStore.reload} to pick up their changes on demand.
  */
 export class SessionStore<T extends Record<string, unknown>> {
   private sessions = new Map<string, T>();
@@ -450,16 +476,41 @@ export class SessionStore<T extends Record<string, unknown>> {
   private readonly filePath: string;
   private readonly keyOf: (session: T) => string;
   private readonly normalizeKey: (key: string) => string;
+  private readonly fresh: boolean;
 
   constructor(opts: SessionStoreOptions<T>) {
     this.filePath = opts.filePath;
     this.keyOf = opts.keyOf;
     this.normalizeKey = opts.normalizeKey ?? normalizeOrigin;
+    this.fresh = opts.fresh === true;
     this.loadFromDisk();
   }
 
+  /**
+   * Replace the in-memory state with what is on disk now — picking up records
+   * another process added or removed. A {@link SessionStoreOptions.fresh} store
+   * does this before every access; a default store only when asked.
+   */
+  reload(): void {
+    this.loadFromDisk();
+  }
+
+  /** Read-modify-write under the cross-process lock (fresh mode), else in place. */
+  private mutate<R>(fn: () => R): R {
+    if (!this.fresh) return fn();
+    return withFileLockSync(`${this.filePath}.lock`, () => {
+      this.loadFromDisk();
+      return fn();
+    });
+  }
+
   private loadFromDisk(): void {
-    if (!existsSync(this.filePath)) return;
+    if (!existsSync(this.filePath)) {
+      // Absent means empty — a sibling may have deleted the file since we last read it.
+      this.sessions = new Map();
+      this.mostRecentKey = null;
+      return;
+    }
     try {
       this.sessions = this.deserialize(readFileSync(this.filePath, 'utf8'));
       const keys = Array.from(this.sessions.keys());
@@ -553,14 +604,20 @@ export class SessionStore<T extends Record<string, unknown>> {
 
   /** Insert or replace a record, normalizing its key and marking it active. */
   add(session: T): void {
-    const key = this.normalizeKey(this.keyOf(session));
-    this.sessions.set(key, session);
-    this.mostRecentKey = key;
-    this.saveToDisk();
+    this.mutate(() => {
+      const key = this.normalizeKey(this.keyOf(session));
+      // Delete first so a re-added key moves to the END: the on-disk order is
+      // what a restarted process restores the active pointer from.
+      this.sessions.delete(key);
+      this.sessions.set(key, session);
+      this.mostRecentKey = key;
+      this.saveToDisk();
+    });
   }
 
   /** Look up by key; with no key, returns the active (most-recent) session. */
   get(key?: string): T | null {
+    if (this.fresh) this.loadFromDisk();
     if (key !== undefined) return this.sessions.get(this.normalizeKey(key)) ?? null;
     if (this.mostRecentKey !== null) return this.sessions.get(this.mostRecentKey) ?? null;
     return null;
@@ -571,23 +628,26 @@ export class SessionStore<T extends Record<string, unknown>> {
     return this.get();
   }
 
-  /** All sessions in insertion order. */
+  /** All sessions, least- to most-recently added. */
   list(): T[] {
+    if (this.fresh) this.loadFromDisk();
     return Array.from(this.sessions.values());
   }
 
   /** Remove a session; fixes up the active pointer. Returns whether it existed. */
   remove(key: string): boolean {
-    const normalized = this.normalizeKey(key);
-    const had = this.sessions.delete(normalized);
-    if (had) {
-      if (this.mostRecentKey === normalized) {
-        const keys = Array.from(this.sessions.keys());
-        this.mostRecentKey = keys[keys.length - 1] ?? null;
+    return this.mutate(() => {
+      const normalized = this.normalizeKey(key);
+      const had = this.sessions.delete(normalized);
+      if (had) {
+        if (this.mostRecentKey === normalized) {
+          const keys = Array.from(this.sessions.keys());
+          this.mostRecentKey = keys[keys.length - 1] ?? null;
+        }
+        this.saveToDisk();
       }
-      this.saveToDisk();
-    }
-    return had;
+      return had;
+    });
   }
 
   /** Clear in-memory state without touching disk. Test helper. */
@@ -639,6 +699,15 @@ export interface StatePersistence<T> {
    * straight back off disk and the expiry loops.
    */
   clear?(): void | Promise<void>;
+  /**
+   * Run `fn` holding a lock that every other user of the SAME stored state
+   * respects — across processes, not just within one. Optional; a manager that
+   * needs a read-modify-write to be atomic (see
+   * {@link TokenManagerOptions.reloadBeforeRefresh}) uses it when present.
+   * {@link createFileStatePersistence} implements it with a lock file beside
+   * the state file ({@link withFileLock}).
+   */
+  withLock?<R>(fn: () => Promise<R>): Promise<R>;
 }
 
 /**
@@ -663,6 +732,8 @@ export interface SyncStatePersistence<T> {
   save(state: T): void;
   /** Discard the stored state. */
   clear(): void;
+  /** See {@link StatePersistence.withLock}. The file-backed single-record store provides it. */
+  withLock?<R>(fn: () => Promise<R>): Promise<R>;
 }
 
 /**
@@ -863,6 +934,12 @@ export function createFileStatePersistence<T>(
       } catch {
         /* best-effort */
       }
+    },
+
+    // `<filePath>.lock`: shared by every process that opens this file through
+    // this helper, which is what makes TokenManager's reloadBeforeRefresh safe.
+    withLock<R>(fn: () => Promise<R>): Promise<R> {
+      return withFileLock(`${filePath}.lock`, fn);
     },
   };
 }
@@ -1162,6 +1239,29 @@ export interface TokenManagerOptions {
    * fatal**, with a message naming the recovery (freshbooks-mcp's case).
    */
   onPersistError?: (err: unknown) => void;
+  /**
+   * Re-read {@link TokenManagerOptions.persistence} before every refresh, under
+   * its cross-process lock ({@link StatePersistence.withLock}), and write the
+   * result before releasing it. Requires `persistence`.
+   *
+   * Turn this on when more than one process shares the token store AND the
+   * service rotates single-use refresh tokens (FreshBooks; any OAuth server with
+   * refresh-token rotation). Otherwise the manager, which reads the store once
+   * per process, spends the refresh token it loaded at start-up — which a
+   * sibling process may have spent already — and the account is locked out
+   * behind an `invalid_grant` while a valid successor sits on disk
+   * (fleet-audit#1008). Under the lock, a record newer than the one in memory
+   * wins: its access token is adopted outright if still outside the skew
+   * window, otherwise its refresh token is the one spent. A record OLDER than
+   * the one in memory (lower `expiresAt`) is ignored.
+   *
+   * Off by default: it costs a file read and a lock file per refresh, and for a
+   * service that does not rotate (or a store only one process ever opens) the
+   * snapshot is already correct. A persistence with no `withLock` is still
+   * re-read, but two processes can then interleave — use
+   * {@link createFileStatePersistence}, which has one.
+   */
+  reloadBeforeRefresh?: boolean;
   /** Injectable clock (defaults to `Date.now`) — for tests. */
   now?: () => number;
 }
@@ -1266,6 +1366,7 @@ export class TokenManager {
   private readonly now: () => number;
   private readonly isRefreshRevokedFn: (err: unknown) => boolean;
   private readonly onPersistErrorFn: ((err: unknown) => void) | undefined;
+  private readonly reloadBeforeRefresh: boolean;
   private inFlight: Promise<void> | undefined;
   private bootstrapInFlight: Promise<BearerTokens> | undefined;
   /**
@@ -1289,6 +1390,10 @@ export class TokenManager {
     this.now = opts.now ?? Date.now;
     this.isRefreshRevokedFn = opts.isRefreshRevoked ?? defaultIsRefreshRevoked;
     this.onPersistErrorFn = opts.onPersistError;
+    this.reloadBeforeRefresh = opts.reloadBeforeRefresh === true;
+    if (this.reloadBeforeRefresh && this.persistence === undefined) {
+      throw new TypeError('TokenManager: reloadBeforeRefresh needs `persistence` to reload from.');
+    }
   }
 
   /** Whether the token is within the skew window of (or past) expiry. */
@@ -1401,7 +1506,48 @@ export class TokenManager {
   /** One refresh attempt against the current refresh token. */
   private async runRefresh(): Promise<void> {
     const current = this.tokens ?? (await this.ensureTokens());
-    const rt = current.refreshToken;
+    const persistence = this.persistence;
+    if (!this.reloadBeforeRefresh || persistence === undefined) {
+      await this.exchange(current.refreshToken);
+      return;
+    }
+    const locked = persistence.withLock?.bind(persistence) ?? (<R>(fn: () => Promise<R>) => fn());
+    await locked(async () => {
+      const held = this.tokens ?? current;
+      let rt = held.refreshToken;
+      const onDisk = await this.readStoredNow();
+      if (
+        onDisk !== null &&
+        (onDisk.accessToken !== held.accessToken || onDisk.refreshToken !== held.refreshToken) &&
+        onDisk.expiresAt >= held.expiresAt
+      ) {
+        // A sibling process refreshed since this one last looked. Its access
+        // token is the answer while it is good; otherwise its refresh token is
+        // the live one — the one in memory may already be spent.
+        if (this.now() < onDisk.expiresAt - this.skewMs) {
+          this.tokens = onDisk;
+          return;
+        }
+        if (onDisk.refreshToken !== undefined) rt = onDisk.refreshToken;
+      }
+      // Persisted inside the lock: a sibling waiting on it must find this
+      // rotation on disk, not the token it just replaced.
+      await this.exchange(rt);
+    });
+  }
+
+  /** The stored tokens as they are on disk now, bypassing the once-per-process read. Never throws. */
+  private async readStoredNow(): Promise<BearerTokens | null> {
+    try {
+      const raw = await this.persistence?.load();
+      return isBearerTokens(raw) ? raw : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Spend `rt`, then install and persist what comes back. */
+  private async exchange(rt: string | undefined): Promise<void> {
     if (rt === undefined) {
       throw new Error('TokenManager: cannot refresh — no refresh token is available.');
     }
