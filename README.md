@@ -1034,7 +1034,10 @@ const data = JSON.parse(stripJsonGuard(body));      // )]}'  while(1);  for(;;);
 `isCloudflareChallenge` matches the DEFINITIVE interstitial markers only
 (`_cf_chl_opt`, `<title>Just a moment`) — never `cdn-cgi/challenge-platform`,
 which Cloudflare inlines on cleared pages too. `decodeHtmlEntities` decodes
-`&amp;` LAST so attribute-escaped JSON survives one level; `matchBalanced` is
+`&amp;` LAST so attribute-escaped JSON survives one level, and leaves a numeric
+reference that is not a character — out of range, or a lone surrogate
+(U+D800–U+DFFF) — verbatim, so it neither throws nor emits an unpaired UTF-16
+unit (`extractPlainTextFromHtml` in `/html` follows the same rule); `matchBalanced` is
 the string/escape-aware bracket walker regex can't replace. `extractNextData`
 finds the tag in one forward pass — `indexOf` per `<script`, a quote-aware
 attribute walk to its `>`, other scripts' bodies skipped to their `</script` —

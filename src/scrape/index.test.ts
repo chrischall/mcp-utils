@@ -36,6 +36,26 @@ describe('decodeHtmlEntities', () => {
   it('leaves unknown entities untouched', () => {
     expect(decodeHtmlEntities('&bogus;')).toBe('&bogus;');
   });
+
+  // chrischall/fleet-audit#1062: a lone surrogate is not a character, and
+  // emitting one leaves an unpaired UTF-16 unit in the output (invalid when it
+  // is later encoded as UTF-8). Refused like musescore-mcp's decodeText.
+  it.each(['&#xD800;', '&#xdbff;', '&#xDC00;', '&#xDFFF;', '&#55296;', '&#57343;'])(
+    'leaves a lone-surrogate reference (%s) verbatim',
+    (ref) => {
+      expect(decodeHtmlEntities(`a${ref}b`)).toBe(`a${ref}b`);
+    },
+  );
+
+  it('still decodes the code points either side of the surrogate block, and astral ones', () => {
+    expect(decodeHtmlEntities('&#xD7FF;&#xE000;&#x1F600;&#128512;')).toBe('\uD7FF\uE000😀😀');
+  });
+
+  it('never emits an unpaired surrogate, even for a hand-written pair', () => {
+    const out = decodeHtmlEntities('&#xD83D;&#xDE00;');
+    expect(out).toBe('&#xD83D;&#xDE00;');
+    expect(out.isWellFormed()).toBe(true);
+  });
 });
 
 describe('stripHtml', () => {

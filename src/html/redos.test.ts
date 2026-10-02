@@ -41,5 +41,8 @@ describe('extractPlainTextFromHtml correctness (no regression)', () => {
 
   it('does not throw on an out-of-range numeric entity', () => {
     expect(() => extractPlainTextFromHtml('<p>&#x110000;</p>')).not.toThrow();
+    // …and a lone surrogate stays verbatim rather than leaving an unpaired
+    // UTF-16 unit in the text (chrischall/fleet-audit#1062).
+    expect(extractPlainTextFromHtml('<p>&#xD800;&#56320;&#xE000;</p>')).toBe('&#xD800;&#56320;\uE000');
   });
 });
