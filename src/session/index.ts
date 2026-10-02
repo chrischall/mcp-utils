@@ -49,6 +49,7 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { textResult } from '../response/index.js';
 import { readEnvVar } from '../config/index.js';
 import { ApiError, EdgeBlockedError, RateLimitedError, RequestTimeoutError } from '../http/index.js';
+import { responseEdgeBlock } from '../internal/edge-block.js';
 
 // ===========================================================================
 // 1. In-memory SessionRegistry + MCP tools
@@ -1403,11 +1404,20 @@ export class TokenManager {
    * second refresh — under refresh-token rotation that would consume and
    * invalidate the freshly-issued refresh token. It just replays with the
    * current token.
+   *
+   * A 401 that is a CDN/WAF refusal page (a vendor's page, or `cf-mitigated`)
+   * is NOT refreshed or replayed: no credential was judged. It is returned
+   * as-is, body still readable. An error thrown by `call` (e.g. an
+   * `EdgeBlockedError`) propagates untouched, as it always has.
    */
   async withAuth(call: (accessToken: string) => Promise<Response>): Promise<Response> {
     const usedToken = await this.getAccessToken();
     let res = await call(usedToken);
-    if (res.status === 401) {
+    // A 401 that is a CDN/WAF refusal page judged nothing: refreshing would
+    // spend (on a rotating server, burn) a refresh token, and the replay meets
+    // the same edge. Hand it back untouched for the caller to report —
+    // createApiClient turns it into EdgeBlockedError (chrischall/mcp-host#1015).
+    if (res.status === 401 && (await responseEdgeBlock(res)) === null) {
       if (this.tokens?.accessToken === usedToken) {
         // Same revoked-credential recovery getAccessToken has: a 401 replay must
         // not be the one entry point that throws where the other re-mints.
@@ -1824,8 +1834,11 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
    * expiry-replay. `call` receives the session and returns a `Response`. If
    * {@link CookieSessionManagerOptions.isExpired} flags the response, the
    * session is invalidated, a single-flight re-login runs, and `call` is
-   * replayed EXACTLY once. A persistent expiry surfaces the (second) response
-   * rather than looping. If the re-login itself fails, the original
+   * replayed EXACTLY once — unless the response is a CDN/WAF refusal page
+   * (`status` 4xx/5xx with a vendor's page or `cf-mitigated`, on a `Response`
+   * or a `{ status, body }` result), which is returned untouched with no
+   * re-login, since nothing judged the session. A persistent expiry surfaces
+   * the (second) response rather than looping. If the re-login itself fails, the original
    * (expired-looking) response is returned so the caller can surface a clean
    * sign-in error rather than the login failure.
    *
@@ -1837,6 +1850,11 @@ export class CookieSessionManager<S = CookieSession, R = Response> {
     const session = await this.ensure();
     const res = await call(session);
     if (!(await this.isExpiredFn(res))) return res;
+    // A CDN/WAF refusal page looks "expired" to most heuristics (a 401/403, or
+    // HTML where JSON was expected), but nothing judged the session: dropping
+    // it and re-logging in spends a login — often rate-limited — and the
+    // replay meets the same edge. Return it untouched (chrischall/mcp-host#1015).
+    if ((await responseEdgeBlock(res)) !== null) return res;
 
     // Expired: re-login (single-flight) + exactly ONE replay.
     //

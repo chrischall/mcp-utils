@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  FetchproxyBridgeDownError,
   FetchproxyHttpError,
+  FetchproxyTimeoutError,
+  bridgeErrorInfo,
   registerAdaptiveHealthcheckTool,
   runBridgeHealthcheck,
   type BridgeHealthcheckResult,
@@ -211,5 +214,39 @@ describe('bridge healthcheck outcomes that are not blocks are unchanged', () => 
     const r = JSON.parse(out.content[0]!.text) as BridgeHealthcheckResult;
     expect(r.ok).toBe(true);
     expect(r.error).toBeUndefined();
+  });
+});
+
+describe('bridgeErrorInfo on a CDN/WAF block', () => {
+  it('reports edge_blocked for a refusal page on a FetchproxyHttpError, naming the vendor in the hint', () => {
+    const out = bridgeErrorInfo(httpError(403, CLOUDFRONT_BLOCK));
+    expect(out.type).toBe('edge_blocked');
+    expect(out.hint).toMatch(/CDN\/WAF \(CloudFront\)/);
+    expect(out.hint).toMatch(/never evaluated/);
+    expect(out.message).not.toContain('<HTML>');
+  });
+
+  it('reports edge_blocked for an EdgeBlockedError, a challenge page, and cf-mitigated', () => {
+    expect(bridgeErrorInfo(new EdgeBlockedError(403, 'Imperva', { service: 'x' })).type).toBe('edge_blocked');
+    expect(bridgeErrorInfo(httpError(503, CLOUDFLARE_CHALLENGE)).type).toBe('edge_blocked');
+    const err = Object.assign(new Error('HTTP 403'), { status: 403, headers: { 'cf-mitigated': 'challenge' } });
+    expect(bridgeErrorInfo(err).type).toBe('edge_blocked');
+  });
+
+  it('control: an ordinary HTTP error stays http, a CloudFront 502 stays http, an unknown stays unknown', () => {
+    expect(bridgeErrorInfo(httpError(403, 'Forbidden')).type).toBe('http');
+    expect(bridgeErrorInfo(httpError(502, CLOUDFRONT_BLOCK.replace('403 ERROR', '502 ERROR'))).type).toBe('http');
+    expect(bridgeErrorInfo(new Error('odd')).type).toBe('unknown');
+  });
+
+  it('control: bridge-level failures keep their own type', () => {
+    const down = new FetchproxyBridgeDownError({ originalError: 'no SW', op: 'fetch', role: 'host', port: 37149 });
+    expect(bridgeErrorInfo(down).type).toBe('bridge_down');
+    expect(bridgeErrorInfo(new FetchproxyTimeoutError({ url: 'https://x', timeoutMs: 1, elapsedMs: 2, role: 'host', port: 1 } as never)).type).toBe('timeout');
+  });
+
+  it('matches runBridgeHealthcheck: the same thrown error is edge_blocked in both', async () => {
+    const err = httpError(403, CLOUDFRONT_BLOCK);
+    expect(bridgeErrorInfo(err).type).toBe((await run(err)).error?.kind);
   });
 });

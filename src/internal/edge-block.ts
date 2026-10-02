@@ -51,3 +51,37 @@ function statusOf(err: unknown): number | undefined {
     (err as { statusCode?: unknown }).statusCode;
   return typeof s === 'number' ? s : undefined;
 }
+
+/**
+ * Whether a RESPONSE a request function handed back is a CDN/WAF refusal —
+ * read by the session managers before they spend a refresh or a re-login on
+ * it (chrischall/mcp-host#1015). Accepts a web `Response` (its body is read
+ * from a `clone()`, so the caller's copy stays readable; a JSON body is never
+ * read, since no refusal page is JSON) or any `{ status, body: string,
+ * headers? }` shape such as `@fetchproxy/server`'s `HttpResponse`. Only a
+ * 4xx/5xx is judged; anything else, or anything unreadable, is "not shown to
+ * be a block".
+ */
+export async function responseEdgeBlock(res: unknown): Promise<{ vendor: string } | null> {
+  const r = objectField(res) as
+    | { status?: unknown; body?: unknown; headers?: unknown; clone?: unknown }
+    | undefined;
+  if (r === undefined || typeof r.status !== 'number' || r.status < 400) return null;
+  const status = r.status;
+  const headers = objectField(r.headers) as EdgeBlockHeaders | undefined;
+  const withHeaders = headers !== undefined ? { headers } : {};
+  if (typeof r.body === 'string') return detectEdgeBlock({ body: r.body, status, ...withHeaders });
+  const byHeaders = detectEdgeBlock({ status, ...withHeaders });
+  if (byHeaders !== null || typeof r.clone !== 'function') return byHeaders;
+  const contentType = headers !== undefined && typeof (headers as Headers).get === 'function'
+    ? ((headers as Headers).get('content-type') ?? '')
+    : '';
+  if (/json/i.test(contentType)) return null;
+  let body = '';
+  try {
+    body = await (r.clone as () => { text: () => Promise<string> }).call(res).text();
+  } catch {
+    return null;
+  }
+  return detectEdgeBlock({ body, status, ...withHeaders });
+}
