@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { ApiError, EdgeBlockedError, createApiClient, detectEdgeBlock } from './index.js';
+import { ApiError, EdgeBlockedError, UnauthorizedError, createApiClient, detectEdgeBlock } from './index.js';
 
 /**
  * The CloudFront page Zola's mobile API answered with on 2026-10-01
@@ -161,6 +161,100 @@ describe('createApiClient on a CDN block', () => {
     const err = await client.fetchJson('GET', '/a').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect(err).not.toBeInstanceOf(EdgeBlockedError);
+  });
+});
+
+describe('createApiClient on a CDN block served with a 401', () => {
+  // CloudFront, Akamai and Imperva sometimes refuse with a 401 rather than a
+  // 403. Mapping that straight to UnauthorizedError — "the token is bad" —
+  // sends somebody to re-sign in with a credential nothing ever looked at.
+  const html = { 'content-type': 'text/html' };
+
+  it('throws EdgeBlockedError for a CloudFront refusal page on a 401, from every fetch method', async () => {
+    for (const method of ['fetchJson', 'fetchHtml', 'fetchRaw'] as const) {
+      const client = createApiClient({
+        baseUrl: 'https://x.test',
+        getToken: () => 'tok-secret',
+        serviceName: 'Svc',
+        fetchImpl: stubFetch(new Response(CLOUDFRONT_BLOCK.replace('403 ERROR', '401 ERROR'), { status: 401, headers: html })),
+      });
+      const err = await client[method]('GET', '/me').catch((e: unknown) => e);
+      expect(err, method).toBeInstanceOf(EdgeBlockedError);
+      expect(err, method).not.toBeInstanceOf(UnauthorizedError);
+      expect((err as EdgeBlockedError).status, method).toBe(401);
+      expect((err as EdgeBlockedError).vendor, method).toBe('CloudFront');
+      expect((err as Error).message, method).not.toContain('tok-secret');
+      expect((err as Error).message, method).not.toContain('<HTML>');
+    }
+  });
+
+  it('throws EdgeBlockedError for an Akamai or Imperva page on a 401', async () => {
+    for (const [page, vendor] of [
+      [AKAMAI_BLOCK, 'Akamai'],
+      [IMPERVA_BLOCK, 'Imperva'],
+    ] as const) {
+      const client = createApiClient({
+        baseUrl: 'https://x.test',
+        getToken: () => 't',
+        fetchImpl: stubFetch(new Response(page, { status: 401, headers: html })),
+      });
+      const err = await client.fetchJson('GET', '/me').catch((e: unknown) => e);
+      expect(err, vendor).toBeInstanceOf(EdgeBlockedError);
+      expect((err as EdgeBlockedError).vendor, vendor).toBe(vendor);
+    }
+  });
+
+  it('honours a cf-mitigated header on a 401, whatever the body', async () => {
+    const client = createApiClient({
+      baseUrl: 'https://x.test',
+      getToken: () => 't',
+      fetchImpl: stubFetch(
+        new Response('{"error":"x"}', {
+          status: 401,
+          headers: { 'cf-mitigated': 'challenge', 'content-type': 'application/json' },
+        }),
+      ),
+    });
+    const err = await client.fetchJson('GET', '/me').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EdgeBlockedError);
+    expect((err as EdgeBlockedError).vendor).toBe('Cloudflare');
+  });
+
+  it('bypasses onUnauthorized for a block: nothing judged the credential, so nothing should re-sign in', async () => {
+    const onUnauthorized = vi.fn(() => new Error('re-login'));
+    const client = createApiClient({
+      baseUrl: 'https://x.test',
+      getToken: () => 't',
+      onUnauthorized,
+      fetchImpl: stubFetch(new Response(IMPERVA_BLOCK, { status: 401, headers: html })),
+    });
+    await expect(client.fetchJson('GET', '/me')).rejects.toBeInstanceOf(EdgeBlockedError);
+    expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
+  it('keeps an ordinary 401 an UnauthorizedError — JSON, plain text or an origin HTML page', async () => {
+    const bodies: Array<[string, Record<string, string>]> = [
+      ['{"error":"invalid_token"}', { 'content-type': 'application/json', 'x-cache': 'Error from cloudfront' }],
+      ['bad token tok-secret', { 'content-type': 'text/plain' }],
+      ['<html><title>401 Unauthorized</title><body>Sign in</body></html>', html],
+    ];
+    for (const [body, headers] of bodies) {
+      const client = createApiClient({
+        baseUrl: 'https://x.test',
+        getToken: () => 'tok-secret',
+        fetchImpl: stubFetch(new Response(body, { status: 401, headers })),
+      });
+      const err = await client.fetchJson('GET', '/me').catch((e: unknown) => e);
+      expect(err, body).toBeInstanceOf(UnauthorizedError);
+      expect((err as Error).message, body).not.toContain('tok-secret');
+    }
+  });
+
+  it('keeps an ordinary 401 an UnauthorizedError when reading its body fails', async () => {
+    const res = new Response('ignored', { status: 401, headers: html });
+    Object.defineProperty(res, 'text', { value: () => Promise.reject(new Error('stream broke')) });
+    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: stubFetch(res) });
+    await expect(client.fetchJson('GET', '/me')).rejects.toBeInstanceOf(UnauthorizedError);
   });
 });
 

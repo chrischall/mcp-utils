@@ -50,6 +50,7 @@ import {
 import type { Capability } from '@fetchproxy/protocol';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { truncateErrorMessage, messageOf } from '../errors/index.js';
+import { edgeBlockOf } from '../internal/edge-block.js';
 
 // ---------------------------------------------------------------------------
 // Re-exports — single import site for the bridge primitives (design: re-export,
@@ -940,6 +941,9 @@ export interface BridgeHealthcheckResult {
      * The classified error kind. Normally one of `BridgeErrorInfo['type']`;
      * a consumer-supplied {@link RegisterBridgeHealthcheckToolArgs.classifyThrown}
      * can introduce site-specific kinds (e.g. workday's `'session_expired'`).
+     * `'edge_blocked'` means a CDN/WAF refused the probe before the site saw
+     * it (a refusal page or `cf-mitigated` on the thrown error); its vendor is
+     * in `detail.vendor`.
      */
     kind: string;
     message: string;
@@ -969,6 +973,7 @@ export type HealthcheckHintArm =
   | 'protocol'
   | 'capability_unavailable'
   | 'capability_denied'
+  | 'edge_blocked'
   | 'direct'
   | 'unknown';
 
@@ -1075,6 +1080,8 @@ function healthcheckHint(args: {
   direct?: boolean;
   /** The browser gap, when the probe failed with `capability_unavailable`. */
   capabilityGap?: { capabilities: string[]; platform: string | null };
+  /** The CDN/WAF that refused the probe, when it failed with `edge_blocked`. */
+  edgeVendor?: string;
 }): string {
   const { hostLabel, prefix, probePath, port } = args;
   // Never a literal 37149: when no bridge exists yet there is no port to
@@ -1091,6 +1098,13 @@ function healthcheckHint(args: {
   }
   if (args.errorKind === 'capability_denied') {
     return CAPABILITY_DENIED_HINT;
+  }
+  if (args.errorKind === 'edge_blocked') {
+    const edge = args.edgeVendor ? `its CDN/WAF (${args.edgeVendor})` : 'its CDN/WAF';
+    if (args.direct) {
+      return `${hostLabel} refused the probe at ${edge} before it reached the site, so the session was never evaluated — signing in again will not help. The probe rode the direct fetch, and this is usually a block on this host's IP address or request fingerprint: route through ContextMint Bridge (pin the consumer's transport env var to the bridge) so the request leaves from your browser instead.`;
+    }
+    return `${hostLabel} refused the probe at ${edge} before it reached the site, so the session was never evaluated — signing in again or re-pairing will not help. The bridge itself worked: the request rode your browser and came back with the edge's refusal page. This is usually a block on that browser's IP address or fingerprint (a VPN, a flagged network, a challenge the tab has not passed): open ${hostLabel} in the tab and clear any challenge, or retry later from a different network.`;
   }
   if (args.errorKind === 'session_not_ready') {
     const s = args.session;
@@ -1291,6 +1305,7 @@ export async function runBridgeHealthcheck(
   let customHint: string | undefined;
   let customDetail: Record<string, unknown> | undefined;
   let capabilityGap: CapabilityGap | undefined;
+  let edge: { vendor: string } | null = null;
   if (rawError) {
     // `runProbe` (or classifyBridgeError on the direct route) already
     // classified the throw in fetchproxy's raw vocabulary. Trust that as
@@ -1314,6 +1329,20 @@ export async function runBridgeHealthcheck(
         kind = 'capability_denied';
       }
     }
+    // A CDN/WAF refusal page that came back through the probe — on a
+    // FetchproxyHttpError's response, or as a consumer client's
+    // EdgeBlockedError — is neither a bridge fault nor a dead session: the
+    // request was refused before the site saw it. Named by the same rule the
+    // credential healthcheck uses, and only over an `http`/unclassified
+    // failure, so a bridge that is down, unpaired, timed out or missing a
+    // capability keeps its own answer.
+    if (thrown !== undefined && (kind === 'http' || kind === 'unknown')) {
+      edge = edgeBlockOf(thrown);
+      if (edge !== null) {
+        kind = 'edge_blocked';
+        customDetail = { vendor: edge.vendor };
+      }
+    }
     // A consumer classifier can re-kind the thrown error (e.g. workday's
     // session_expired) and supply site-specific next-step copy.
     if (thrown !== undefined && classifyThrown) {
@@ -1321,7 +1350,9 @@ export async function runBridgeHealthcheck(
       if (custom) {
         kind = custom.kind;
         customHint = custom.hint;
-        customDetail = custom.detail;
+        // The consumer's detail wins when it gave one; otherwise the edge
+        // vendor seen above is kept, since it is a fact about the response.
+        customDetail = custom.detail ?? customDetail;
       }
     }
     error = {
@@ -1340,7 +1371,7 @@ export async function runBridgeHealthcheck(
   // so per-arm `hints` overrides land on the same arm the default copy would.
   const arm: HealthcheckHintArm = ok
     ? 'ok'
-    : error?.kind === 'capability_unavailable' || error?.kind === 'capability_denied'
+    : error?.kind === 'capability_unavailable' || error?.kind === 'capability_denied' || error?.kind === 'edge_blocked'
       ? error.kind
       : error?.kind === 'session_not_ready'
       ? 'session_not_ready'
@@ -1373,6 +1404,7 @@ export async function runBridgeHealthcheck(
         (thrown instanceof FetchproxySessionNotReadyError ? thrown.pairCode : null),
     },
     direct,
+    ...(edge !== null ? { edgeVendor: edge.vendor } : {}),
     ...(capabilityGap
       ? {
           capabilityGap: {

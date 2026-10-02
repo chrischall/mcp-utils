@@ -11,7 +11,8 @@
  */
 import type { McpServer } from '@modelcontextprotocol/server';
 import { truncateErrorMessage, messageOf } from '../errors/index.js';
-import { EdgeBlockedError, detectEdgeBlock, type EdgeBlockHeaders } from '../http/index.js';
+import { EdgeBlockedError, detectEdgeBlock } from '../http/index.js';
+import { edgeBlockOf } from '../internal/edge-block.js';
 import { z } from 'zod';
 
 /**
@@ -151,31 +152,6 @@ function statusOf(err: unknown): number | undefined {
   const s = (err as { status?: unknown; statusCode?: unknown }).status ??
     (err as { statusCode?: unknown }).statusCode;
   return typeof s === 'number' ? s : undefined;
-}
-
-/**
- * The edge vendor a thrown error says refused the request, if anything about
- * it does. An {@link EdgeBlockedError} says so outright; any other error is
- * judged on what it carries — its message (which is usually
- * `formatApiError`'s cut of the body), a `body`/`bodyPreview`/`responseBody`
- * string, and a `headers` object — by the same {@link detectEdgeBlock} rule
- * the API client uses, so a connector with its own client is covered too.
- */
-function edgeBlockOf(err: unknown): { vendor: string } | null {
-  if (err instanceof EdgeBlockedError) return { vendor: err.vendor };
-  if (typeof err !== 'object' || err === null) return null;
-  const e = err as { body?: unknown; bodyPreview?: unknown; responseBody?: unknown; headers?: unknown };
-  const parts = [messageOf(err), e.body, e.bodyPreview, e.responseBody].filter(
-    (part): part is string => typeof part === 'string' && part.length > 0,
-  );
-  const headers =
-    typeof e.headers === 'object' && e.headers !== null ? (e.headers as EdgeBlockHeaders) : undefined;
-  const status = statusOf(err);
-  return detectEdgeBlock({
-    body: parts.join('\n'),
-    ...(headers !== undefined ? { headers } : {}),
-    ...(status !== undefined ? { status } : {}),
-  });
 }
 
 const CREDENTIAL_ARMS = new Set<string>([

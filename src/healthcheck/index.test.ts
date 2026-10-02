@@ -703,6 +703,38 @@ describe('a CDN/WAF block is edge_blocked, not credential_rejected (mcp-host#101
     expect(r.error?.detail).toEqual({ vendor: 'Cloudflare' });
   });
 
+  it('reads the block off an error whose `response` carries the page (FetchproxyHttpError, most HTTP libs)', async () => {
+    const err = Object.assign(new Error('HTTP 403 on https://x.test/v1/me'), {
+      response: { status: 403, body: cloudFrontPage, url: 'https://x.test/v1/me' },
+    });
+    const r = await run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => ({ source: 'env' }),
+      probeFn: async () => {
+        throw err;
+      },
+    });
+    expect(r.error?.kind).toBe('edge_blocked');
+    expect(r.error?.detail).toEqual({ vendor: 'CloudFront' });
+  });
+
+  it('keeps an error whose `response` is an ordinary 403 credential_rejected', async () => {
+    const err = Object.assign(new Error('HTTP 403'), {
+      status: 403,
+      response: { status: 403, body: '{"error":"forbidden"}', headers: { 'x-cache': 'Error from cloudfront' } },
+    });
+    const r = await run({
+      ...base,
+      server: null as never,
+      resolveCredential: async () => ({ source: 'env' }),
+      probeFn: async () => {
+        throw err;
+      },
+    });
+    expect(r.error?.kind).toBe('credential_rejected');
+  });
+
   it('is edge_blocked on a non-auth status too (a 503 challenge is not an "http" fault)', async () => {
     const err = Object.assign(
       new Error('API error 503 for GET /v1/me: <html><title>Just a moment...</title><script>_cf_chl_opt={}</script>'),

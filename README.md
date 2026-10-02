@@ -562,7 +562,12 @@ on a 4xx, because CloudFront and Cloudflare show the same markers on their
 502/504/52x outage pages, which mean the origin is down rather than that this
 host is blocked; a challenge or `cf-mitigated` counts at any status.
 `TokenManager` treats an `EdgeBlockedError` from a refresh as transient, so a
-block never discards the refresh token.
+block never discards the refresh token. A 401 is checked too: CloudFront,
+Akamai and Imperva sometimes refuse with one, so a 401 whose body is a refusal
+page (or that carries `cf-mitigated`) throws `EdgeBlockedError` rather than
+`UnauthorizedError`, and `onUnauthorized` is not called for it. A JSON 401 is
+the API's own answer and its body is not read; any other 401 is still an
+`UnauthorizedError` exactly as before.
 
 ```ts
 import { runBoundedBatch } from '@chrischall/mcp-utils';
@@ -807,6 +812,12 @@ supporting `FetchproxySession` / `AuthPattern` types.
 refresh token, later exchanges send the new one, and `onRotate(token)` is
 called so you can persist it. A non-2xx throws `OAuth2RefreshError` (an
 `McpToolError` with `status`), and a 4xx other than 408/429 is never retried.
+A CDN/WAF refusal page in front of the token endpoint (judged by
+`detectEdgeBlock` on the FULL body and headers, before the message is cut)
+throws `EdgeBlockedError` instead and is not retried: the grant never reached
+the endpoint, so `TokenManager`'s default `isRefreshRevoked` keeps the stored
+refresh token rather than clearing it — which, with a rotating token, would
+discard its only live copy.
 If `onRotate` throws, the exchange is not retried; the refresher keeps the new
 token and throws `OAuth2RotationPersistError` (carrying the `result`), which
 `TokenManager` surfaces without wiping its store.
@@ -1105,6 +1116,18 @@ custom `{ kind, hint }` (e.g. an SSO bounce → `session_expired` with re-sign-i
 copy; its hint wins the result hint), and `hints` overrides the default copy
 per ladder arm (`{ timeout: 'DataDome may be challenging the tab — …' }`).
 
+**When a CDN/WAF refuses the probe.** A probe that comes back with a refusal
+page — on a `FetchproxyHttpError`'s `response`, as a consumer client's
+`EdgeBlockedError`, or as any error carrying the page or `cf-mitigated` —
+reports `error.kind: 'edge_blocked'` with `detail.vendor`, by the same
+`detectEdgeBlock` rule the credential healthcheck uses. The hint says the
+bridge worked and the session was never evaluated, so re-signing in or
+re-pairing will not help (on a direct-first consumer's direct leg it points
+at the bridge instead). It is only considered for an `http` or unclassified
+failure, so a bridge that is down, unpaired or missing a capability keeps its
+own answer; `classifyThrown` can still override it, and `hints.edge_blocked`
+overrides the copy. `registerAdaptiveHealthcheckTool`'s bridge arm inherits it.
+
 **The extension link.** A probe that fails with fetchproxy's
 `FetchproxySessionNotReadyError` reports `error.kind: 'session_not_ready'`
 (classified here, so it holds on a pre-2.5 server too) and the hint names the
@@ -1185,7 +1208,8 @@ bridge factory.
 exactly as a rejecting API does, and reporting it as `credential_rejected`
 sends people to re-sign in with a credential that was never looked at. It is
 read from an `EdgeBlockedError`, or from any thrown error's message,
-`body`/`bodyPreview`/`responseBody` and `headers` via `detectEdgeBlock`, so a
+`body`/`bodyPreview`/`responseBody` and `headers` (or a `response` object's
+`status`/`body`/`headers`) via `detectEdgeBlock`, so a
 connector with its own client is covered without a change, and so is a
 `sessionProbe` probe, which throws `EdgeBlockedError` for a refusal page. A resolver throw
 (a token refresh that met the same block) gets it too, instead of
