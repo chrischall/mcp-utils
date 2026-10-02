@@ -1,9 +1,11 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { open } from 'node:fs/promises';
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { McpToolError } from '../errors/index.js';
 import { UploadRefusedError, vetUploadFile, type VetUploadOptions } from './index.js';
@@ -21,6 +23,7 @@ beforeEach(() => {
   outside = mkdtempSync(join(tmpdir(), 'mcp-utils-upload-outside-'));
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   rmSync(root, { recursive: true, force: true });
   rmSync(outside, { recursive: true, force: true });
 });
@@ -228,5 +231,47 @@ describe('vetUploadFile — refuses (fail closed)', () => {
   it('allows hidden segments when denyHiddenSegments is not set', async () => {
     const p = put(root, '.ok.jpg', JPEG);
     expect((await vetUploadFile(p, opts())).ext).toBe('jpg');
+  });
+});
+
+describe('vetUploadFile — readAll buffer sizing', () => {
+  /** Append `extra` to `path` right after the guard's fstat — a file that grows mid-vet. */
+  async function growAfterFstat(path: string, extra: Buffer): Promise<void> {
+    const probe = await open(put(root, 'probe.bin', ''), 'r');
+    const proto = Object.getPrototypeOf(probe) as { stat: (...a: unknown[]) => Promise<unknown> };
+    await probe.close();
+    const real = proto.stat;
+    vi.spyOn(proto, 'stat').mockImplementation(async function (this: unknown, ...a: unknown[]) {
+      const st = await real.apply(this, a);
+      appendFileSync(path, extra);
+      return st;
+    });
+  }
+
+  it('sizes the buffer from the fstat size, not the cap (no 256 MiB zero-fill for a tiny file)', async () => {
+    const p = put(root, 'tiny.jpg', JPEG);
+    const alloc = vi.spyOn(Buffer, 'alloc');
+    const v = await vetUploadFile(p, opts({ readAll: true, maxBytes: 256 * 1024 * 1024 }));
+    expect(Buffer.from(v.bytes!)).toEqual(JPEG);
+    const largest = Math.max(0, ...alloc.mock.calls.map((c) => c[0]));
+    expect(largest).toBeLessThan(64 * 1024);
+  });
+
+  it('still reads a file that grew past its fstat size but stays under the cap', async () => {
+    const body = Buffer.concat([JPEG, Buffer.alloc(600, 7)]);
+    const p = put(root, 'grew.jpg', JPEG);
+    await growAfterFstat(p, Buffer.alloc(600, 7));
+    const v = await vetUploadFile(p, opts({ readAll: true }));
+    expect(Buffer.from(v.bytes!)).toEqual(body);
+    expect(v.size).toBe(body.length);
+  });
+
+  it('still refuses a file that grew past its fstat size AND past the cap', async () => {
+    const p = put(root, 'grew-big.jpg', JPEG);
+    await growAfterFstat(p, Buffer.alloc(5000, 7));
+    const alloc = vi.spyOn(Buffer, 'alloc');
+    expect((await refused(vetUploadFile(p, opts({ readAll: true })))).reason).toBe('too-large');
+    // Widening never allocates past the cap + 1.
+    expect(Math.max(0, ...alloc.mock.calls.map((c) => c[0]))).toBeLessThanOrEqual(1024 + 1);
   });
 });

@@ -16,10 +16,11 @@
  * follows a final-component symlink on any platform.
  */
 
-import { closeSync, constants as fsConstants, mkdirSync, openSync, writeSync } from 'node:fs';
+import { closeSync, constants as fsConstants, lstatSync, mkdirSync, openSync, writeSync } from 'node:fs';
 import { mkdir, open } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
+import { expandPath } from '../config/index.js';
 import { McpToolError } from '../errors/index.js';
 import { assertPathWithinRoots } from './confine.js';
 
@@ -73,15 +74,28 @@ function flagsFor(overwrite: boolean): number {
   return O_WRONLY | O_CREAT | O_NOFOLLOW | (overwrite ? O_TRUNC : O_EXCL);
 }
 
-function refusalFor(err: unknown, path: string): FileWriteRefusedError | undefined {
+/** Whether `path` is itself a symlink (not followed). False when it is missing. */
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/** Map an open() failure to a refusal; `opened` is the path actually opened, `path` the one reported. */
+function refusalFor(err: unknown, path: string, opened: string = path): FileWriteRefusedError | undefined {
   const code = (err as NodeJS.ErrnoException | undefined)?.code;
-  if (code === 'EEXIST') return new FileWriteRefusedError(path, 'exists');
+  // O_EXCL wins over O_NOFOLLOW, so an exclusive open of a symlink (live or
+  // dangling) reports EEXIST; name it for what it is.
+  if (code === 'EEXIST') return new FileWriteRefusedError(path, isSymlink(opened) ? 'symlink' : 'exists');
   // Linux/macOS report a final-component symlink under O_NOFOLLOW as ELOOP;
   // FreeBSD uses EMLINK.
   if (code === 'ELOOP' || code === 'EMLINK') return new FileWriteRefusedError(path, 'symlink');
   return undefined;
 }
 
+/** Confine a DIRECTORY to `roots`, returning its real path (symlinks followed). */
 function confine(path: string, roots: readonly string[] | undefined): string {
   if (!roots) return path;
   try {
@@ -92,24 +106,39 @@ function confine(path: string, roots: readonly string[] | undefined): string {
 }
 
 /**
+ * Confine a FILE destination to `roots` by its parent directory only: the
+ * parent is resolved through symlinks and checked, and the final component is
+ * re-attached unresolved. Realpathing the whole destination would follow a
+ * live final-component symlink to its target, so the `O_NOFOLLOW` open would
+ * never see the link and overwrite mode would write through it.
+ */
+function confineFile(path: string, roots: readonly string[] | undefined): string {
+  if (!roots) return path;
+  const abs = resolve(expandPath(path)); // normalizes `..`, so the name is one plain component
+  return join(confine(dirname(abs), roots), basename(abs));
+}
+
+/**
  * Write `bytes` to `path` without ever following a symlink at the final
  * component, and (by default) without clobbering anything already there —
  * one `open(O_CREAT | O_NOFOLLOW | O_EXCL)`, so there is no window between a
- * check and the write. With `allowedRoots`, the destination is first confined
- * (through symlinks, nearest existing ancestor) and the REAL path is written.
+ * check and the write. With `allowedRoots`, the destination's PARENT is first
+ * confined (through symlinks, nearest existing ancestor) and the file is
+ * opened under that real parent; the final component is never resolved, so a
+ * symlink there is refused whether it points inside the roots or out.
  * The parent directory must exist. Returns the path written.
  *
  * @throws {FileWriteRefusedError} when the destination exists (exclusive mode),
  *   is a symlink, or is outside `allowedRoots`.
  */
 export async function writeFileSafe(path: string, bytes: Uint8Array, opts: WriteFileSafeOptions = {}): Promise<string> {
-  const target = confine(path, opts.allowedRoots);
+  const target = confineFile(path, opts.allowedRoots);
   const overwrite = opts.overwrite === true;
   let handle;
   try {
     handle = await open(target, flagsFor(overwrite), opts.mode ?? 0o666);
   } catch (err) {
-    throw refusalFor(err, path) ?? err;
+    throw refusalFor(err, path, target) ?? err;
   }
   try {
     if (overwrite && opts.mode !== undefined) await handle.chmod(opts.mode);

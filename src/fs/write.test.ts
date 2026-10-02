@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -56,7 +56,7 @@ describe('writeFileSafe', () => {
     const link = join(dir, 'out.bin');
     symlinkSync(victim, link);
     const err = await refusal(writeFileSafe(link, bytes('pwned')));
-    expect(['exists', 'symlink']).toContain(err.reason);
+    expect(err.reason).toBe('symlink');
     expect(readFileSync(victim, 'utf8')).toBe('precious');
   });
 
@@ -113,6 +113,71 @@ describe('writeFileSafe', () => {
     expect(readFileSync(p, 'utf8')).toBe('x');
   });
 
+  describe('a final-component symlink is refused even with allowedRoots', () => {
+    // confine() used to realpath the WHOLE destination, resolving a live
+    // final-component link to its target before the O_NOFOLLOW open — so the
+    // open never saw a symlink and overwrite mode wrote through it.
+    for (const overwrite of [false, true]) {
+      const mode = overwrite ? 'overwrite' : 'exclusive';
+
+      it(`refuses a link pointing at an in-root file (${mode} mode)`, async () => {
+        const victim = join(dir, 'victim.txt');
+        writeFileSync(victim, 'precious');
+        const link = join(dir, 'out.bin');
+        symlinkSync(victim, link);
+        const err = await refusal(writeFileSafe(link, bytes('pwned'), { overwrite, allowedRoots: [dir] }));
+        expect(err.reason).toBe('symlink');
+        expect(readFileSync(victim, 'utf8')).toBe('precious');
+      });
+
+      it(`refuses a link pointing at an out-of-root file (${mode} mode)`, async () => {
+        const victim = join(outside, 'victim.txt');
+        writeFileSync(victim, 'precious');
+        const link = join(dir, 'out.bin');
+        symlinkSync(victim, link);
+        const err = await refusal(writeFileSafe(link, bytes('pwned'), { overwrite, allowedRoots: [dir] }));
+        expect(err.reason).toBe('symlink');
+        expect(readFileSync(victim, 'utf8')).toBe('precious');
+      });
+
+      it(`refuses a dangling link (${mode} mode)`, async () => {
+        const target = join(dir, 'planted.txt');
+        const link = join(dir, 'out.bin');
+        symlinkSync(target, link);
+        const err = await refusal(writeFileSafe(link, bytes('pwned'), { overwrite, allowedRoots: [dir] }));
+        expect(err.reason).toBe('symlink');
+        expect(existsSync(target)).toBe(false);
+      });
+    }
+
+    it('still overwrites a real in-root file', async () => {
+      const p = join(dir, 'real.bin');
+      writeFileSync(p, 'old-and-longer');
+      const written = await writeFileSafe(p, bytes('new'), { overwrite: true, allowedRoots: [dir] });
+      expect(readFileSync(p, 'utf8')).toBe('new');
+      expect(written.endsWith('real.bin')).toBe(true);
+    });
+
+    it('still resolves a symlinked PARENT directory that stays inside the root', async () => {
+      mkdirSync(join(dir, 'real'));
+      symlinkSync(join(dir, 'real'), join(dir, 'alias'));
+      const written = await writeFileSafe(join(dir, 'alias', 'f.bin'), bytes('x'), { allowedRoots: [dir] });
+      expect(readFileSync(join(dir, 'real', 'f.bin'), 'utf8')).toBe('x');
+      expect(written).toBe(join(realpathSync(dir), 'real', 'f.bin'));
+    });
+
+    it('refuses a `..` destination that normalizes to outside the root', async () => {
+      mkdirSync(join(dir, 'sub'));
+      const err = await refusal(writeFileSafe(join(dir, 'sub', '..', '..', 'escape.bin'), bytes('x'), { allowedRoots: [dir] }));
+      expect(err.reason).toBe('outside-roots');
+    });
+
+    it('refuses a destination whose final component is `..` (judged after normalizing)', async () => {
+      const err = await refusal(writeFileSafe(`${dir}/..`, bytes('x'), { allowedRoots: [dir] }));
+      expect(err.reason).toBe('outside-roots');
+    });
+  });
+
   it('surfaces a missing parent directory as an ordinary error, not a refusal', async () => {
     const err = await writeFileSafe(join(dir, 'nope', 'a.bin'), bytes('x')).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(Error);
@@ -143,6 +208,15 @@ describe('writeUniqueFile', () => {
     const p = await writeUniqueFile({ dir, baseName: 'shot', extension: 'png', bytes: bytes('x') });
     expect(p).toBe(join(dir, 'shot-2.png'));
     expect(existsSync(target)).toBe(false);
+  });
+
+  it('with allowedRoots, skips a planted symlink to an in-root file instead of writing through it', async () => {
+    const victim = join(dir, 'victim.txt');
+    writeFileSync(victim, 'precious');
+    symlinkSync(victim, join(dir, 'shot.png'));
+    const p = await writeUniqueFile({ dir, baseName: 'shot', extension: 'png', bytes: bytes('x'), allowedRoots: [dir] });
+    expect(p).toBe(join(realpathSync(dir), 'shot-2.png'));
+    expect(readFileSync(victim, 'utf8')).toBe('precious');
   });
 
   it('sanitizes a traversal baseName to a single component', async () => {

@@ -113,16 +113,25 @@ function formatLimit(bytes: number): string {
   return bytes % 1024 === 0 ? `${bytes / 1024} KiB` : `${bytes} bytes`;
 }
 
-async function readFully(fh: FileHandle, limit: number): Promise<Buffer | undefined> {
-  // Read up to limit + 1 so a file that grew past the cap is caught.
-  const buf = Buffer.alloc(limit + 1);
+async function readFully(fh: FileHandle, size: number, limit: number): Promise<Buffer | undefined> {
+  // Size the buffer from the verified fstat size (+1 to notice growth), not
+  // the cap: zero-filling a 256 MiB cap for a 2 KB file is pure waste. If the
+  // file grew since the fstat and fills the buffer, widen it (never past
+  // limit + 1), so a file that grew past the cap is still caught.
+  let buf = Buffer.alloc(Math.min(size, limit) + 1);
   let off = 0;
-  while (off < buf.length) {
+  for (;;) {
     const { bytesRead } = await fh.read(buf, off, buf.length - off, off);
     if (bytesRead === 0) break;
     off += bytesRead;
+    if (off > limit) return undefined;
+    if (off === buf.length) {
+      const wider = Buffer.alloc(Math.min(buf.length * 2, limit + 1));
+      buf.copy(wider, 0, 0, off);
+      buf = wider;
+    }
   }
-  return off > limit ? undefined : buf.subarray(0, off);
+  return buf.subarray(0, off);
 }
 
 /**
@@ -218,7 +227,7 @@ export async function vetUploadFile(path: string, opts: VetUploadOptions): Promi
     let head: Buffer;
     let bytes: Buffer | undefined;
     if (opts.readAll) {
-      bytes = await readFully(fh, opts.maxBytes);
+      bytes = await readFully(fh, fst.size, opts.maxBytes);
       if (bytes === undefined) return refuse('too-large', `it is over the ${formatLimit(opts.maxBytes)} upload limit.`);
       head = bytes.subarray(0, HEAD_BYTES);
     } else {
