@@ -120,7 +120,8 @@ export interface ApiClientOptions {
    * message (e.g. `TEMPO_API_TOKEN is invalid or expired`) without wrapping the
    * client in a try/catch. The factory receives no arguments — it is never
    * passed the token, preserving the no-token-in-message guarantee. Defaults to
-   * {@link UnauthorizedError}.
+   * {@link UnauthorizedError}. Not called for a 401 that is a CDN/WAF refusal
+   * page: that throws {@link EdgeBlockedError}, since no credential was judged.
    */
   onUnauthorized?: () => Error;
   /**
@@ -423,7 +424,8 @@ function hostOf(baseUrl: string): string {
  * Consolidates the structurally-identical `client.ts#doRequest` across
  * splitwise/tempo/ioffice/app-store-connect/zola. The retry/401/429 behavior is
  * the hardened superset: 401 → {@link UnauthorizedError} (never echoing the
- * token), 429 → sleep(`delayMs`) and replay up to `count` times then
+ * token) unless the 401 is a CDN/WAF refusal page, which is an
+ * {@link EdgeBlockedError} like any other blocked status, 429 → sleep(`delayMs`) and replay up to `count` times then
  * {@link RateLimitedError}, 204/empty → `undefined`, other non-2xx →
  * {@link formatApiError}.
  */
@@ -623,12 +625,39 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     }
   }
 
+  /**
+   * The error a 401 becomes. Usually {@link UnauthorizedError} (or the
+   * consumer's `onUnauthorized`), exactly as before — but CloudFront, Akamai
+   * and Imperva sometimes refuse at the edge WITH a 401, and calling that a
+   * bad token sends somebody to re-sign in with a credential nothing ever
+   * looked at. So the refusal is checked for first, by the same
+   * {@link detectEdgeBlock} rule every other status gets.
+   *
+   * A JSON 401 is the API's own answer, so its body is not read at all (no
+   * refusal page is JSON); `cf-mitigated` is still honoured from the headers.
+   * Any other body is read under the request's timeout, and a body that cannot
+   * be read is treated as no evidence of a block. The body is only scanned,
+   * never echoed, so the token cannot leak through it.
+   */
+  async function unauthorizedOrEdge(attempt: Attempt, method: string, path: string): Promise<Error> {
+    const res = attempt.res;
+    let text = '';
+    if (/json/i.test(res.headers.get('content-type') ?? '')) {
+      attempt.done();
+    } else {
+      text = await readBody(attempt, (r) => r.text()).catch(() => '');
+    }
+    const edge = detectEdgeBlock({ body: text, headers: res.headers, status: res.status });
+    if (edge) return new EdgeBlockedError(res.status, edge.vendor, { service, method, path });
+    return unauthorized();
+  }
+
   async function fetchJson<T>(method: string, path: string, opt: RequestOptions = {}): Promise<T> {
     const attempt = await send(method, path, opt);
     const res = attempt.res;
 
-    if (res.status === 401 || res.status === 429 || res.status === 204) attempt.done();
-    if (res.status === 401) throw unauthorized();
+    if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);
+    if (res.status === 429 || res.status === 204) attempt.done();
     if (res.status === 429) throw rateLimited();
     if (res.status === 204) return undefined as T;
 
@@ -645,8 +674,8 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     const attempt = await send(method, path, { ...opt, headers });
     const res = attempt.res;
 
-    if (res.status === 401 || res.status === 429) attempt.done();
-    if (res.status === 401) throw unauthorized();
+    if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);
+    if (res.status === 429) attempt.done();
     if (res.status === 429) throw rateLimited();
 
     const text = await readBody(attempt, (r) => r.text());
@@ -661,8 +690,8 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     const attempt = await send(method, path, { ...opt, headers });
     const res = attempt.res;
 
-    if (res.status === 401 || res.status === 429) attempt.done();
-    if (res.status === 401) throw unauthorized();
+    if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);
+    if (res.status === 429) attempt.done();
     if (res.status === 429) throw rateLimited();
 
     if (!res.ok) {

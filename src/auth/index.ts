@@ -98,7 +98,7 @@ import {
   createHelpfulError,
   McpToolError,
 } from '../errors/index.js';
-import { parseCookieJar } from '../http/index.js';
+import { parseCookieJar, detectEdgeBlock, EdgeBlockedError } from '../http/index.js';
 
 // ---------------------------------------------------------------------------
 // createAuthResolver — three-path (env → fetchproxy → helpful error)
@@ -613,8 +613,14 @@ export class OAuth2RotationPersistError extends McpToolError {
   }
 }
 
-/** Whether a failed exchange is worth another attempt (not a rejected grant). */
+/**
+ * Whether a failed exchange is worth another attempt (not a rejected grant).
+ * An edge block is not either: the next attempt leaves the same host with the
+ * same fingerprint and meets the same refusal, and hammering a WAF that has
+ * already flagged this host is how a challenge becomes a ban.
+ */
 function isRetryable(err: unknown): boolean {
+  if (err instanceof EdgeBlockedError) return false;
   if (!(err instanceof OAuth2RefreshError)) return true;
   return err.status >= 500 || err.status === 429 || err.status === 408;
 }
@@ -642,7 +648,11 @@ const sleep = (ms: number): Promise<void> =>
  * Errors run through {@link truncateErrorMessage} (redaction + truncation)
  * before surfacing, so an upstream error body can't leak a bearer token or
  * blow up a tool result. A non-2xx throws an {@link OAuth2RefreshError}
- * carrying the status.
+ * carrying the status — unless the body is a CDN/WAF refusal page (by
+ * `detectEdgeBlock`), which throws `EdgeBlockedError` instead: the grant never
+ * reached the endpoint, so {@link TokenManager}'s default revocation check
+ * keeps the stored refresh token rather than clearing it. A block is not
+ * retried.
  */
 export function createOAuth2Refresher(
   opts: OAuth2RefresherOptions,
@@ -678,6 +688,14 @@ export function createOAuth2Refresher(
 
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
+      // A CDN/WAF refusal page is not the token endpoint's verdict: the grant
+      // never reached it. Named BEFORE the OAuth2RefreshError below, because
+      // TokenManager reads a 4xx one as a revoked refresh token and clears the
+      // store — and with a rotating token that is the only live copy
+      // (chrischall/mcp-host#1015). Scanned on the FULL body: the 200-char cut
+      // below ends before CloudFront's markers.
+      const edge = detectEdgeBlock({ body: errText, headers: res.headers, status: res.status });
+      if (edge) throw new EdgeBlockedError(res.status, edge.vendor, endpointWhere(opts.endpoint));
       throw new OAuth2RefreshError(
         res.status,
         `OAuth2 token refresh failed: ${res.status} ${res.statusText}: ${truncateErrorMessage(errText, 200)}`,
@@ -750,6 +768,16 @@ export function createOAuth2Refresher(
     inFlight = p;
     return p;
   };
+}
+
+/** The token endpoint as {@link EdgeBlockedError} names it: host, plus `POST <path>`. */
+function endpointWhere(endpoint: string): { service: string; method?: string; path?: string } {
+  try {
+    const u = new URL(endpoint);
+    return { service: u.host, method: 'POST', path: u.pathname };
+  } catch {
+    return { service: 'the OAuth2 token endpoint' };
+  }
 }
 
 function messageOf(err: unknown): string {
