@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, utimesSync, mkdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, utimesSync, mkdirSync, chmodSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -91,6 +91,38 @@ describe('withFileLock (freshbooks-mcp withRefreshLock, extracted)', () => {
     expect(ran).toBe(true);
   });
 
+  // mcp-utils#330: a lock file can exist before its owner is written (an
+  // O_EXCL create followed by a write). Reading it as "dead" let a second
+  // process break a lock that was held — two holders at once.
+  it('does not break an EMPTY (ownerless) lock file before staleMs', async () => {
+    writeFileSync(lockPath, '');
+    let ran = false;
+    const p = withFileLock(lockPath, async () => {
+      ran = true;
+    }, { pollMs: 1, staleMs: 60_000 });
+    await tick(30);
+    expect(ran).toBe(false);
+    expect(existsSync(lockPath)).toBe(true);
+    rmSync(lockPath);
+    await p;
+    expect(ran).toBe(true);
+  });
+
+  it('does break an empty or unparseable lock file once it is older than staleMs', async () => {
+    writeFileSync(lockPath, 'garbage');
+    const old = (Date.now() - 120_000) / 1000;
+    utimesSync(lockPath, old, old);
+    expect(await withFileLock(lockPath, async () => 'ran', { pollMs: 1, staleMs: 60_000 })).toBe('ran');
+  });
+
+  it('never exposes an ownerless lock file: the owner is in place the moment the lock exists', async () => {
+    await withFileLock(lockPath, async () => {
+      expect(readFileSync(lockPath, 'utf8')).toMatch(new RegExp(`^${process.pid}:`));
+    });
+    // and no staging file is left beside it
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
   it('does not remove a lock it no longer owns (broken as stale and re-taken)', async () => {
     await withFileLock(lockPath, async () => {
       // Someone broke our lock and took it over while we were working.
@@ -153,6 +185,13 @@ describe('withFileLockSync', () => {
 
   it('waits out a live holder until it goes stale, then takes over', () => {
     writeFileSync(lockPath, `${process.pid}:another-owner`);
+    const started = Date.now();
+    expect(withFileLockSync(lockPath, () => 'ran', { pollMs: 2, staleMs: 60 })).toBe('ran');
+    expect(Date.now() - started).toBeGreaterThanOrEqual(50);
+  });
+
+  it('waits out an EMPTY lock file until staleMs rather than breaking it at once', () => {
+    writeFileSync(lockPath, '');
     const started = Date.now();
     expect(withFileLockSync(lockPath, () => 'ran', { pollMs: 2, staleMs: 60 })).toBe('ran');
     expect(Date.now() - started).toBeGreaterThanOrEqual(50);

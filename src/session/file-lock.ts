@@ -10,8 +10,9 @@
  * For a credential that rotates on use, "dropped" means an account lockout.
  *
  * The reference implementation is freshbooks-mcp's `withRefreshLock`
- * (`src/auth.ts`, fleet-audit#1008): an `O_EXCL` lock file next to the state
- * file holding `<pid>:<uuid>`; a lock whose holder is dead, or that has been
+ * (`src/auth.ts`, fleet-audit#1008): an exclusively-created lock file next to
+ * the state file holding `<pid>:<uuid>` (staged and hard-linked into place, so
+ * it never exists ownerless — mcp-utils#330); a lock whose holder is dead, or that has been
  * held past `staleMs`, is broken rather than waited on forever; release is
  * owner-checked so a lock broken as stale and re-taken by someone else is not
  * removed out from under them. If the lock file cannot be created at all (an
@@ -22,7 +23,18 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  linkSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
 import { dirname } from 'node:path';
 
 /** Options for {@link withFileLock} and {@link withFileLockSync}. */
@@ -46,11 +58,23 @@ export interface FileLockOptions {
 
 const DEFAULT_POLL_MS = 25;
 
-/** Whether the process named in a lock file is still running. */
+/**
+ * Whether the process named in a lock file is still running.
+ *
+ * Content that names no pid — empty, or not yet written by a holder that
+ * created the file a moment ago — counts as ALIVE: it proves nothing about the
+ * holder, and reading it as dead let a second process break a held lock
+ * (mcp-utils#330). The `staleMs` age check still breaks it if it lingers.
+ */
 function holderAlive(lockPath: string): boolean {
+  let pid: number;
   try {
-    const pid = Number.parseInt(readFileSync(lockPath, 'utf8'), 10);
-    if (!Number.isInteger(pid) || pid <= 0) return false;
+    pid = Number.parseInt(readFileSync(lockPath, 'utf8'), 10);
+  } catch {
+    return true; // unreadable now (released, or racing) — let the caller retry
+  }
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  try {
     process.kill(pid, 0);
     return true;
   } catch (err) {
@@ -59,17 +83,48 @@ function holderAlive(lockPath: string): boolean {
   }
 }
 
+/**
+ * Create the lock file with its owner ALREADY in it: write a private staging
+ * file, then hard-link it to `lockPath`. `link` fails with EEXIST exactly like
+ * an `O_EXCL` create, but the file appears complete, so no reader ever sees an
+ * ownerless lock. On a filesystem without hard links, fall back to `O_EXCL`
+ * create + write (where the ownerless window is covered by `holderAlive`).
+ */
+function createLockFile(lockPath: string, owner: string): void {
+  const staging = `${lockPath}.${randomUUID()}.tmp`;
+  let linked = false;
+  try {
+    writeFileSync(staging, owner, { mode: 0o600, flag: 'wx' });
+    linkSync(staging, lockPath);
+    linked = true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EEXIST' && existsSync(staging)) throw err; // the lock is held
+    if (code !== 'EPERM' && code !== 'ENOTSUP' && code !== 'EOPNOTSUPP' && code !== 'ENOSYS' && code !== 'EXDEV') {
+      throw err;
+    }
+  } finally {
+    try {
+      unlinkSync(staging);
+    } catch {
+      /* never created */
+    }
+  }
+  if (linked) return;
+  const fd = openSync(lockPath, 'wx', 0o600);
+  try {
+    writeSync(fd, owner);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 type Attempt = 'acquired' | 'unlockable' | 'busy';
 
 /** One acquisition attempt; breaks a dead or stale lock so the next attempt can win. */
 function tryAcquire(lockPath: string, owner: string, staleMs: number): Attempt {
   try {
-    const fd = openSync(lockPath, 'wx', 0o600);
-    try {
-      writeSync(fd, owner);
-    } finally {
-      closeSync(fd);
-    }
+    createLockFile(lockPath, owner);
     return 'acquired';
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return 'unlockable';
