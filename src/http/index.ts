@@ -26,6 +26,7 @@ export * from './response-cache.js';
 export * from './net-atoms.js';
 
 import { parseRetryAfterMs } from './net-atoms.js';
+import { retryAfterToMs } from '../internal/retry-after.js';
 
 // ---------------------------------------------------------------------------
 // createApiClient
@@ -126,9 +127,13 @@ export interface ApiClientOptions {
   onUnauthorized?: () => Error;
   /**
    * Override the error thrown when a 429 persists past the retry budget.
-   * Defaults to {@link RateLimitedError}.
+   * Defaults to {@link RateLimitedError}. Receives a {@link RateLimitContext}
+   * describing that final 429 — its parsed `Retry-After` and whether a CDN/WAF
+   * page answered it — read before the body is discarded, so a consumer no
+   * longer has to capture the response at the `fetchImpl` seam (musicbrainz,
+   * viator). A zero-argument hook still works.
    */
-  onRateLimited?: () => Error;
+  onRateLimited?: (ctx: RateLimitContext) => Error;
   /** Injectable fetch (for tests). Defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
   /** Injectable sleep (for tests). Defaults to `setTimeout`. */
@@ -142,6 +147,35 @@ export interface ApiClientOptions {
    * disable (default).
    */
   timeout?: number;
+}
+
+/**
+ * What {@link ApiClientOptions.onRateLimited} is told about the 429 that
+ * exhausted the retry budget (the LAST response, not the first).
+ */
+export interface RateLimitContext {
+  /** The response status (429). */
+  status: number;
+  /** The raw `Retry-After` header, or `null` when absent. */
+  retryAfter: string | null;
+  /**
+   * The wait `Retry-After` asks for, in ms: delta-seconds or an HTTP-date
+   * (clamped at 0 once past). Uncapped — `maxRetryAfterMs` bounds the client's
+   * own sleep, not this report. `undefined` when absent or unparseable.
+   */
+  retryAfterMs: number | undefined;
+  /**
+   * The CDN/WAF that answered, per {@link detectEdgeBlock}, or `null`. A 429
+   * can be an edge refusal page rather than the API's rate limit; return an
+   * {@link EdgeBlockedError} for it to say so. A JSON body is the API's own
+   * answer and is not read (`cf-mitigated` is still honoured); any other body
+   * is read under the request timeout, and an unreadable one is no evidence.
+   */
+  edgeBlock: { vendor: string } | null;
+  /** The request method, as passed. */
+  method: string;
+  /** The request path, as passed. */
+  path: string;
 }
 
 /** A request body and/or extra headers for a single call. */
@@ -228,12 +262,18 @@ export class UnauthorizedError extends Error {
   }
 }
 
-/** Thrown when a 429 persists after the retry budget is exhausted. */
+/**
+ * Thrown when a 429 persists after the retry budget is exhausted.
+ * `retryAfterMs` is the final response's `Retry-After` as a wait in ms (see
+ * {@link RateLimitContext.retryAfterMs}), when it sent a parseable one.
+ */
 export class RateLimitedError extends Error {
   readonly status = 429;
-  constructor(service: string) {
+  readonly retryAfterMs: number | undefined;
+  constructor(service: string, retryAfterMs?: number) {
     super(`Rate limited (429) by ${service} after retries.`);
     this.name = 'RateLimitedError';
+    this.retryAfterMs = retryAfterMs;
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
@@ -490,7 +530,6 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   const doFetch = opts.fetchImpl ?? fetch;
   const sleep = opts.sleep ?? defaultSleep;
   const unauthorized = (): Error => (opts.onUnauthorized ? opts.onUnauthorized() : new UnauthorizedError(service));
-  const rateLimited = (): Error => (opts.onRateLimited ? opts.onRateLimited() : new RateLimitedError(service));
   const retryStatuses = retry.statuses ?? [429];
   const timeoutMs = opts.timeout;
 
@@ -722,14 +761,41 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     return unauthorized();
   }
 
+  /**
+   * The error an exhausted 429 becomes. Without a hook: a
+   * {@link RateLimitedError} carrying the parsed `Retry-After`, the body
+   * discarded unread exactly as before. With one: the body is first scanned
+   * for an edge refusal page (same rule and JSON short-cut as
+   * {@link unauthorizedOrEdge}), then the hook gets the whole context.
+   */
+  async function rateLimitedError(attempt: Attempt, method: string, path: string): Promise<Error> {
+    const res = attempt.res;
+    const retryAfter = res.headers.get('retry-after');
+    const retryAfterMs = retryAfterToMs(retryAfter);
+    if (!opts.onRateLimited) {
+      discard(attempt);
+      return new RateLimitedError(service, retryAfterMs);
+    }
+    let text = '';
+    if (/json/i.test(res.headers.get('content-type') ?? '')) {
+      discard(attempt);
+    } else {
+      text = await readBody(attempt, (r) => r.text()).catch(() => '');
+    }
+    const edgeBlock = detectEdgeBlock({ body: text, headers: res.headers, status: res.status });
+    return opts.onRateLimited({ status: res.status, retryAfter, retryAfterMs, edgeBlock, method, path });
+  }
+
   async function fetchJson<T>(method: string, path: string, opt: RequestOptions = {}): Promise<T> {
     const attempt = await send(method, path, opt);
     const res = attempt.res;
 
     if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);
-    if (res.status === 429 || res.status === 204) discard(attempt);
-    if (res.status === 429) throw rateLimited();
-    if (res.status === 204) return undefined as T;
+    if (res.status === 429) throw await rateLimitedError(attempt, method, path);
+    if (res.status === 204) {
+      discard(attempt);
+      return undefined as T;
+    }
 
     const text = await readBody(attempt, (r) => r.text());
     if (!res.ok) {
@@ -745,8 +811,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     const res = attempt.res;
 
     if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);
-    if (res.status === 429) discard(attempt);
-    if (res.status === 429) throw rateLimited();
+    if (res.status === 429) throw await rateLimitedError(attempt, method, path);
 
     const text = await readBody(attempt, (r) => r.text());
     if (!res.ok) {
@@ -761,8 +826,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     const res = attempt.res;
 
     if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);
-    if (res.status === 429) discard(attempt);
-    if (res.status === 429) throw rateLimited();
+    if (res.status === 429) throw await rateLimitedError(attempt, method, path);
 
     if (!res.ok) {
       const text = await readBody(attempt, (r) => r.text()).catch((err: unknown) => {

@@ -723,6 +723,25 @@ await api.fetchJson('POST', '/3/user/favorite', { form: { venue_id: 42, favorite
 await api.fetchHtml('POST', '/ws/2/tag', { rawBody: xml, contentType: 'application/xml; charset=utf-8' });
 ```
 
+`onRateLimited(ctx)` is told about the 429 that exhausted the retry budget —
+read before its body is discarded: `{ status, retryAfter, retryAfterMs,
+edgeBlock, method, path }`. `retryAfterMs` is the wait `Retry-After` asks for
+(delta-seconds or an HTTP-date, uncapped; `undefined` when absent or
+unparseable) and `edgeBlock` is `detectEdgeBlock`'s verdict on that response
+(`{ vendor }` or `null`), so a hook can say "blocked by CloudFront" instead of
+"rate limited" without capturing the response at the `fetchImpl` seam. A JSON
+429 body is not read (`cf-mitigated` still counts). A zero-argument hook still
+works, and without a hook the default `RateLimitedError` now carries
+`retryAfterMs` (the body is still discarded unread). The same `ctx` reaches
+`createGraphqlClient`'s `onRateLimited`.
+
+```ts
+onRateLimited: ({ edgeBlock, retryAfterMs, method, path }) =>
+  edgeBlock
+    ? new EdgeBlockedError(429, edgeBlock.vendor, { service: 'Viator', method, path })
+    : new RateLimitError('Viator', retryAfterMs === undefined ? undefined : Math.ceil(retryAfterMs / 1000)),
+```
+
 `api.fetchRaw(method, path)` is the binary path `fetchJson` can't express —
 returns `{ status, contentType, headers, bytes }` with the same 401/429/error
 mapping (gzip sales reports, PNG maps, attachment downloads).
@@ -1738,7 +1757,7 @@ maps every outcome onto the package's existing error types:
 | `errors[]` at **any** status (HTTP 200 included), even beside partial `data` | `GraphqlResponseError` — messages joined, redacted, truncated; `.errors`, `.data`, `.codes`, `.status` |
 | auth failure (`isAuthError`, default: 401 or `UNAUTHENTICATED`/`UNAUTHORIZED` code) | after one `onAuthError` replay: `onUnauthorized()` or `UnauthorizedError` |
 | CDN/WAF refusal page or `cf-mitigated` (any 4xx, or a challenge at 200) | `EdgeBlockedError` — never mistaken for an auth or permission failure |
-| 429 past the `retry` budget | `onRateLimited()` or `RateLimitedError` |
+| 429 past the `retry` budget | `onRateLimited(ctx)` (status, `Retry-After`) or `RateLimitedError` (`.retryAfterMs`) |
 | non-JSON 4xx/5xx | `UpstreamHttpError` (redacted `formatApiError` excerpt) |
 | non-JSON or empty 2xx, or no `data` | `GraphqlResponseError` ("usually a challenge or error page") |
 | timeout (default 30 s, body read included) / dropped connection | `GraphqlTransportError` — `.timedOut`, `.outcomeUnknown` |

@@ -317,6 +317,24 @@ describe('createGraphqlClient — retry', () => {
     await expect(client(impl, { onRateLimited: () => custom }).request('{ x }')).rejects.toBe(custom);
   });
 
+  it('hands onRateLimited the final 429 status and Retry-After', async () => {
+    const { impl } = fakeFetch({ status: 429, body: {}, headers: { 'retry-after': '12' } });
+    const seen: unknown[] = [];
+    await expect(
+      client(impl, { retry: { count: 0, delayMs: 0 }, onRateLimited: (ctx) => (seen.push(ctx), new Error('rl')) }).request('{ x }'),
+    ).rejects.toThrow('rl');
+    expect(seen).toEqual([
+      { status: 429, retryAfter: '12', retryAfterMs: 12_000, edgeBlock: null, method: 'POST', path: expect.any(String) },
+    ]);
+  });
+
+  it('an exhausted 429 RateLimitedError carries retryAfterMs', async () => {
+    const { impl } = fakeFetch({ status: 429, body: {}, headers: { 'retry-after': '5' } });
+    const err = await client(impl, { retry: { count: 0, delayMs: 0 } }).request('{ x }').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RateLimitedError);
+    expect((err as RateLimitedError).retryAfterMs).toBe(5000);
+  });
+
   it('honours Retry-After when asked', async () => {
     const { impl } = fakeFetch({ status: 429, body: {}, headers: { 'retry-after': '3' } }, { body: { data: {} } });
     const sleep = vi.fn(async () => {});
