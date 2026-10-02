@@ -15,11 +15,14 @@
  *     escaped strings.
  *   - `extractPlainTextFromHtml` — dependency-free script/style strip + entity
  *     decode used to render Infinite Campus message bodies as plain text.
+ *   - `htmlToReadableText` — the block-aware DOM text extractor (onthecheap):
+ *     block boundaries become word breaks, inline markup stays joined, code
+ *     elements are dropped, every entity is decoded.
  *   - `urlToPath` / `locationToSlug` / `buildIdExtractor` — the small URL atoms
  *     that were byte-identical across the cohort.
  */
 
-import { parse, type HTMLElement } from 'node-html-parser';
+import { parse, NodeType, type HTMLElement, type Node, type TextNode } from 'node-html-parser';
 import { asciiLower } from '../internal/ascii.js';
 
 export type { HTMLElement };
@@ -318,6 +321,92 @@ function codePointOr(code: number, raw: string): string {
   } catch {
     return raw;
   }
+}
+
+// ---------------------------------------------------------------------------
+// htmlToReadableText
+// ---------------------------------------------------------------------------
+
+/** Elements whose content is code or data, never readable text. */
+const NON_TEXT_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'IFRAME', 'SVG']);
+
+/**
+ * Elements that start a new line when rendered. Their boundaries become a word
+ * break; inline elements (`<b>`, `<a>`, …) do not, so `<b>F</b>ree` stays one
+ * word.
+ */
+const BREAK_TAGS = new Set([
+  'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'BR', 'DD', 'DIV', 'DL', 'DT',
+  'FIGCAPTION', 'FIGURE', 'FOOTER', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HEADER',
+  'HR', 'LI', 'MAIN', 'NAV', 'OL', 'P', 'PRE', 'SECTION', 'TABLE', 'TD', 'TH',
+  'TR', 'UL',
+]);
+
+/** Options for {@link htmlToReadableText}. */
+export interface ReadableTextOptions {
+  /**
+   * Cap the result at this many characters (plus a trailing `…`). The cut
+   * lands on the last word boundary when that keeps at least 60% of the
+   * budget, otherwise mid-word. Omit for no cap.
+   */
+  limit?: number;
+}
+
+/**
+ * Render HTML as readable plain text, the way a browser would lay the words
+ * out: markup stripped, every HTML entity decoded, whitespace collapsed.
+ *
+ * Unlike {@link extractPlainTextFromHtml} (the dependency-free regex version,
+ * kept unchanged for its callers) this walks the DOM, so:
+ *   - **block** boundaries (`<p>`, `<div>`, `<li>`, `<td>`, `<br>`, headings, …)
+ *     become word breaks — `<p>One</p><p>Two</p>` → `One Two`, not `OneTwo`;
+ *   - **inline** markup stays joined — `<b>F</b>ree` → `Free`, not `F ree`;
+ *   - `<script>`/`<style>` (incl. JSON-LD), `<noscript>`, `<template>`,
+ *     `<iframe>` and `<svg>` content is dropped, and comments are ignored;
+ *   - the full named-entity table is decoded (`&eacute;`, `&ndash;`, …).
+ *
+ * Use it for article / post / message bodies. Iterative, so hostile nesting
+ * depth cannot overflow the stack. Hoisted from onthecheap-mcp's `htmlToText`
+ * (fleet audit #1083).
+ *
+ * @param html The HTML (fragment or full document). `null`/`undefined` → `''`.
+ * @returns The readable text (`''` for empty input).
+ */
+export function htmlToReadableText(html: string | null | undefined, opts: ReadableTextOptions = {}): string {
+  if (!html) return '';
+  const parts: string[] = [];
+  // Explicit stack instead of recursion; a `string` entry is a pending break
+  // to emit after an element's children.
+  // node-html-parser surfaces a leading `<!doctype …>` as a TEXT node, so it
+  // would read as words; drop it before parsing (anchored, so linear).
+  const stack: Array<Node | string> = [parse(html.replace(/^\s*<!doctype[^>]*>/i, ''))];
+  while (stack.length > 0) {
+    const item = stack.pop()!;
+    if (typeof item === 'string') {
+      parts.push(item);
+      continue;
+    }
+    if (item.nodeType === NodeType.TEXT_NODE) {
+      parts.push((item as TextNode).text); // `.text` is entity-decoded
+      continue;
+    }
+    if (item.nodeType !== NodeType.ELEMENT_NODE) continue; // comments
+    const tag = (item as HTMLElement).tagName ?? '';
+    if (NON_TEXT_TAGS.has(tag)) continue;
+    const breaks = BREAK_TAGS.has(tag);
+    if (breaks) {
+      parts.push(' ');
+      stack.push(' ');
+    }
+    const children = item.childNodes;
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]!);
+  }
+  const text = parts.join('').replace(/\s+/g, ' ').trim();
+  const { limit } = opts;
+  if (limit === undefined || text.length <= limit) return text;
+  const cut = text.slice(0, limit);
+  const boundary = cut.lastIndexOf(' ');
+  return `${(boundary > limit * 0.6 ? cut.slice(0, boundary) : cut).trimEnd()}…`;
 }
 
 /**

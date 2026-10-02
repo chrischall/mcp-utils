@@ -749,8 +749,8 @@ deepMapStringField(payload, 'eventDate', dmyToIso);     // '28-08-2025' → '202
 ### `scrape` — SSR JSON-store & page extraction (zero-dep)
 
 `decodeHtmlEntities`, `stripHtml`, `sanitizeJsLiterals`, `matchBalanced`,
-`extractJsonAfterMarker`, `extractJsonLdBlocks`, `findJsonLdEntity`,
-`ogContent`, `findArrayByShape`, `deepCollectArrays`, `deepFindObject`,
+`extractJsonAfterMarker`, `extractJsonKeyAfterMarker`, `extractJsonLdBlocks`,
+`findJsonLdEntity`, `ogContent`, `findArrayByShape`, `deepCollectArrays`, `deepFindObject`,
 `isCloudflareChallenge`, `stripJsonGuard`.
 
 Pure string/JSON primitives for server-rendered pages — no `node-html-parser`
@@ -766,6 +766,10 @@ import {
 
 // A redux/__NEXT_DATA__-style store (JS literals repaired via sanitize):
 const store = extractJsonAfterMarker(html, ['window.$REDUX_STATE', '"appState"'], { sanitize: true });
+
+// One top-level slice of a store that can't be parsed whole (a sibling embeds
+// `function` values). `undefined` = absent/unparseable; `null` is a real value.
+const calendar = extractJsonKeyAfterMarker(html, 'window.$REDUX_STATE', 'calendar', { sanitize: true });
 
 // schema.org / OpenGraph readers:
 const event = findJsonLdEntity(html, 'Event');      // checks blocks, @graph, mainEntity
@@ -1351,11 +1355,21 @@ import {
   findLinksUnderHeading,
   extractJsonFromHtml,
   extractPlainTextFromHtml,
+  htmlToReadableText,
 } from '@chrischall/mcp-utils/html';
 ```
 
 Requires the optional `node-html-parser` peer. Also provides `urlToPath`,
 `locationToSlug`, and `buildIdExtractor`.
+
+Two HTML-to-text renderers, on purpose. `htmlToReadableText(html, { limit })`
+walks the DOM: block boundaries (`<p>`, `<li>`, `<td>`, `<br>`, …) become word
+breaks, inline markup stays joined (`<b>F</b>ree` → `Free`), `<script>` /
+`<style>` / JSON-LD / `<noscript>` / `<template>` / `<iframe>` / `<svg>` content
+is dropped, and every named entity decodes — use it for article, post and
+message bodies. `extractPlainTextFromHtml` is the older dependency-free regex
+pass (every tag becomes a space, so `<b>F</b>ree` → `F ree`; a short entity
+table); it is unchanged so existing callers' output does not shift.
 
 ### `test` — in-memory test harness *(subpath)*
 
