@@ -36,8 +36,10 @@ import {
   detectEdgeBlock,
   formatApiError,
   parseRetryAfterMs,
+  type RateLimitContext,
   type RetryPolicy,
 } from '../http/index.js';
+import { retryAfterToMs } from '../internal/retry-after.js';
 import { isReadOnlyGraphqlDocument } from './operation-kind.js';
 
 /** One entry of a GraphQL response's `errors[]`. */
@@ -127,8 +129,13 @@ export interface GraphqlClientOptions {
   onAuthError?: () => Promise<void> | void;
   /** The error an unrecovered auth failure throws. Defaults to {@link UnauthorizedError}. */
   onUnauthorized?: () => Error;
-  /** The error an exhausted 429 throws. Defaults to {@link RateLimitedError}. */
-  onRateLimited?: () => Error;
+  /**
+   * The error an exhausted 429 throws. Defaults to {@link RateLimitedError}.
+   * Receives the same {@link RateLimitContext} as `createApiClient`'s hook
+   * (`edgeBlock` is always `null` here: an edge-refused 429 has already thrown
+   * {@link EdgeBlockedError}). A zero-argument hook still works.
+   */
+  onRateLimited?: (ctx: RateLimitContext) => Error;
   /**
    * Claim a failed response before the default mapping — return an error to
    * throw it, or `undefined` to fall through. Runs after any auth replay, on
@@ -433,7 +440,13 @@ export function createGraphqlClient(opts: GraphqlClientOptions): GraphqlClient {
         const edge = detectEdgeBlock({ body: text, headers: res.headers, status });
         if (edge) throw new EdgeBlockedError(status, edge.vendor, { service, method: 'POST', path });
       }
-      if (status === 429) throw opts.onRateLimited ? opts.onRateLimited() : new RateLimitedError(service);
+      if (status === 429) {
+        const retryAfter = res.headers.get('retry-after');
+        const retryAfterMs = retryAfterToMs(retryAfter);
+        throw opts.onRateLimited
+          ? opts.onRateLimited({ status, retryAfter, retryAfterMs, edgeBlock: null, method: 'POST', path })
+          : new RateLimitedError(service, retryAfterMs);
+      }
       const envelope = parseEnvelope(text);
       if (envelope === undefined) {
         if (status >= 400 && status !== 401) {
