@@ -948,7 +948,7 @@ deepMapStringField(payload, 'eventDate', dmyToIso);     // '28-08-2025' → '202
 
 `decodeHtmlEntities`, `stripHtml`, `sanitizeJsLiterals`, `matchBalanced`,
 `extractJsonAfterMarker`, `extractJsonKeyAfterMarker`, `extractJsonLdBlocks`,
-`findJsonLdEntity`, `ogContent`, `findArrayByShape`, `deepCollectArrays`, `deepFindObject`,
+`extractNextData`, `extractNextDataText`, `findJsonLdEntity`, `ogContent`, `findArrayByShape`, `deepCollectArrays`, `deepFindObject`,
 `isCloudflareChallenge`, `stripJsonGuard`.
 
 Pure string/JSON primitives for server-rendered pages — no `node-html-parser`
@@ -962,7 +962,13 @@ import {
   findArrayByShape, isCloudflareChallenge, stripJsonGuard,
 } from '@chrischall/mcp-utils';
 
-// A redux/__NEXT_DATA__-style store (JS literals repaired via sanitize):
+// Next.js hydration data — `<script id="__NEXT_DATA__">`, tag-bounded, linear,
+// size-capped; undefined (never a throw) when absent/unparseable:
+const pageProps = extractNextData(html, { select: 'pageProps' });
+const appData = extractNextData(html, { id: '__APP_DATA__' });   // same-shaped tag
+const raw = extractNextDataText(html);  // the body text, to tell "absent" from "bad JSON"
+
+// A redux-style JS store (JS literals repaired via sanitize):
 const store = extractJsonAfterMarker(html, ['window.$REDUX_STATE', '"appState"'], { sanitize: true });
 
 // One top-level slice of a store that can't be parsed whole (a sibling embeds
@@ -982,7 +988,12 @@ const data = JSON.parse(stripJsonGuard(body));      // )]}'  while(1);  for(;;);
 (`_cf_chl_opt`, `<title>Just a moment`) — never `cdn-cgi/challenge-platform`,
 which Cloudflare inlines on cleared pages too. `decodeHtmlEntities` decodes
 `&amp;` LAST so attribute-escaped JSON survives one level; `matchBalanced` is
-the string/escape-aware bracket walker regex can't replace.
+the string/escape-aware bracket walker regex can't replace. `extractNextData`
+finds the tag in one forward pass — `indexOf` per `<script`, a quote-aware
+attribute walk to its `>`, other scripts' bodies skipped to their `</script` —
+so a page of withheld `>`/`</script>` cannot make it backtrack (the regex it
+replaces took 27 s on 54 KB); the `id` match is exact, and a body over
+`NEXT_DATA_MAX_CHARS` (16 Mi chars, `maxChars` to change) is refused unparsed.
 
 ### `zod` — schema atoms
 
