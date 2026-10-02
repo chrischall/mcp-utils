@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.11.0](https://github.com/chrischall/mcp-utils/compare/v2.10.0...v2.11.0) (2026-10-02)
+
+
+### Features
+
+* **server:** confirm tokens survive a restart and stay single-use across it ([#311](https://github.com/chrischall/mcp-utils/issues/311)) ([9efdb0c](https://github.com/chrischall/mcp-utils/commit/9efdb0cbf850cc4e96ddf7227d8d30fac56c5fa2))
+
+
+### Bug Fixes
+
+* **server:** keep the spent-token store off confirmationFromEnv's top-level options ([#314](https://github.com/chrischall/mcp-utils/issues/314)) ([d5759f8](https://github.com/chrischall/mcp-utils/commit/d5759f8797850a26f2cdec538f9c704cf95869c8)), closes [#312](https://github.com/chrischall/mcp-utils/issues/312)
+
 ## [2.10.0](https://github.com/chrischall/mcp-utils/compare/v2.9.0...v2.10.0) (2026-10-02)
 
 
