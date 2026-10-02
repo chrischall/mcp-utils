@@ -695,6 +695,11 @@ export interface BridgeErrorInfo {
    * MCP's fault) and `capability_denied` (the MCP used a capability it never
    * declared — a bug in the MCP) arrived with @fetchproxy 3.3 support; a consumer that
    * `switch`es exhaustively on this union gains two cases.
+   *
+   * `edge_blocked` (a CDN/WAF refused the request before the site saw it, so
+   * the session was never evaluated — chrischall/mcp-host#1015) is judged as
+   * {@link runBridgeHealthcheck} judges it: only over an `http` or
+   * unclassified error that carries a refusal page or `cf-mitigated`.
    */
   type:
     | 'session_not_ready'
@@ -704,6 +709,7 @@ export interface BridgeErrorInfo {
     | 'protocol'
     | 'capability_unavailable'
     | 'capability_denied'
+    | 'edge_blocked'
     | 'unknown';
   message: string;
   hint?: string;
@@ -814,6 +820,16 @@ function capabilityUnavailableHint(gap: { capabilities: string[]; platform: stri
   );
 }
 
+/** {@link bridgeErrorInfo}'s copy for `edge_blocked`; it has no host label to name. */
+function edgeBlockedHint(vendor: string): string {
+  return (
+    `The site's CDN/WAF (${vendor}) refused the request before it reached the site, so the session was never ` +
+    'evaluated — signing in again or re-pairing ContextMint Bridge will not help. This is usually a block on the ' +
+    "browser's IP address or fingerprint (a VPN, a flagged network, a challenge the tab has not passed): open the " +
+    'site in the tab and clear any challenge, or retry later from a different network.'
+  );
+}
+
 const CAPABILITY_DENIED_HINT =
   'The MCP asked ContextMint Bridge for a capability it never declared, so the request was refused. ' +
   'This is a bug in the MCP, not in your browser or pairing — please report it to the maintainer of the MCP.';
@@ -862,6 +878,13 @@ export function bridgeErrorInfo(err: unknown): BridgeErrorInfo {
     };
   }
   const message = truncateErrorMessage(messageOf(err));
+
+  // Same rule, same gate as runBridgeHealthcheck's edge_blocked arm, so the
+  // tool-boundary envelope and the healthcheck never disagree about one error.
+  if (kind === 'http' || kind === 'other') {
+    const edge = edgeBlockOf(err);
+    if (edge !== null) return { type: 'edge_blocked', message, hint: edgeBlockedHint(edge.vendor) };
+  }
 
   switch (kind) {
     case 'timeout':

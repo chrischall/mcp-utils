@@ -858,6 +858,17 @@ session active in the same call instead of requiring a follow-up
 Includes `SessionStore`, `normalizeOrigin`, `AuthMode`, and `TokenManager`
 (with `TOKEN_REFRESH_SKEW_MS` for proactive refresh).
 
+**A CDN/WAF block never triggers a refresh or a re-login.** `TokenManager.withAuth`
+does not refresh or replay a `401` that is a refusal page (a vendor's page, or
+`cf-mitigated`): nothing judged the token, so a refresh would only spend one —
+and burn a rotation — before the replay met the same edge. The response is
+returned untouched (body still readable, read from a clone) and
+`createApiClient` reports it as `EdgeBlockedError`. Likewise
+`CookieSessionManager.withSession` returns a 4xx/5xx refusal page as-is even
+when `isExpired` flags it, without dropping the session or logging in again;
+it judges a web `Response` or any `{ status, body: string }` result such as
+fetchproxy's `HttpResponse`.
+
 `CookieSessionManager<S, R = Response>` is the cookie-session analog of
 `TokenManager` for sites authenticated by a browser-style cookie session rather
 than a bearer token. It owns *when* to log in (single-flight, so concurrent
@@ -1126,7 +1137,9 @@ re-pairing will not help (on a direct-first consumer's direct leg it points
 at the bridge instead). It is only considered for an `http` or unclassified
 failure, so a bridge that is down, unpaired or missing a capability keeps its
 own answer; `classifyThrown` can still override it, and `hints.edge_blocked`
-overrides the copy. `registerAdaptiveHealthcheckTool`'s bridge arm inherits it.
+overrides the copy. `registerAdaptiveHealthcheckTool`'s bridge arm inherits it,
+and `bridgeErrorInfo` reports the same error as `type: 'edge_blocked'` with the
+same rule and gate, so the tool-boundary envelope and the healthcheck agree.
 
 **The extension link.** A probe that fails with fetchproxy's
 `FetchproxySessionNotReadyError` reports `error.kind: 'session_not_ready'`
