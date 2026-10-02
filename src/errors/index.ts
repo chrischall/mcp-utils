@@ -396,6 +396,67 @@ export function messageOf(err: unknown): string {
 }
 
 /**
+ * `code` values that name a socket/transport-level timeout: Node's
+ * `ETIMEDOUT` and undici's connect / headers / body deadlines.
+ */
+const TIMEOUT_ERROR_CODES: ReadonlySet<string> = new Set([
+  'ETIMEDOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+]);
+
+/** How many `cause` links {@link isTimeoutError} follows (also bounds a cyclic chain). */
+const TIMEOUT_CAUSE_DEPTH = 4;
+
+/**
+ * Whether `err` DECLARES itself a timeout — the one predicate the fleet uses
+ * to decide "retry this row once" and "classify this row as `timeout`"
+ * (fleet-audit#1078: onehome-mcp's own `OneHomeRequestTimeoutError` was
+ * bucketed with "listing not found" because only fetchproxy's class counted).
+ *
+ * Duck-typed (no `instanceof`, so any package's class qualifies and this core
+ * module stays zero-dep). An error is a timeout when, on it or on a short
+ * `cause` chain (undici wraps socket errors in `TypeError('fetch failed')`):
+ *
+ *  - its `name` is `TimeoutError` or ENDS in `TimeoutError` — covers
+ *    `AbortSignal.timeout()`'s `DOMException`, mcp-utils' `RequestTimeoutError`,
+ *    `@fetchproxy/server`'s `FetchproxyTimeoutError`, and any consumer class
+ *    following the convention (e.g. `OneHomeRequestTimeoutError`);
+ *  - it carries the documented marker **`timedOut: true`** — the way to opt a
+ *    class in without renaming it (mcp-utils' `GraphqlTransportError` sets it);
+ *  - its `code` is `ETIMEDOUT` or one of undici's `UND_ERR_*_TIMEOUT` codes.
+ *
+ * NOT a timeout, deliberately:
+ *  - a caller CANCELLATION — a link named `AbortError`, because retrying
+ *    something the user cancelled is wrong (and a bare `AbortError` cannot
+ *    say whether a deadline caused it);
+ *  - a link with an explicit `timedOut: false` (it has declared otherwise).
+ *
+ * The chain is read outside-in and the FIRST link that declares anything
+ * (timeout or not) decides, so a timeout class that wraps its own timer's
+ * `AbortError` as `cause` is still a timeout, and an `AbortError` is never
+ * promoted by what it wraps. Plain links in between are skipped. Also NOT a
+ * timeout:
+ *  - an error that merely says "timed out" in its message — the message is
+ *    upstream-controlled text, not a declaration.
+ */
+export function isTimeoutError(err: unknown): boolean {
+  let cur: unknown = err;
+  for (let depth = 0; depth < TIMEOUT_CAUSE_DEPTH && cur !== null && typeof cur === 'object'; depth++) {
+    const e = cur as { name?: unknown; timedOut?: unknown; code?: unknown; cause?: unknown };
+    const name = typeof e.name === 'string' ? e.name : '';
+    // The OUTERMOST link that says anything decides: a wrapper's own
+    // declaration outranks whatever it wraps.
+    if (name === 'AbortError' || e.timedOut === false) return false;
+    if (name.endsWith('TimeoutError') || e.timedOut === true) return true;
+    if (typeof e.code === 'string' && TIMEOUT_ERROR_CODES.has(e.code)) return true;
+    cur = e.cause;
+  }
+  return false;
+}
+
+/**
  * Prepend the tool name to an error's context and return an {@link McpToolError},
  * preserving any `hint` and chaining the original via `cause`. The message is
  * run through {@link truncateErrorMessage} (redaction + truncation). Re-wrapping
