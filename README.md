@@ -36,6 +36,7 @@ import light:
 | `@chrischall/mcp-utils/session` | session registry, session store, state persistence, token manager, cookie-session manager |
 | `@chrischall/mcp-utils/fetchproxy` | fetchproxy transport adapter, bot-wall / retry / concurrency helpers |
 | `@chrischall/mcp-utils/healthcheck` | credential-style healthcheck factory (no fetchproxy peer needed) |
+| `@chrischall/mcp-utils/graphql` | GraphQL POST transport + operation-kind lexer (no optional peers) |
 | `@chrischall/mcp-utils/html` | opt-in HTML scraping helpers (needs `node-html-parser`) |
 | `@chrischall/mcp-utils/scrape` | convenience alias for the zero-dep `scrape` module (also in the core barrel) |
 | `@chrischall/mcp-utils/test` | in-memory test harness for tool registration |
@@ -1342,6 +1343,63 @@ exist. And **`CredentialState` carries a source label plus a non-secret
 and a healthcheck is the tool people paste into a chat when something is
 broken. Error messages go through `truncateErrorMessage`, so redaction runs
 before any upstream text reaches the result.
+
+### `graphql` — GraphQL transport & operation-kind lexer *(subpath, no optional peers)*
+
+```ts
+import {
+  createGraphqlClient,
+  isReadOnlyGraphqlDocument,
+  graphqlOperationKinds,
+} from '@chrischall/mcp-utils/graphql';
+
+const gql = createGraphqlClient({
+  endpoint: 'https://api.example.com/graphql',
+  serviceName: 'Example',
+  headers: async () => ({ 'x-token': await tokens.current() }), // re-read per request
+  onAuthError: () => tokens.refresh(),                           // replay once on an auth failure
+  onUnauthorized: () => new SessionNotAuthenticatedError('Example'),
+});
+
+const { me } = await gql.request<{ me: { id: string } }>('query Me { me { id } }');
+const envelope = await gql.execute({ query, variables, operationName }); // { status, data, errors, extensions, headers }
+```
+
+`createGraphqlClient` POSTs `{ query, variables?, operationName? }` as JSON and
+maps every outcome onto the package's existing error types:
+
+| Outcome | `request()` throws |
+| --- | --- |
+| `errors[]` at **any** status (HTTP 200 included), even beside partial `data` | `GraphqlResponseError` — messages joined, redacted, truncated; `.errors`, `.data`, `.codes`, `.status` |
+| auth failure (`isAuthError`, default: 401 or `UNAUTHENTICATED`/`UNAUTHORIZED` code) | after one `onAuthError` replay: `onUnauthorized()` or `UnauthorizedError` |
+| CDN/WAF refusal page or `cf-mitigated` (any 4xx, or a challenge at 200) | `EdgeBlockedError` — never mistaken for an auth or permission failure |
+| 429 past the `retry` budget | `onRateLimited()` or `RateLimitedError` |
+| non-JSON 4xx/5xx | `UpstreamHttpError` (redacted `formatApiError` excerpt) |
+| non-JSON or empty 2xx, or no `data` | `GraphqlResponseError` ("usually a challenge or error page") |
+| timeout (default 30 s, body read included) / dropped connection | `GraphqlTransportError` — `.timedOut`, `.outcomeUnknown` |
+
+`mapError` claims a failure first (e.g. "FORBIDDEN is a permission denial");
+`execute()` returns the envelope instead of throwing on `errors[]`, for raw
+passthrough tools. The caller's cancellation is honoured and its abort
+rethrown untouched.
+
+**Writes are judged by the document.** A request whose document is not
+read-only (see below) never has a transient 5xx retried — only a 429, which
+was refused rather than run — and a timeout or dropped connection reports
+`outcomeUnknown: true` with a "check the state before retrying" hint
+(`writeOutcomeHint` to name the tool that checks). Pass `idempotent: true` for
+a mutation that is safe to repeat (sign-in, token refresh).
+
+`isReadOnlyGraphqlDocument(doc)` is a linear tokenizer plus a tiny top-level
+grammar: strings, block strings (`\"""` escapes) and comments are tokens, so
+their contents never look like keywords, and only the keyword that STARTS each
+definition counts — a query named `mutation`, a `@mutation` directive, a
+`mutation` field or `$mutation` variable are all still reads. It is true only
+for a cleanly parsed document with at least one query and nothing but
+queries and fragments; a mutation or subscription anywhere (after a fragment,
+after a query), an empty document, an unterminated string or an unknown
+keyword is NOT read-only. `graphqlOperationKinds(doc)` returns each
+definition's keyword in order (`'query'` for a `{ … }` shorthand).
 
 ### `html` — scraping helpers *(subpath, optional peer)*
 

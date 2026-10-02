@@ -39,6 +39,10 @@
     "./healthcheck": {
       "import": "./dist/healthcheck/index.js",
       "types": "./dist/healthcheck/index.d.ts"
+    },
+    "./graphql": {
+      "import": "./dist/graphql/index.js",
+      "types": "./dist/graphql/index.d.ts"
     }
   },
   "files": [
