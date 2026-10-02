@@ -41,6 +41,8 @@ import {
   FetchproxySessionNotReadyError,
   classifyBridgeError as classifyBridgeErrorKind,
   classifyFetchError as classifyFetchErrorKind,
+  FetchproxyTimeoutError as FetchproxyTimeoutErrorClass,
+  classifyRowError as bridgeClassifyRowError,
   type FetchproxyServerOpts,
   // Type-only — erased at compile, no runtime `@fetchproxy/server` reference
   // beyond the values already imported above.
@@ -49,7 +51,7 @@ import {
 } from '@fetchproxy/server';
 import type { Capability } from '@fetchproxy/protocol';
 import type { McpServer } from '@modelcontextprotocol/server';
-import { truncateErrorMessage, messageOf } from '../errors/index.js';
+import { truncateErrorMessage, messageOf, isTimeoutError } from '../errors/index.js';
 import { edgeBlockOf } from '../internal/edge-block.js';
 
 // ---------------------------------------------------------------------------
@@ -63,14 +65,12 @@ export {
   withDeadline,
   TokenBucket,
   classifyBotWall,
-  retryOnceOnTimeout,
   FetchproxyProtocolError,
   FetchproxyHttpError,
   FetchproxyBridgeDownError,
   FetchproxySessionNotReadyError,
   FetchproxyTimeoutError,
   classifyBridgeError,
-  classifyRowError,
   classifyFetchError,
   backoffDelayMs,
   BRIDGE_CONCURRENCY,
@@ -84,12 +84,73 @@ export {
   extractImgTags,
   lastPathSegment,
 } from '@fetchproxy/server';
-// NOTE: `classifyBridgeError` and `classifyRowError` above are fetchproxy's RAW
-// classifiers (they return a bare kind STRING). They are re-exported verbatim so
-// an MCP can swap `from '@fetchproxy/server'` → `from '@chrischall/mcp-utils/fetchproxy'`
-// as a pure drop-in. The richer { type, message, hint } envelope is a SEPARATE
+// NOTE: `classifyBridgeError` above is fetchproxy's RAW classifier (it returns
+// a bare kind STRING), re-exported verbatim so an MCP can swap
+// `from '@fetchproxy/server'` → `from '@chrischall/mcp-utils/fetchproxy'` as a
+// pure drop-in. The richer { type, message, hint } envelope is a SEPARATE
 // helper exported as `bridgeErrorInfo` (defined below) — it does not squat the
-// `classifyBridgeError` name.
+// `classifyBridgeError` name. `retryOnceOnTimeout` and `classifyRowError` are
+// NOT raw re-exports any more: the wrappers below are signature-compatible
+// supersets that also honour non-bridge timeouts (fleet-audit#1078).
+
+/**
+ * Whether a timeout may be re-sent. A timeout that declares `retrySafe: false`
+ * (fetchproxy's timed-out write, or any consumer error using the same field)
+ * may already have reached the server, so it is never retried.
+ */
+function timeoutRetrySafe(err: unknown): boolean {
+  return (err as { retrySafe?: unknown } | null)?.retrySafe !== false;
+}
+
+/**
+ * Run `fn`; if it throws a TIMEOUT, run it once more. Superset of
+ * `@fetchproxy/server`'s `retryOnceOnTimeout`: a bridge
+ * `FetchproxyTimeoutError` behaves exactly as there, and so does ANY error
+ * {@link isTimeoutError} recognises — mcp-utils' `RequestTimeoutError`,
+ * `AbortSignal.timeout()`'s `TimeoutError`, a consumer class named
+ * `*TimeoutError` (onehome-mcp's `OneHomeRequestTimeoutError`, the
+ * fleet-audit#1078 case), or one carrying `timedOut: true`.
+ *
+ * Never retried: a timeout with `retrySafe: false` (may already have run), a
+ * caller cancellation (`AbortError`), any non-timeout error, and the second
+ * attempt's failure — each propagates unchanged.
+ */
+export async function retryOnceOnTimeout<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err instanceof FetchproxyTimeoutErrorClass) {
+      // Bridge timeout: fetchproxy's own rule — retried only when retrySafe.
+      if (!err.retrySafe) throw err;
+      return await fn();
+    }
+    if (isTimeoutError(err) && timeoutRetrySafe(err)) return await fn();
+    throw err;
+  }
+}
+
+/**
+ * Per-row error classification for bulk tools — superset of
+ * `@fetchproxy/server`'s `classifyRowError`, same return shape. Bridge errors
+ * classify exactly as there (`'bridge timeout after retry: …'`,
+ * `'bridge unreachable: …'`, …). Any OTHER error {@link isTimeoutError}
+ * recognises is `kind: 'timeout'` with
+ * `'timeout after retry: <message>'` — or `'timeout (not retried): <message>'`
+ * when it declares `retrySafe: false` — so a stalled upstream row stays
+ * distinguishable from a genuine "not found" (`'other'`). A caller
+ * cancellation is never `'timeout'`.
+ */
+export function classifyRowError(err: unknown): {
+  kind: 'timeout' | 'bridge_down' | 'protocol' | 'other';
+  message: string;
+} {
+  const bridge = bridgeClassifyRowError(err);
+  if (bridge.kind !== 'other' || !isTimeoutError(err)) return bridge;
+  const message = messageOf(err);
+  return timeoutRetrySafe(err)
+    ? { kind: 'timeout', message: `timeout after retry: ${message}` }
+    : { kind: 'timeout', message: `timeout (not retried): ${message}` };
+}
 export type {
   FetchproxyServerOpts,
   FetchResult,

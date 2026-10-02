@@ -473,7 +473,7 @@ and is never touched.
 `McpToolError` and its subclasses (`SessionNotAuthenticatedError`,
 `BotWallError`, `RateLimitError`, `UnreachableError`, `ModeMismatchError`),
 plus `createHelpfulError`, `wrapToolError`, `truncateErrorMessage`,
-`redactSecrets`, `maskSecret`, and `messageOf`. `BotWallError` takes an optional
+`redactSecrets`, `maskSecret`, `messageOf`, and `isTimeoutError`. `BotWallError` takes an optional
 `{ vendor }` (e.g. `'DataDome'`) woven into the message and exposed as a field;
 `maskSecret(value)` renders a `first8…last4` fingerprint for set-credential
 confirmations (short values are fully hidden). `redactSecrets` scrubs `Bearer`/`Basic` auth
@@ -490,11 +490,26 @@ adversarial runs), and `truncateErrorMessage` hands the redactor at most
 `ERROR_REDACTION_INPUT_MAX` (64 KB) of the body as defence in depth, because
 `formatApiError` feeds it the WHOLE upstream body and a hostile upstream must
 not be able to pin the process with one response. This core module has **no runtime dependencies** — the fetchproxy
-typed-error hierarchy (`Fetchproxy*Error`), the raw `classifyBridgeError` /
-`classifyRowError` re-exports, and the `bridgeErrorInfo` envelope helper live in
+typed-error hierarchy (`Fetchproxy*Error`), the raw `classifyBridgeError`
+re-export, the timeout-aware `retryOnceOnTimeout` / `classifyRowError` row
+helpers, and the `bridgeErrorInfo` envelope helper live in
 the [`/fetchproxy`](#fetchproxy) subpath instead, so
 bearer-only MCPs can import the core barrel without installing
 `@fetchproxy/server`.
+
+**`isTimeoutError(err)`** is the fleet's one answer to "is this a timeout?"
+(what decides a bulk row's retry and its `timeout` classification). It is
+duck-typed and reads the error (and a short `cause` chain) outside-in; the
+first link that declares anything decides. A timeout is a `name` of
+`TimeoutError` or ending in `TimeoutError` (`AbortSignal.timeout()`'s
+`DOMException`, `RequestTimeoutError`, `FetchproxyTimeoutError`, your own
+`FooRequestTimeoutError`), the marker **`timedOut: true`**, or a `code` of
+`ETIMEDOUT` / undici's `UND_ERR_{CONNECT,HEADERS,BODY}_TIMEOUT`. A caller
+cancellation (`AbortError`) and an explicit `timedOut: false` are never
+timeouts, and neither is a message that merely says "timed out". To make a
+custom error count, name it `…TimeoutError` or set `timedOut = true` on it; set
+`retrySafe = false` too if re-sending it is unsafe (a write that may already
+have run).
 
 ```ts
 import { wrapToolError, SessionNotAuthenticatedError } from '@chrischall/mcp-utils';
@@ -1326,6 +1341,17 @@ import {
 Wraps `@fetchproxy/server` with the fleet's transport, bot-wall classification,
 deadline/retry, token-bucket rate limiting, and bounded-concurrency helpers, and
 re-exports the fetchproxy typed-error hierarchy.
+
+**Bulk rows: `retryOnceOnTimeout` / `classifyRowError`.** These are
+signature-compatible supersets of fetchproxy's helpers, not raw re-exports: a
+bridge `FetchproxyTimeoutError` behaves exactly as in `@fetchproxy/server`, and
+any other error `isTimeoutError` accepts is ALSO retried once (unless it says
+`retrySafe: false`) and classified `kind: 'timeout'` with
+`'timeout after retry: <message>'` (or `'timeout (not retried): …'`). So an MCP
+whose direct, non-bridge fetch throws its own deadline error (onehome-mcp's
+`OneHomeRequestTimeoutError`) keeps the row-level retry + `timeout` contract
+without subclassing a fetchproxy type. A caller cancellation is never retried
+and never classified `timeout`.
 
 **Transport verb adapters.** Beyond the `start` / `close` / `status` lifecycle,
 `createFetchproxyTransport` exposes the verb passthroughs redfin / homes /
