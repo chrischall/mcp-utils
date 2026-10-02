@@ -1025,6 +1025,26 @@ The `${prefix}_register_session` tool takes an optional `mark_active`
 session active in the same call instead of requiring a follow-up
 `${prefix}_set_active_session`.
 
+The default wording says `set_active_session` changes which session later tool
+calls route through, and that tools accept a per-call `session_id`. That is only
+true of a server that reads the registry to route (onehome). When the registry is
+just a label — a fetchproxy bridge always uses the bound tab — pass
+`routing: 'label-only'` and the trio says so instead, optionally with a
+`labelOnlyNote` naming what does pick the account. `descriptions: { register,
+setActive, context }` replaces any one outright (fleet-audit#1092; homes-mcp
+used to Proxy-patch the server for this):
+
+```ts
+registerSessionTools(server, registry, {
+  prefix: 'homes',
+  serviceLabel: 'Homes.com',
+  routing: 'label-only',
+  labelOnlyNote:
+    'Every homes tool call goes through whichever browser tab the ContextMint Bridge ' +
+    'extension is signed into; to read a different account, sign that tab into it.',
+});
+```
+
 Includes `SessionStore`, `normalizeOrigin`, `AuthMode`, and `TokenManager`
 (with `TOKEN_REFRESH_SKEW_MS` for proactive refresh).
 
@@ -1079,6 +1099,30 @@ const custom = new CookieSessionManager<MySession, MyResponse>({
   isExpired: (res) => /login\.asp/i.test(res.location ?? res.url),
 });
 ```
+
+For the common "the site served its login page instead" case there is a shared,
+structural predicate (fleet-audit#1155) rather than a per-repo regex over the
+body. `expiredByLoginPage(signals)` returns an `isExpired`; `looksLikeLoginPage(view,
+signals)` is the same check, sync, for a caller that already has the pieces:
+
+```ts
+const sessions = new CookieSessionManager<MySession, Response>({
+  login: () => loginWithPassword(),
+  isExpired: expiredByLoginPage({
+    url: /\/members\/login\.asp/i,                       // final URL or Location (path + search)
+    form: { action: /login\.asp/i, field: 'Password' },  // the form, with that input inside it
+    // statuses: [401]                                   // the default
+  }),
+});
+```
+
+It never matches body prose — a fan comment saying "please log in" is not the
+login page — only a status, the URL/`Location`, or a `<form>` whose `action`
+matches and which contains the named input (any `type=password` input when no
+`field` is given). The body is read from a clone, only when a `form` rule needs
+it, and only for an HTML (or untyped) response; the scan is linear and capped at
+`LOGIN_PAGE_SCAN_MAX` (512 KB). A custom transport's `{ url, location, body }`
+works as-is.
 
 Replaces the hand-rolled re-login / single-flight / 401-replay code in
 `artsonia-mcp`, `canvas-parent-mcp`, `evite-mcp`, `signupgenius-mcp`, and

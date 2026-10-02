@@ -51,6 +51,14 @@ import { readEnvVar } from '../config/index.js';
 import { ApiError, EdgeBlockedError, RateLimitedError, RequestTimeoutError } from '../http/index.js';
 import { responseEdgeBlock } from '../internal/edge-block.js';
 
+export {
+  looksLikeLoginPage,
+  expiredByLoginPage,
+  LOGIN_PAGE_SCAN_MAX,
+  type LoginPageView,
+  type LoginPageSignals,
+} from './login-page.js';
+
 // ===========================================================================
 // 1. In-memory SessionRegistry + MCP tools
 // ===========================================================================
@@ -213,6 +221,83 @@ export interface RegisterSessionToolsOptions {
   prefix: string;
   /** Human label for the service (defaults to the prefix). */
   serviceLabel?: string;
+  /**
+   * What the registry is FOR in this server, which decides what the tool
+   * descriptions may promise.
+   *
+   * - `'routed'` (default, the previous wording) — tools read the registry to
+   *   pick a session, and accept a per-call `session_id`. onehome-mcp.
+   * - `'label-only'` — the registry is bookkeeping for the conversation: nothing
+   *   reads it to route a request (a fetchproxy bridge always uses the bound
+   *   tab). The descriptions say so and make no routing claim. zillow, redfin,
+   *   homes and compass; homes-mcp used to Proxy-patch the server to get this
+   *   (fleet-audit#1092).
+   */
+  routing?: 'routed' | 'label-only';
+  /**
+   * `'label-only'` only: a sentence appended to each description saying what
+   * DOES pick the account — e.g. "Every homes tool call goes through whichever
+   * browser tab the extension is signed into; to read a different account, sign
+   * that tab into it."
+   */
+  labelOnlyNote?: string;
+  /** Replace a tool's generated description outright (wins over `routing`). */
+  descriptions?: {
+    register?: string;
+    setActive?: string;
+    context?: string;
+  };
+}
+
+/** The trio's descriptions for a {@link RegisterSessionToolsOptions.routing} mode. */
+function sessionToolDescriptions(
+  prefix: string,
+  label: string,
+  opts: RegisterSessionToolsOptions,
+): { register: string; setActive: string; context: string } {
+  let generated: { register: string; setActive: string; context: string };
+  if (opts.routing === 'label-only') {
+    const tail =
+      `The registry is a label only: it does not change which ${label} account requests use.` +
+      (opts.labelOnlyNote !== undefined && opts.labelOnlyNote !== '' ? ` ${opts.labelOnlyNote}` : '');
+    generated = {
+      register:
+        `Record (or refresh) which ${label} account the signed-in session belongs to, keyed by \`account_identity\`. ` +
+        'Re-registering the same identity updates the existing entry. Returns a `session_id`; ' +
+        'pass `mark_active: true` to mark it as the current account in the same call. ' +
+        tail,
+      setActive:
+        'Mark a previously registered `session_id` as the current account label, for your own bookkeeping ' +
+        'across a conversation. ' +
+        tail,
+      context:
+        'List every registered account label plus the current `active_session_id`. ' +
+        'When none are registered, `sessions` is empty and `active_session_id` is null. ' +
+        tail,
+    };
+  } else {
+    generated = {
+      register:
+        `Register (or refresh) an authenticated ${label} session keyed by signed-in account identity. ` +
+        'Re-registering the same `account_identity` updates the existing session rather than creating a duplicate. ' +
+        'Returns the `session_id` to use when routing per-tool calls. ' +
+        'The first registered session becomes the default `active_session_id`. ' +
+        'Pass `mark_active: true` to make the newly-registered session active in the same call.',
+      setActive:
+        'Switch which registered session subsequent tool calls route through by default. ' +
+        `Pass a \`session_id\` previously returned by \`${prefix}_register_session\`. ` +
+        'Tools that accept an explicit `session_id` parameter override this default per-call.',
+      context:
+        'Return the full set of registered sessions plus the current `active_session_id`. ' +
+        'When no sessions are registered, `sessions` is empty and `active_session_id` is null.',
+    };
+  }
+  const o = opts.descriptions;
+  return {
+    register: o?.register ?? generated.register,
+    setActive: o?.setActive ?? generated.setActive,
+    context: o?.context ?? generated.context,
+  };
 }
 
 /**
@@ -224,6 +309,10 @@ export interface RegisterSessionToolsOptions {
  * made active in the same call (equivalent to a follow-up
  * `${prefix}_set_active_session`). Omitting it preserves the
  * first-registered-wins active-session behaviour.
+ *
+ * Pass `routing: 'label-only'` when nothing in the server reads the registry to
+ * pick a session — the default wording promises routing that such a server does
+ * not do (see {@link RegisterSessionToolsOptions.routing}).
  */
 export function registerSessionTools(
   server: McpServer,
@@ -233,17 +322,13 @@ export function registerSessionTools(
   const { prefix } = opts;
   const label = opts.serviceLabel ?? prefix;
   const ctxTool = `${prefix}_get_session_context`;
+  const text = sessionToolDescriptions(prefix, label, opts);
 
   server.registerTool(
     `${prefix}_register_session`,
     {
       title: `Register a signed-in ${label} session`,
-      description:
-        `Register (or refresh) an authenticated ${label} session keyed by signed-in account identity. ` +
-        'Re-registering the same `account_identity` updates the existing session rather than creating a duplicate. ' +
-        'Returns the `session_id` to use when routing per-tool calls. ' +
-        'The first registered session becomes the default `active_session_id`. ' +
-        'Pass `mark_active: true` to make the newly-registered session active in the same call.',
+      description: text.register,
       annotations: {
         title: `Register a signed-in ${label} session`,
         readOnlyHint: false,
@@ -281,10 +366,7 @@ export function registerSessionTools(
     `${prefix}_set_active_session`,
     {
       title: `Set the active ${label} session`,
-      description:
-        'Switch which registered session subsequent tool calls route through by default. ' +
-        `Pass a \`session_id\` previously returned by \`${prefix}_register_session\`. ` +
-        'Tools that accept an explicit `session_id` parameter override this default per-call.',
+      description: text.setActive,
       annotations: {
         title: `Set the active ${label} session`,
         readOnlyHint: false,
@@ -310,9 +392,7 @@ export function registerSessionTools(
     ctxTool,
     {
       title: `List all registered ${label} sessions`,
-      description:
-        'Return the full set of registered sessions plus the current `active_session_id`. ' +
-        'When no sessions are registered, `sessions` is empty and `active_session_id` is null.',
+      description: text.context,
       annotations: {
         title: `List all registered ${label} sessions`,
         readOnlyHint: true,
