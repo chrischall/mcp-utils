@@ -70,25 +70,100 @@ export function buildUserAgent(name: string, version: string, contactUrl?: strin
 }
 
 /**
- * Extract the filename from a `Content-Disposition` header, preferring the
- * RFC 6266 `filename*=UTF-8''percent-encoded` form over the quoted
- * `filename="…"` fallback (matching ofw's download path). Returns `undefined`
- * when the header is missing or carries no filename.
+ * Split a `Content-Disposition` header into its parameters (names lowercased,
+ * first occurrence wins), honouring quoted strings and their backslash
+ * escapes. A single left-to-right scan — no backtracking regex — so a hostile
+ * header costs linear time.
+ */
+function dispositionParams(header: string): Map<string, string> {
+  const params = new Map<string, string>();
+  const n = header.length;
+  // Normally `type; params`. A non-compliant header that skips the type
+  // (`filename="x.pdf"`) starts with a parameter instead: begin before it.
+  const firstSemi = header.indexOf(';');
+  const firstEq = header.indexOf('=');
+  let i = firstEq >= 0 && (firstSemi < 0 || firstEq < firstSemi) ? -1 : firstSemi;
+  if (i < 0 && firstEq < 0) return params;
+  // The next '=' is cached and only searched for again once passed, so a run
+  // of valueless tokens (`;;;;…`) cannot make each step rescan to a far '='.
+  let eq = firstEq;
+  while (i < n) {
+    i += 1; // past the ';'
+    if (eq >= 0 && eq < i) eq = header.indexOf('=', i);
+    if (eq < 0) break; // no '=' left: no more parameters
+    const semi = header.indexOf(';', i);
+    if (semi >= 0 && semi < eq) {
+      // A valueless token (`; foo;`) — skip to the next parameter.
+      i = semi;
+      continue;
+    }
+    const name = header.slice(i, eq).trim().toLowerCase();
+    let j = eq + 1;
+    while (j < n && (header[j] === ' ' || header[j] === '\t')) j += 1;
+    let value = '';
+    if (header[j] === '"') {
+      j += 1;
+      while (j < n && header[j] !== '"') {
+        if (header[j] === '\\' && j + 1 < n) j += 1;
+        value += header[j];
+        j += 1;
+      }
+      const next = header.indexOf(';', j);
+      i = next < 0 ? n : next;
+    } else {
+      const next = header.indexOf(';', j);
+      const stop = next < 0 ? n : next;
+      value = header.slice(j, stop).trim();
+      i = stop;
+    }
+    if (name && !params.has(name)) params.set(name, value);
+  }
+  return params;
+}
+
+/** Percent-decode `s` as ISO-8859-1 bytes; throws on a malformed escape like `decodeURIComponent`. */
+function decodeLatin1(s: string): string {
+  return s.replace(/%([0-9A-Fa-f]{2})|%/g, (m, hex: string | undefined) => {
+    if (hex === undefined) throw new URIError('malformed percent-encoding');
+    return String.fromCharCode(parseInt(hex, 16));
+  });
+}
+
+/**
+ * Extract the filename from a `Content-Disposition` header. Returns
+ * `undefined` when the header is missing or names no (non-empty) file.
+ *
+ * Order, per RFC 6266: the extended `filename*=` (RFC 8187
+ * `charset'lang'percent-encoded`; the charset prefix is optional, `UTF-8` and
+ * `ISO-8859-1` are decoded, quotes some servers wrap it in are dropped), then
+ * the plain `filename=` (quoted, with backslash escapes, or a bare token). A
+ * `filename*=` whose percent-encoding is broken loses to a plain `filename=`
+ * and is otherwise returned raw rather than dropped. Parameter names are
+ * case-insensitive and matched whole, so `xfilename=` is not a filename.
+ *
+ * Widened to ofw-mcp's local parser (its pinned cases: no charset prefix, raw
+ * fallback, unquoted legacy form) — chrischall/fleet-audit#1076. The result is
+ * an untrusted upstream string: confine any path built from it.
  */
 export function parseContentDispositionFilename(
   header: string | null | undefined,
 ): string | undefined {
   if (!header) return undefined;
-  const star = /filename\*\s*=\s*(?:UTF-8|utf-8)''([^;]+)/.exec(header);
-  if (star?.[1]) {
+  const params = dispositionParams(header);
+  let rawExt: string | undefined;
+  const ext = params.get('filename*');
+  if (ext !== undefined) {
+    const parts = /^([^']*)'[^']*'([\s\S]*)$/.exec(ext);
+    const charset = (parts?.[1] ?? '').trim().toLowerCase();
+    const encoded = (parts ? parts[2]! : ext).trim();
     try {
-      return decodeURIComponent(star[1].trim());
+      const decoded = charset === 'iso-8859-1' || charset === 'latin1' ? decodeLatin1(encoded) : decodeURIComponent(encoded);
+      if (decoded) return decoded;
     } catch {
-      // Malformed percent-encoding — fall through to the quoted form.
+      rawExt = encoded || undefined;
     }
   }
-  const quoted = /filename\s*=\s*"([^"]+)"/.exec(header);
-  if (quoted?.[1]) return quoted[1];
-  const bare = /filename\s*=\s*([^;\s]+)/.exec(header);
-  return bare?.[1];
+  const plain = params.get('filename');
+  if (plain) return plain;
+  return rawExt;
 }
