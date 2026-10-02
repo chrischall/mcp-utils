@@ -408,6 +408,149 @@ export function extractJsonLdBlocks(html: string): unknown[] {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Next.js `__NEXT_DATA__` (and same-shaped `<script id=…>` JSON blobs)
+// ---------------------------------------------------------------------------
+
+/**
+ * Default cap, in UTF-16 code units, on the `__NEXT_DATA__` body
+ * {@link extractNextData} will hand to `JSON.parse` (16 Mi chars). Real
+ * pages run to a few MB (zillow search ≈ 2–4 MB); the cap stops a hostile or
+ * runaway page from making one call allocate an unbounded object graph.
+ */
+export const NEXT_DATA_MAX_CHARS = 16 * 1024 * 1024;
+
+/** Options for {@link extractNextData} / {@link extractNextDataText}. */
+export interface ExtractNextDataOptions {
+  /** The `<script>` tag's `id` (exact, case-sensitive). Default `'__NEXT_DATA__'`. */
+  id?: string;
+  /** Refuse (return `undefined`) a body longer than this. Default {@link NEXT_DATA_MAX_CHARS}. */
+  maxChars?: number;
+}
+
+/** Options for {@link extractNextData}. */
+export interface ExtractNextDataParseOptions extends ExtractNextDataOptions {
+  /**
+   * Which level to return: the whole blob (`'all'`, default), its `props`, or
+   * `props.pageProps` — where every Next.js Pages-Router app keeps per-page
+   * state. A missing or non-object level yields `undefined`.
+   */
+  select?: 'all' | 'props' | 'pageProps';
+}
+
+function isAsciiSpace(ch: string | undefined): boolean {
+  return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f';
+}
+
+/**
+ * Walk one opening tag's attributes from `from` (just past `<script`) to its
+ * closing `>`, honouring quoted values (a `>` inside quotes does not end the
+ * tag). Returns the index of that `>` and whether an `id` attribute equals
+ * `id` exactly, or `null` when the tag never closes. Every step advances, so
+ * it is linear in the tag's length — the backtracking-free replacement for a
+ * `[^>]*id=…[^>]*>` regex.
+ */
+function scanScriptTag(html: string, from: number, id: string): { end: number; idMatches: boolean } | null {
+  let p = from;
+  let idMatches = false;
+  for (;;) {
+    while (p < html.length && (isAsciiSpace(html[p]) || html[p] === '/')) p++;
+    if (p >= html.length) return null;
+    if (html[p] === '>') return { end: p, idMatches };
+    const nameStart = p;
+    while (p < html.length && !isAsciiSpace(html[p]) && html[p] !== '/' && html[p] !== '>' && html[p] !== '=') p++;
+    const name = asciiLower(html.slice(nameStart, p));
+    while (p < html.length && isAsciiSpace(html[p])) p++;
+    if (html[p] !== '=') continue; // boolean attribute (the name loop advanced)
+    p++; // past '='
+    while (p < html.length && isAsciiSpace(html[p])) p++;
+    let value: string;
+    const quote = html[p];
+    if (quote === '"' || quote === "'") {
+      const close = html.indexOf(quote, p + 1);
+      if (close < 0) return null;
+      value = html.slice(p + 1, close);
+      p = close + 1;
+    } else {
+      const valueStart = p;
+      while (p < html.length && !isAsciiSpace(html[p]) && html[p] !== '>') p++;
+      value = html.slice(valueStart, p);
+    }
+    if (name === 'id' && value === id) idMatches = true;
+  }
+}
+
+/**
+ * The raw, trimmed text inside the first `<script id="__NEXT_DATA__" …>` tag
+ * (or `opts.id`), or `undefined` when there is no such complete tag or its
+ * body exceeds `opts.maxChars`. For callers that must tell "the page has no
+ * blob" apart from "the blob is not valid JSON" (zola-mcp reports them as
+ * different failure steps) — everyone else wants {@link extractNextData}.
+ *
+ * One forward pass, tag-bounded: `indexOf` finds each `<script` opener, the
+ * attribute walk finds its `>`, and a non-matching script's body is skipped
+ * to its `</script` so a `<script id="__NEXT_DATA__">` string inside another
+ * script cannot match. No regex runs over the page.
+ */
+export function extractNextDataText(html: string, opts: ExtractNextDataOptions = {}): string | undefined {
+  const id = opts.id ?? '__NEXT_DATA__';
+  const maxChars = opts.maxChars ?? NEXT_DATA_MAX_CHARS;
+  const lower = asciiLower(html);
+  let i = 0;
+  for (;;) {
+    const open = nextTagOpen(lower, 'script', i);
+    if (open < 0) return undefined;
+    const tag = scanScriptTag(html, open + '<script'.length, id);
+    if (!tag) return undefined; // unterminated opening tag: nothing after it is a tag
+    const bodyStart = tag.end + 1;
+    const bodyEnd = lower.indexOf('</script', bodyStart);
+    if (bodyEnd < 0) return undefined; // no closing tag anywhere after this point
+    if (tag.idMatches) {
+      if (bodyEnd - bodyStart > maxChars) return undefined;
+      return html.slice(bodyStart, bodyEnd).trim();
+    }
+    i = bodyEnd + '</script'.length;
+  }
+}
+
+function asPlainObject(v: unknown): Record<string, unknown> | undefined {
+  return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+}
+
+/**
+ * Parse a Next.js page's `<script id="__NEXT_DATA__" type="application/json">`
+ * hydration blob (or any same-shaped tag via `opts.id`), returning the whole
+ * object, its `props`, or `props.pageProps` (`opts.select`). Returns
+ * `undefined` — never throws — when the tag is absent or unterminated, the
+ * body is over `opts.maxChars` ({@link NEXT_DATA_MAX_CHARS} by default), the
+ * JSON is invalid, or the selected level is not an object.
+ *
+ * Replaces the fleet's per-repo copies (fleet-audit#1145): zillow-mcp's
+ * `/<script[^>]*id=["']__NEXT_DATA__["'][^>]*>/i` + `indexOf` (quadratic over
+ * repeated `<script` with the `>` withheld), zola-mcp's lazy
+ * `([\s\S]*?)<\/script>` (quadratic with the closer withheld), and the
+ * `extractJsonAfterMarker(html, 'id="__NEXT_DATA__"')` calls in angi-mcp /
+ * thumbtack-mcp (which are linear but match the marker text anywhere, even
+ * inside another script). Built on {@link extractNextDataText}; linear.
+ */
+export function extractNextData(
+  html: string,
+  opts: ExtractNextDataParseOptions = {},
+): Record<string, unknown> | undefined {
+  const text = extractNextDataText(html, opts);
+  if (text === undefined) return undefined;
+  let data: Record<string, unknown> | undefined;
+  try {
+    data = asPlainObject(JSON.parse(text) as unknown);
+  } catch {
+    return undefined;
+  }
+  const select = opts.select ?? 'all';
+  if (select === 'all' || data === undefined) return data;
+  const props = asPlainObject(data.props);
+  return select === 'props' ? props : asPlainObject(props?.pageProps);
+}
+
 /** True when a JSON-LD node's `@type` (string or array) includes `type`. */
 function typeMatches(node: unknown, type: string): node is Record<string, unknown> {
   if (node === null || typeof node !== 'object') return false;

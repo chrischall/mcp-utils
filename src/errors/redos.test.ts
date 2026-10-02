@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { ERROR_REDACTION_INPUT_MAX, redactSecrets, truncateErrorMessage } from './index.js';
 import { detectEdgeBlock } from '../http/index.js';
+import { extractNextData } from '../scrape/index.js';
 
 // Guards against catastrophic backtracking in the redaction chain. It is the
 // FIRST step of truncateErrorMessage, which formatApiError feeds the WHOLE
@@ -118,5 +119,24 @@ describe('detectEdgeBlock ReDoS resistance', () => {
   it('is linear on 200 KB of `<title` runs', () => {
     const evil = '<title'.repeat(200_000 / 6);
     expect(elapsedMs(() => detectEdgeBlock({ body: evil, status: 403 }))).toBeLessThan(100);
+  });
+});
+
+describe('extractNextData ReDoS resistance (fleet-audit#1145)', () => {
+  // zillow-mcp's `/<script[^>]*id=["']__NEXT_DATA__["'][^>]*>/i` re-scans the
+  // rest of the page from every `<script` when the `>` is withheld (quadratic),
+  // and zola-mcp's lazy `([\s\S]*?)<\/script>` re-scans from every opener
+  // when `</script>` is withheld. The replacement must be one forward pass.
+  it.each([
+    ['<script id="__NEXT_DATA__" (no `>`)', '<script id="__NEXT_DATA__" '.repeat(7_500)],
+    ['<script (no `>`)', '<script '.repeat(25_000)],
+    ['<script id="__NEXT_DATA__"> (no `</script>`)', '<script id="__NEXT_DATA__" type="application/json">'.repeat(4_000)],
+    ['<script> (no `</script>`)', '<script>'.repeat(25_000)],
+    ['<script id=" (unterminated quote)', '<script id="'.repeat(16_000)],
+    ['<script a=b a=b … (one huge tag)', `<script ${'a=b '.repeat(50_000)}`],
+    ['<script x="y"> bodies closed (many non-matching scripts)', '<script x="y"></script>'.repeat(8_500)],
+    ['<scriptx id="__NEXT_DATA__"> (non-tag openers)', '<scriptx id="__NEXT_DATA__">'.repeat(7_000)],
+  ])('is linear on 200 KB of `%s`', (_label, evil) => {
+    expect(elapsedMs(() => extractNextData(evil))).toBeLessThan(100);
   });
 });
