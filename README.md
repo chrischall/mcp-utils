@@ -709,6 +709,20 @@ timeout. Omit it to keep the previous unbounded behavior.
 viator / tripadvisor), and the standalone `parseRetryAfterMs(header)` for custom
 clients.
 
+Request bodies: `body` is JSON (`application/json`, the default); `form`
+(a `URLSearchParams` or a plain record) is sent form-encoded as
+`application/x-www-form-urlencoded;charset=UTF-8`; `rawBody` is a string sent
+verbatim with `contentType` (default `text/plain; charset=utf-8`) — e.g. an XML
+submission; `formData` is multipart. `form` and `rawBody` refuse to share a
+request with another body kind, and `contentType` is only valid with `rawBody`
+(both throw a `TypeError` before anything is sent). A per-request
+`Content-Type` header still overrides any default.
+
+```ts
+await api.fetchJson('POST', '/3/user/favorite', { form: { venue_id: 42, favorite: 1 } });
+await api.fetchHtml('POST', '/ws/2/tag', { rawBody: xml, contentType: 'application/xml; charset=utf-8' });
+```
+
 `api.fetchRaw(method, path)` is the binary path `fetchJson` can't express —
 returns `{ status, contentType, headers, bytes }` with the same 401/429/error
 mapping (gzip sales reports, PNG maps, attachment downloads).

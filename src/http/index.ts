@@ -154,6 +154,27 @@ export interface RequestOptions {
    * precedence over {@link body} when both are present.
    */
   formData?: FormData;
+  /**
+   * Form-encoded body, sent as `application/x-www-form-urlencoded;charset=UTF-8`
+   * (the same type `fetch` gives a bare `URLSearchParams`). A plain record is
+   * encoded with `URLSearchParams`, skipping `undefined` values. Consolidates
+   * resy's local `URLSearchParams` branch (its login, favourite, notify and
+   * booking writes are all form posts).
+   */
+  form?: URLSearchParams | Record<string, string | number | boolean | undefined>;
+  /**
+   * A string body sent verbatim — for upstreams whose writes are neither JSON
+   * nor a form, e.g. MusicBrainz's `application/xml` submissions. Its
+   * `Content-Type` is {@link contentType}, defaulting to
+   * `text/plain; charset=utf-8`. An empty string is still a body.
+   */
+  rawBody?: string;
+  /**
+   * The `Content-Type` of {@link rawBody}. Only valid alongside `rawBody` —
+   * the other body kinds set their own (a per-request `headers` entry still
+   * overrides any of them).
+   */
+  contentType?: string;
   /** Extra request headers, merged over the defaults. */
   headers?: Record<string, string>;
   /** Query params appended via {@link buildQueryString} when present. */
@@ -409,6 +430,39 @@ function httpError(res: Response, text: string, method: string, path: string, se
   return new ApiError(res.status, formatApiError(res.status, method, path, text, { service }));
 }
 
+/**
+ * Turn a request's body options into the bytes sent and their default
+ * `Content-Type`. `formData` beside a JSON `body` keeps its historical
+ * precedence (multipart wins, no `Content-Type` so `fetch` sets the boundary);
+ * the newer kinds — `form`, `rawBody` — refuse to share a request with any
+ * other body, since silently dropping one half of a write is never what the
+ * caller meant. Strings, not streams, so a retry replays the same body.
+ */
+function encodeBody(opt: RequestOptions): { body: FormData | string | undefined; contentType: string | undefined } {
+  const hasForm = opt.form !== undefined;
+  const hasRaw = opt.rawBody !== undefined;
+  if (hasForm || hasRaw) {
+    const kinds = [hasForm, hasRaw, opt.formData !== undefined, opt.body !== undefined].filter(Boolean).length;
+    if (kinds > 1) {
+      throw new TypeError('createApiClient: pass only one of `body`, `form`, `rawBody` or `formData` per request.');
+    }
+  }
+  if (opt.contentType !== undefined && !hasRaw) {
+    throw new TypeError('createApiClient: `contentType` applies only to `rawBody`; set a `Content-Type` header instead.');
+  }
+  if (opt.formData !== undefined) return { body: opt.formData, contentType: undefined };
+  if (hasRaw) return { body: opt.rawBody, contentType: opt.contentType ?? 'text/plain; charset=utf-8' };
+  if (hasForm) {
+    const form = opt.form instanceof URLSearchParams ? opt.form : new URLSearchParams();
+    if (!(opt.form instanceof URLSearchParams)) {
+      for (const [k, v] of Object.entries(opt.form ?? {})) if (v !== undefined) form.append(k, String(v));
+    }
+    return { body: form.toString(), contentType: 'application/x-www-form-urlencoded;charset=UTF-8' };
+  }
+  if (opt.body !== undefined) return { body: JSON.stringify(opt.body), contentType: 'application/json' };
+  return { body: undefined, contentType: undefined };
+}
+
 function hostOf(baseUrl: string): string {
   try {
     return new URL(baseUrl).host;
@@ -588,10 +642,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   }
 
   async function send(method: string, path: string, opt: RequestOptions): Promise<Attempt> {
-    // formData wins over a JSON body; it's sent verbatim so fetch sets the boundary.
-    const isMultipart = opt.formData !== undefined;
-    const hasJsonBody = !isMultipart && opt.body !== undefined;
-    const reqBody: FormData | string | undefined = isMultipart ? opt.formData : hasJsonBody ? JSON.stringify(opt.body) : undefined;
+    const { body: reqBody, contentType } = encodeBody(opt);
     const query = opt.query ? buildQueryString(opt.query) : '';
     const url = resolveUrl(path, query);
     const bodyInit = reqBody !== undefined ? { body: reqBody } : {};
@@ -603,7 +654,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
         method,
         headers: {
           Accept: 'application/json',
-          ...(hasJsonBody ? { 'Content-Type': 'application/json' } : {}),
+          ...(contentType !== undefined ? { 'Content-Type': contentType } : {}),
           ...opts.baseHeaders,
           ...authHeader(token || undefined),
           ...opt.headers,
