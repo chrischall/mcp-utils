@@ -84,6 +84,91 @@ describe('parseContentDispositionFilename', () => {
     expect(parseContentDispositionFilename(null)).toBeUndefined();
     expect(parseContentDispositionFilename('inline')).toBeUndefined();
   });
+
+  // The cases ofw-mcp's local parser pinned (tests/client.test.ts) that this
+  // one used to fail — chrischall/fleet-audit#1076.
+  it("decodes filename*= without the UTF-8'' prefix (ofw)", () => {
+    expect(parseContentDispositionFilename('attachment; filename*=Hello%20World.pdf')).toBe('Hello World.pdf');
+  });
+
+  it('keeps the raw filename*= token when its percent-encoding is broken and nothing else names the file (ofw)', () => {
+    expect(parseContentDispositionFilename("attachment; filename*=UTF-8''bad%ZZname.pdf")).toBe('bad%ZZname.pdf');
+  });
+
+  it('prefers a plain filename= over a broken filename*= token', () => {
+    expect(parseContentDispositionFilename(`attachment; filename*=UTF-8''bad%ZZ.pdf; filename="good.pdf"`)).toBe(
+      'good.pdf',
+    );
+  });
+
+  it('matches parameter names case-insensitively, as RFC 6266 requires', () => {
+    expect(parseContentDispositionFilename('attachment; FILENAME="Up.pdf"')).toBe('Up.pdf');
+    expect(parseContentDispositionFilename("attachment; FileName*=utf-8''a%20b.pdf")).toBe('a b.pdf');
+  });
+
+  it('matches an unquoted legacy filename (ofw)', () => {
+    expect(parseContentDispositionFilename('attachment; filename=legacy.pdf')).toBe('legacy.pdf');
+  });
+
+  it('keeps spaces inside a quoted filename (ofw)', () => {
+    expect(parseContentDispositionFilename('attachment; filename="legacy file.pdf"')).toBe('legacy file.pdf');
+  });
+
+  it('accepts a language tag in filename*=', () => {
+    expect(parseContentDispositionFilename("attachment; filename*=UTF-8'en'na%C3%AFve.txt")).toBe('naïve.txt');
+  });
+
+  it('decodes an ISO-8859-1 filename*= as Latin-1, not UTF-8', () => {
+    expect(parseContentDispositionFilename("attachment; filename*=iso-8859-1''na%EFve.txt")).toBe('naïve.txt');
+  });
+
+  it('unescapes a backslash-quoted character inside a quoted filename', () => {
+    expect(parseContentDispositionFilename('attachment; filename="say \\"hi\\".txt"')).toBe('say "hi".txt');
+  });
+
+  it('strips quotes around a filename*= value some servers add', () => {
+    expect(parseContentDispositionFilename(`attachment; filename*="UTF-8''q%20d.pdf"`)).toBe('q d.pdf');
+  });
+
+  it('does not read a parameter whose name merely ends in "filename"', () => {
+    expect(parseContentDispositionFilename('attachment; xfilename="nope.pdf"')).toBeUndefined();
+    expect(parseContentDispositionFilename('attachment; myfilename*=UTF-8\'\'nope.pdf')).toBeUndefined();
+  });
+
+  it('reads a header that omits the disposition type', () => {
+    expect(parseContentDispositionFilename('filename="bare.pdf"')).toBe('bare.pdf');
+    expect(parseContentDispositionFilename("filename*=UTF-8''b%20c.pdf")).toBe('b c.pdf');
+    expect(parseContentDispositionFilename('filename="first.pdf"; size=3')).toBe('first.pdf');
+  });
+
+  it('falls back to filename= when filename*= decodes to nothing', () => {
+    expect(parseContentDispositionFilename(`attachment; filename*=UTF-8''; filename="plain.pdf"`)).toBe('plain.pdf');
+  });
+
+  it('skips a valueless parameter before the filename', () => {
+    expect(parseContentDispositionFilename('attachment; weird; filename=ok.pdf')).toBe('ok.pdf');
+  });
+
+  it('treats an empty filename as no filename', () => {
+    expect(parseContentDispositionFilename('attachment; filename=""')).toBeUndefined();
+  });
+
+  it('stays linear on a long adversarial header', () => {
+    const evil = 'attachment; ' + 'filename*='.repeat(20_000) + ';'.repeat(20_000) + ' filename="' + '\\'.repeat(20_000);
+    const t0 = performance.now();
+    parseContentDispositionFilename(evil);
+    expect(performance.now() - t0).toBeLessThan(100);
+  });
+
+  it.each([
+    ['valueless tokens before a far "="', 'attachment' + '; a'.repeat(100_000) + '; filename=x.pdf'],
+    ['bare semicolons', 'attachment' + ';'.repeat(200_000) + 'filename=x.pdf'],
+    ['an unterminated quote', 'attachment; filename="' + 'a'.repeat(200_000)],
+  ])('stays linear on %s', (_label, header) => {
+    const t0 = performance.now();
+    parseContentDispositionFilename(header);
+    expect(performance.now() - t0).toBeLessThan(100);
+  });
 });
 
 describe('parseRetryAfterMs fallback contract', () => {

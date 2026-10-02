@@ -681,6 +681,14 @@ clone of this repo: `node scripts/audit-fs-confinement.mjs ../your-mcp`.
 `EdgeBlockedError` / `UnauthorizedError` / `RateLimitedError` /
 `RequestTimeoutError` classes.
 
+`parseContentDispositionFilename(header)` returns the download's filename or
+`undefined`. It prefers RFC 8187 `filename*=` (charset prefix optional; UTF-8
+and ISO-8859-1 decoded; surrounding quotes dropped) over `filename=` (quoted
+with backslash escapes, or a bare token), matches parameter names
+case-insensitively and whole, and keeps a `filename*=` with broken
+percent-encoding raw when nothing else names the file. It is a linear scan, and
+the result is untrusted: confine any path you build from it.
+
 `decodeJwtClaim(token, claim)` is the generic single-claim reader — returns the
 raw claim value (`unknown`) or `undefined` for an undecodable token / absent
 claim, so a repo doesn't hand-roll its own `extractXFromJwt`.
