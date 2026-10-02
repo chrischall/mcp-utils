@@ -5,7 +5,8 @@
  * Hoists the hand-rolled bounded-fan-out `mapLimit` copy-pasted across the fleet
  * (e.g. artsonia's `src/tools/download.ts`): a pool of `limit` runners pulling
  * the next index off a shared cursor, results collected by index so the output
- * stays in input order.
+ * stays in input order. Also home to {@link verifyAfterWrite}, the bounded,
+ * cancellable re-read-after-a-write loop (kiaaccess/simplisafe).
  */
 
 /**
@@ -59,3 +60,4 @@ export async function mapWithConcurrency<T, R>(
 }
 
 export * from './single-flight.js';
+export * from './verify-after-write.js';

@@ -883,6 +883,35 @@ same-named primitive from `@fetchproxy/server`; this is the zero-dep core one fo
 non-bridge repos. Use `runBoundedBatch` instead when you need an overall deadline
 plus per-item backfill rather than a plain all-or-nothing map.
 
+#### `verifyAfterWrite` — accepted is not confirmed
+
+A 2xx from a command that acts on a device (unlock, arm, start, set a charge
+limit) says the command was queued, not that it happened. `verifyAfterWrite`
+re-reads until the state settles, with both bounds structural
+(fleet-audit#1176, #1117):
+
+```ts
+import { verifyAfterWrite } from '@chrischall/mcp-utils';
+
+const check = await verifyAfterWrite({
+  read: (signal) => client.getLock(serial, { signal }),     // pass the signal on
+  isSettled: (lock) => lock.state === 'locked' || lock.state === 'jammed',
+  initialDelayMs: 2500,
+  intervalMs: 2500,
+  timeoutMs: 15_000,
+});
+// check.outcome: 'settled' | 'timeout' | 'cancelled' | 'read_failed'
+// check.snapshot: the last state read; check.error: the read's failure
+```
+
+`timeoutMs` bounds the whole loop — each `read` gets a signal that fires at the
+deadline, and a wait that would end past it is not started. The caller's
+cancellation (the running tool call's, by default) ends a wait at once. A failed
+re-read never throws: the write already went out, so it comes back as
+`read_failed` for the tool to report as *sent but unverified*. Progress goes out
+through `reportProgress` before each re-read. Lifted from kiaaccess-mcp's
+`verifyCommand`; simplisafe-mcp's lock poll had neither bound.
+
 ### `dates` — date-format converters
 
 `isoToDmy`, `dmyToIso`, `isoToCompactTimestamp`, `todayIso`, `toIsoDateUtc`,
