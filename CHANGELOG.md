@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.10.0](https://github.com/chrischall/mcp-utils/compare/v2.9.0...v2.10.0) (2026-10-02)
+
+
+### Features
+
+* recognise CDN/WAF blocks in the OAuth2 refresher, the bridge healthcheck and 401 responses ([#308](https://github.com/chrischall/mcp-utils/issues/308)) ([4bd7590](https://github.com/chrischall/mcp-utils/commit/4bd75905d04e60ca3ba8dc89ab71850efe312310))
+* skip the 401 refresh/re-login on a CDN/WAF block, and report edge_blocked from bridgeErrorInfo ([#310](https://github.com/chrischall/mcp-utils/issues/310)) ([0fa73de](https://github.com/chrischall/mcp-utils/commit/0fa73dea300405553a64b13a16cc22dcef737b80))
+
 ## [2.9.0](https://github.com/chrischall/mcp-utils/compare/v2.8.0...v2.9.0) (2026-10-01)
 
 
