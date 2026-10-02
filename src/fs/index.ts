@@ -9,7 +9,7 @@
 // off disk as it sends the multipart body — constant memory regardless of size.
 // ────────────────────────────────────────────────────────────────────────────
 
-import { openAsBlob } from 'node:fs';
+import { constants as fsConstants, openAsBlob } from 'node:fs';
 import { open, type FileHandle } from 'node:fs/promises';
 
 import { assertPathWithinRoots } from './confine.js';
@@ -63,8 +63,12 @@ export async function fileBlob(path: string, opts: FileBlobOptions = {}): Promis
 
 /**
  * Read the first `bytes` of a file (for magic-byte / header sniffing — image
- * dimensions, file-type detection) WITHOUT loading the whole file. Returns only
- * as many bytes as were actually read (a short file yields a short buffer).
+ * dimensions, file-type detection; pair with {@link sniffMimeBytes} /
+ * {@link bytesMatchMime}) WITHOUT loading the whole file. Returns only as many
+ * bytes as were actually read (a short file yields a short buffer).
+ *
+ * With `allowedRoots`, the path is confined first and its REAL path opened
+ * with `O_NOFOLLOW`, so a symlink swapped in after the check is refused.
  */
 export async function readFileHead(path: string, bytes: number, opts: ReadFileHeadOptions = {}): Promise<Buffer> {
   const target = opts.allowedRoots ? assertPathWithinRoots(path, opts.allowedRoots) : path;
@@ -72,7 +76,9 @@ export async function readFileHead(path: string, bytes: number, opts: ReadFileHe
   // non-leaking message instead of a raw Node ENOENT (path + stack).
   let fh: FileHandle;
   try {
-    fh = await open(target, 'r');
+    // Confined: `target` is already the real path, so a final-component symlink
+    // here can only be one swapped in since the check — refuse it.
+    fh = await open(target, opts.allowedRoots ? fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) : 'r');
   } catch {
     throw new Error(`Cannot read file: ${path}`);
   }
@@ -87,3 +93,19 @@ export async function readFileHead(path: string, bytes: number, opts: ReadFileHe
 
 export * from './output.js';
 export { assertPathWithinRoots } from './confine.js';
+export { bytesMatchMime, sniffMimeBytes } from './magic.js';
+export {
+  FileWriteRefusedError,
+  writeFileSafe,
+  writeUniqueFile,
+  type FileWriteRefusal,
+  type WriteFileSafeOptions,
+  type WriteUniqueFileOptions,
+} from './write.js';
+export {
+  UploadRefusedError,
+  vetUploadFile,
+  type UploadRefusal,
+  type VetUploadOptions,
+  type VettedUpload,
+} from './upload-guard.js';

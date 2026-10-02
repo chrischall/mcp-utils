@@ -459,14 +459,66 @@ without re-reading). Pass `readFile` to inject a reader in tests.
 ### `fs` — streaming file helpers (uploads) & binary output
 
 `fileBlob`, `readFileHead`, `resolveOutputDir`, `uniquePath`,
-`writeBinaryOutput`, `sniffMimeBytes`, `assertPathWithinRoots`.
+`writeBinaryOutput`, `writeFileSafe`, `writeUniqueFile`, `vetUploadFile`,
+`sniffMimeBytes`, `bytesMatchMime`, `assertPathWithinRoots`.
 
 The binary-output kit (hoisted from gemini + flightaware) is the fleet
 convention for tools that generate bytes: `resolveOutputDir(perCall,
 '<SVC>_OUTPUT_DIR')` resolves arg → env → cwd (creating the dir),
 `writeBinaryOutput({ dir, baseName, base64, mimeType })` writes to a
-**non-overwriting** path (`name.png`, `name-2.png`, …) and returns it, and
-`sniffMimeBytes` magic-byte-detects PNG/JPEG/WebP/GIF.
+**non-overwriting** path (`name.png`, `name-2.png`, …) and returns it.
+Each name is claimed with an exclusive, no-follow create
+(`O_CREAT | O_EXCL | O_NOFOLLOW`), so two writers can't pick the same name and
+a symlink planted at the name is skipped, never written through.
+
+**Safe writes** (from accessoticketing's `wx` writer and infinitecampus's
+`writeConfined`): `writeFileSafe(path, bytes, { overwrite?, mode?, allowedRoots? })`
+is one `open(O_NOFOLLOW | O_EXCL)` — it refuses an existing file (unless
+`overwrite`, which uses `O_TRUNC` and still refuses a symlink) and never
+follows a final-component symlink. `writeUniqueFile({ dir, baseName, extension,
+bytes, mode?, allowedRoots? })` is the async, never-clobbering `name-N` writer.
+Refusals throw `FileWriteRefusedError` with `reason`: `'exists' | 'symlink' |
+'outside-roots'`. Prefer these to `uniquePath` + your own write (a
+check-then-write race).
+
+**Magic bytes**: `sniffMimeBytes(head)` names PNG / JPEG / WebP / GIF, PDF
+(`%PDF-`), zip (`PK\x03\x04` and friends — mscz, mxl, docx, epub), MIDI
+(`MThd`) and ISO-BMFF by `ftyp` brand (HEIC / HEIF / AVIF / MOV / M4A / MP4),
+else `undefined`. `bytesMatchMime(head, mime)` answers "does this file start
+like the type it claims" and fails closed for a MIME it has no signature for.
+16 bytes of `readFileHead` covers every signature.
+
+```ts
+import { readFileHead, sniffMimeBytes } from '@chrischall/mcp-utils';
+
+// musescore: a gated download serves an HTML "Forbidden" page with HTTP 200.
+if (sniffMimeBytes(await readFileHead(saved, 16, { allowedRoots: [outDir] })) !== 'application/pdf') throw …;
+```
+
+**Upload guard** (skylight's `vetUploadFile` + vibo's confinement): vet a
+model-supplied local path before a byte of it goes upstream.
+
+```ts
+import { fileBlob, vetUploadFile } from '@chrischall/mcp-utils';
+
+const file = await vetUploadFile(args.image_path, {
+  mimeByExt: { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', heic: 'image/heic', mov: 'video/quicktime' },
+  maxBytes: 20 * 1024 * 1024,
+  allowedRoots: uploadRoots ?? 'unconfined', // required — leaving it open is a visible choice
+  denyHiddenSegments: true, // optional: refuse .ssh/…, .env.jpg
+  readAll: true, // optional: the bytes, read from the vetted descriptor
+});
+// Stream instead of buffering: read the REAL path, re-confined.
+const blob = await fileBlob(file.path, { type: file.mime, allowedRoots: file.allowedRoots ?? [file.path] });
+```
+
+In order it checks: confinement (through symlinks) → extension allowlist (an
+extensionless path is refused) → `lstat` (not a symlink, a regular file, under
+`maxBytes`) → hidden segments below the root (opt-in) → ONE
+`O_NOFOLLOW | O_NONBLOCK` open of the real path, whose `fstat` must be the
+same regular file → magic bytes must match the claimed MIME. Relative paths
+resolve against `baseDir` (default cwd); `~` is expanded. Refusals throw
+`UploadRefusedError` (a `McpToolError`) with `reason`.
 
 ```ts
 import { fileBlob, readFileHead } from '@chrischall/mcp-utils';
