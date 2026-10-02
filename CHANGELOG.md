@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.9.0](https://github.com/chrischall/mcp-utils/compare/v2.8.0...v2.9.0) (2026-10-01)
+
+
+### Features
+
+* **healthcheck:** report a CDN/WAF block as edge_blocked, not credential_rejected ([#306](https://github.com/chrischall/mcp-utils/issues/306)) ([89ab502](https://github.com/chrischall/mcp-utils/commit/89ab5029bfe01b07141f8227d616c80845c5dde6))
+
 ## [2.8.0](https://github.com/chrischall/mcp-utils/compare/v2.7.1...v2.8.0) (2026-09-27)
 
 
