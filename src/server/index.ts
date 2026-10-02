@@ -45,6 +45,7 @@ export * from './confirm-token.js';
 export * from './confirm-env.js';
 export * from './confirm-spent-file.js';
 export * from './confirm-write.js';
+export * from './merge-write.js';
 import { withCallSignal } from '../cancel/index.js';
 import { withCallerCapabilities } from '../caller/index.js';
 import type { CallerCapabilities } from '../caller/index.js';
