@@ -906,7 +906,7 @@ const check = await verifyAfterWrite({
 
 `timeoutMs` bounds the whole loop — each `read` gets a signal that fires at the
 deadline, and a wait that would end past it is not started. The caller's
-cancellation (the running tool call's, by default) ends a wait at once. A failed
+cancellation — your `signal`, always combined with the running tool call's — ends a wait at once. A failed
 re-read never throws: the write already went out, so it comes back as
 `read_failed` for the tool to report as *sent but unverified*. Progress goes out
 through `reportProgress` before each re-read. Lifted from kiaaccess-mcp's

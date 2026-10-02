@@ -26,7 +26,7 @@
  * no-op unless the client sent a progress token); a failing reporter is ignored.
  */
 
-import { currentCallSignal, reportProgress } from '../cancel/index.js';
+import { reportProgress, withAmbientCancellation } from '../cancel/index.js';
 
 /** Options for {@link verifyAfterWrite}. */
 export interface VerifyAfterWriteOptions<T> {
@@ -44,7 +44,10 @@ export interface VerifyAfterWriteOptions<T> {
   intervalMs?: number;
   /** Delay before the FIRST read (a device that cannot have moved yet). Default 0. */
   initialDelayMs?: number;
-  /** Cancellation. Defaults to the running tool call's ({@link currentCallSignal}). */
+  /**
+   * The caller's own cancellation. ALWAYS combined with the running tool call's
+   * ({@link currentCallSignal}) — whichever aborts first stops the loop.
+   */
   signal?: AbortSignal;
   /**
    * Called before each re-read after the first. Defaults to {@link reportProgress}
@@ -68,6 +71,7 @@ export interface VerifyAfterWriteResult<T> {
   snapshot: T | undefined;
   /** Reads that returned a snapshot. */
   attempts: number;
+  /** Milliseconds from the call to the answer, including any initial delay and waits. */
   elapsedMs: number;
   /** The read's error, for `read_failed`. */
   error?: unknown;
@@ -94,7 +98,10 @@ function wait(ms: number, signal: AbortSignal): Promise<void> {
 export async function verifyAfterWrite<T>(opts: VerifyAfterWriteOptions<T>): Promise<VerifyAfterWriteResult<T>> {
   const { read, isSettled, timeoutMs } = opts;
   const intervalMs = opts.intervalMs ?? 2_000;
-  const caller = opts.signal ?? currentCallSignal();
+  // Combined, never either-or: a caller's own signal must not switch off the
+  // tool call's cancellation (or vice versa) — the convention every other call
+  // site in this package follows.
+  const caller = withAmbientCancellation(opts.signal);
   const onProgress =
     opts.onProgress ??
     ((p: { attempt: number; elapsedMs: number; timeoutMs: number }) =>

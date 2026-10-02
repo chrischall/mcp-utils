@@ -109,6 +109,31 @@ describe('verifyAfterWrite', () => {
     expect(at).toEqual([0]);
   });
 
+  it("an explicit signal COMBINES with the tool call's cancellation rather than replacing it", async () => {
+    const { read, at } = scripted(['unlocked']);
+    const ambient = new AbortController();
+    const own = new AbortController();
+    const p = withCallSignal(ambient.signal, () =>
+      verifyAfterWrite({ read, isSettled: () => false, intervalMs: 2500, timeoutMs: 15_000, signal: own.signal, onProgress: () => {} }),
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    ambient.abort(); // the client cancelled the tool call; the caller's own signal never fires
+    expect((await p).outcome).toBe('cancelled');
+    expect(at).toEqual([0]);
+
+    const second = scripted(['unlocked']);
+    const t0 = Date.now();
+    const ambient2 = new AbortController();
+    const own2 = new AbortController();
+    const p2 = withCallSignal(ambient2.signal, () =>
+      verifyAfterWrite({ read: second.read, isSettled: () => false, intervalMs: 2500, timeoutMs: 15_000, signal: own2.signal, onProgress: () => {} }),
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    own2.abort(); // and the caller's own signal still works alongside the ambient one
+    expect((await p2).outcome).toBe('cancelled');
+    expect(second.at).toEqual([t0]);
+  });
+
   it('does not read at all when already cancelled', async () => {
     const { read } = scripted(['x']);
     const ac = new AbortController();
