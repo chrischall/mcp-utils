@@ -751,7 +751,9 @@ const rows = await runBoundedBatch(ids, (id, signal) => fetchRow(id, signal), {
 a single hung row can't wedge the call. Queued items that had not started are
 never dispatched after the deadline, so a worker need not check the signal just
 to avoid fetching abandoned rows (check it anyway to stop between retries
-inside one item). It always returns a full-length,
+inside one item). The caller's cancellation — `opts.signal`, or the running
+tool call's by default — ends the batch the same way, at once: a client that
+cancelled is not fetched for until the deadline. It always returns a full-length,
 input-ordered array. `setTimer`/`clearTimer` are injectable for tests. This
 hoists zillow's bulk-tool deadline + `pending`-backfill primitive.
 
