@@ -48,6 +48,12 @@ describe('redactSecrets ReDoS resistance', () => {
     ['"cookie":["', '"cookie":["'.repeat(18_000)],
     ['"set-cookie":"\\', '"set-cookie":"\\'.repeat(14_000)],
     ['"token":1', '"token":1'.repeat(22_000)],
+    // fleet-audit#1160: the Google OAuth2 access/refresh shapes
+    // (GOOGLE_OAUTH_TOKEN_RE) — prefix runs, and a left-delimited `1//` before
+    // a body char on every repeat.
+    ['ya29.', 'ya29.'.repeat(40_000)],
+    ['1//', '1//'.repeat(70_000)],
+    [' 1//x', ' 1//x'.repeat(40_000)],
   ])('is linear on 200 KB of `%s` runs', (_label, evil) => {
     expect(elapsedMs(() => redactSecrets(evil))).toBeLessThan(100);
   });

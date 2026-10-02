@@ -64,18 +64,3 @@ describe('redactSecrets — Google OAuth2 tokens', () => {
     expect(redactSecrets(s)).toBe(s);
   });
 });
-
-describe('Google OAuth2 patterns stay linear', () => {
-  const elapsedMs = (fn: () => void): number => {
-    const t = performance.now();
-    fn();
-    return performance.now() - t;
-  };
-  it.each([
-    ['`ya29.` runs', 'ya29.'.repeat(40_000)],
-    ['`1//` runs', '1//'.repeat(70_000)],
-    ['`x1//` runs', ' 1//x'.repeat(40_000)],
-  ])('is linear on 200 KB of %s', (_label, evil) => {
-    expect(elapsedMs(() => redactSecrets(evil))).toBeLessThan(100);
-  });
-});
