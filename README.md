@@ -1196,6 +1196,47 @@ registerBridgeHealthcheckTool({
 });
 ```
 
+A consumer that re-throws a typed bridge failure inside its own `Error` (to
+put a remedy in the message) keeps the typed error as `cause`; the healthcheck
+classifies that cause — `session_not_ready`, `bridge_down`, `http`,
+`edge_blocked`, a capability gap — so no `classifyThrown` is needed just to
+unwrap it.
+
+#### The direct-first router: `createDirectFirstTransport`
+
+The `fallback` above, hoisted from hemnet-mcp and booli-mcp. It owns the leg
+choice; the consumer keeps its own leg types and wraps its one call:
+
+```ts
+import { createDirectFirstTransport, readTransportMode } from '@chrischall/mcp-utils/fetchproxy';
+
+const fallback = createDirectFirstTransport({
+  direct: new DirectTransport(opts),                    // throws EdgeBlockedError when walled
+  bridge: () => new HemnetFetchproxyTransport(opts),    // built lazily, at most once
+  mode: readTransportMode('HEMNET_TRANSPORT'),          // direct | fetchproxy | auto (default)
+  serverName: 'hemnet-mcp',
+  hostLabel: 'www.hemnet.se',
+});
+const transport: HemnetTransport = {
+  graphql: (q, v) => fallback.run((leg) => leg.graphql(q, v)),
+  status: () => fallback.status(),
+  bridgeTransport: () => fallback.bridgeTransport(),
+};
+```
+
+In `auto`, every call tries direct until one fails with an **edge block** — an
+`EdgeBlockedError`, or any error carrying a refusal page or `cf-mitigated`
+(the same rule as `detectEdgeBlock` and the healthcheck's `edge_blocked`); that
+call is re-run on the bridge (safe even for a write: the request never reached
+the origin) and every later call stays there, since the wall fingerprints the
+client. Other direct failures propagate. `direct` never falls back;
+`fetchproxy` never uses direct. A cancelled call (its `signal`, or the ambient
+tool-call signal) runs no leg and is never re-sent over the bridge. `status()`
+adds `blocked_by: '<vendor>'` after a switch; `stats()` counts requests and
+failures per leg, edge blocks, and when it switched. `shouldFallBack`,
+`onFallback` and `bridgeHealth` override the judgement, the stderr notice, and
+how the bridge's `runProbe`/`status` slice is found.
+
 ### `healthcheck` — credential healthchecks *(subpath, no optional peers)*
 
 ```ts
