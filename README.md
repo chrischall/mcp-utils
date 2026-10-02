@@ -1258,6 +1258,43 @@ turned up behaviour the first cut did not have:
   had one, and every one used it to keep its test suite off the developer's real
   `$HOME`.
 
+#### More than one process on one store
+
+Claude Desktop beside a Claude Code session is two processes reading and
+writing the same state file. Two opt-ins cover it (fleet-audit#1116, #1008):
+
+- **`new SessionStore({ ..., fresh: true })`** — re-reads the file before every
+  `get`/`list`/`getActiveSession`, and does every `add`/`remove` as a
+  read-modify-write under a lock file (`<filePath>.lock`). Without it each
+  process works from the snapshot its constructor read and rewrites the whole
+  file from it, dropping a sibling's sign-in and undoing its sign-out — the bug
+  `simplepractice-mcp`, `kiaaccess-mcp` and `freshbooks-mcp` each worked around
+  by re-constructing the store per access. `reload()` does the same re-read on
+  demand for a default store. Re-adding an existing key now moves it to the end,
+  so the active session a restarted process restores is the one last added.
+- **`new TokenManager({ ..., persistence, reloadBeforeRefresh: true })`** —
+  before spending a refresh token, takes the store's cross-process lock
+  (`withLock`, provided by `createFileStatePersistence`), re-reads the store, and
+  adopts a newer record a sibling wrote: its access token if still good,
+  otherwise its refresh token is the one spent. The rotated result is written
+  before the lock is released. For services that rotate single-use refresh
+  tokens this is the difference between one exchange and an `invalid_grant`
+  lockout.
+
+The lock itself is exported as `withFileLock(lockPath, fn, { staleMs, pollMs, signal })`
+(and `withFileLockSync` for synchronous critical sections): a lock file holding
+`<pid>:<uuid>`, created by hard-linking a staged file into place so it never
+exists without its owner. It is broken when its holder is dead or after `staleMs`
+(an ownerless or unparseable lock counts as held until then), released only by
+its owner, and skipped (the section runs unlocked) when the directory is not
+writable at all.
+
+Every store in this module — `SessionStore`, `createFileStatePersistence`,
+`createKeyedFileStatePersistence` — replaces its file atomically (temp file,
+fsync, rename), so a lock-free reader never sees half a file. A fresh-mode
+`SessionStore` that still fails to parse a file re-reads it under the lock before
+quarantining it as corrupt.
+
 Records are written in a small envelope (`{ v: 1, boundTo?, state }`). A bare
 record written by an earlier version is still read, so nothing already on disk
 is lost.
