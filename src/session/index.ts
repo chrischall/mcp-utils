@@ -36,7 +36,6 @@ import { z } from 'zod';
 import {
   existsSync,
   readFileSync,
-  writeFileSync,
   mkdirSync,
   chmodSync,
   renameSync,
@@ -59,6 +58,7 @@ export {
   type LoginPageSignals,
 } from './login-page.js';
 import { withFileLock, withFileLockSync } from './file-lock.js';
+import { writeFileAtomicSync } from './atomic-write.js';
 export { withFileLock, withFileLockSync, type FileLockOptions } from './file-lock.js';
 
 // ===========================================================================
@@ -498,13 +498,28 @@ export class SessionStore<T extends Record<string, unknown>> {
   /** Read-modify-write under the cross-process lock (fresh mode), else in place. */
   private mutate<R>(fn: () => R): R {
     if (!this.fresh) return fn();
-    return withFileLockSync(`${this.filePath}.lock`, () => {
-      this.loadFromDisk();
+    return withFileLockSync(this.lockPath(), () => {
+      this.loadFromDisk(true);
       return fn();
     });
   }
 
-  private loadFromDisk(): void {
+  private lockPath(): string {
+    return `${this.filePath}.lock`;
+  }
+
+  /**
+   * Load the file into memory. `underLock` says the caller already holds the
+   * store's lock, so no writer can be mid-write.
+   *
+   * A fresh-mode store reads WITHOUT the lock on every get/list, so a parse
+   * failure there may be a torn read rather than a corrupt file. Before
+   * anything is quarantined it is re-read under the lock; only a file that is
+   * still unparseable then is treated as corrupt (mcp-utils#330 — writes are
+   * atomic now, so this is defence in depth, e.g. against a writer on an older
+   * mcp-utils that still rewrites in place).
+   */
+  private loadFromDisk(underLock = false): void {
     if (!existsSync(this.filePath)) {
       // Absent means empty — a sibling may have deleted the file since we last read it.
       this.sessions = new Map();
@@ -516,6 +531,10 @@ export class SessionStore<T extends Record<string, unknown>> {
       const keys = Array.from(this.sessions.keys());
       this.mostRecentKey = keys[keys.length - 1] ?? null;
     } catch (err) {
+      if (this.fresh && !underLock) {
+        withFileLockSync(this.lockPath(), () => this.loadFromDisk(true));
+        return;
+      }
       // A corrupt cache must not brick the server, but it also must not be
       // silently destroyed: the next save() would otherwise overwrite the file
       // and permanently lose the prior credentials. Preserve the original
@@ -581,19 +600,14 @@ export class SessionStore<T extends Record<string, unknown>> {
     // mode applies to every directory this call creates, so intermediate dirs
     // are never left at the umask default (0755).
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    // Tighten a pre-existing file BEFORE writing new secret content — the
-    // write-then-chmod ordering leaves a window where fresh secrets sit in a
-    // file that may still be world-readable.
-    if (existsSync(this.filePath)) {
-      try {
-        chmodSync(this.filePath, 0o600);
-      } catch {
-        /* best-effort */
-      }
-    }
-    writeFileSync(this.filePath, this.serialize(), { mode: 0o600 });
-    // Re-assert file + dir perms (writeFileSync's mode and mkdirSync's mode
-    // only apply on creation, not to pre-existing loose entries).
+    // Atomic replace (temp file, fsync, rename), never an in-place rewrite:
+    // a sibling's lock-free fresh-mode read that lands mid-write would see a
+    // truncated file and quarantine the LIVE store (mcp-utils#330). The temp
+    // file is 0600 before it is renamed in, so fresh secrets never sit in a
+    // loose file; a pre-existing loose file is replaced rather than reused.
+    writeFileAtomicSync(this.filePath, this.serialize());
+    // Re-assert file + dir perms (mkdirSync's mode only applies on creation,
+    // not to a pre-existing loose directory).
     try {
       chmodSync(this.filePath, 0o600);
       chmodSync(dir, 0o700);
@@ -891,8 +905,6 @@ export function createFileStatePersistence<T>(
 
     save(state: T): void {
       const dir = dirname(filePath);
-      // A unique temp name so two writers cannot share (and tear) one temp file.
-      const tmp = `${filePath}.tmp-${randomBytes(6).toString('hex')}`;
       // Only a directory THIS call creates gets tightened. `resolveStateDir()`
       // without a `subdir` is `$HOME`, and chmodding a user's home directory to
       // 0700 is not an acceptable side effect of writing one token file.
@@ -907,23 +919,17 @@ export function createFileStatePersistence<T>(
           boundTo = { salt, digest: bindingDigest(secret, salt) };
         }
         const envelope: StateEnvelope<T> = { v: 1, ...(boundTo !== undefined ? { boundTo } : {}), state };
-        writeFileSync(tmp, JSON.stringify(envelope, null, 2), { mode: 0o600 });
-        // Tighten BEFORE the rename: the window where fresh secrets sit in a
-        // possibly-loose file should not exist at all.
-        chmodSync(tmp, 0o600);
-        renameSync(tmp, filePath);
+        // Temp file + fsync + rename (writeFileAtomicSync), tightened to 0600
+        // before the rename: a reader never sees a torn file, and fresh secrets
+        // never sit in a loose one.
+        writeFileAtomicSync(filePath, JSON.stringify(envelope, null, 2));
         chmodSync(filePath, 0o600);
       } catch (err) {
-        // Best-effort cleanup of the temp file so a failed write does not
-        // litter the data dir. The failure itself is RE-THROWN: whether losing
-        // a write is survivable is the manager's call (see `onPersistError`),
-        // not this file's — freshbooks-mcp's rotating single-use tokens make it
-        // fatal, most services make it a nuisance.
-        try {
-          if (existsSync(tmp)) unlinkSync(tmp);
-        } catch {
-          /* best-effort */
-        }
+        // writeFileAtomicSync already removed its temp file. The failure itself
+        // is RE-THROWN: whether losing a write is survivable is the manager's
+        // call (see `onPersistError`), not this file's — freshbooks-mcp's
+        // rotating single-use tokens make it fatal, most services make it a
+        // nuisance.
         throw err;
       }
     },
@@ -1013,23 +1019,11 @@ export function createKeyedFileStatePersistence<T>(
 
   const writeAll = (all: Record<string, unknown>): void => {
     const dir = dirname(filePath);
-    const tmp = `${filePath}.tmp-${randomBytes(6).toString('hex')}`;
     const dirExisted = existsSync(dir);
-    try {
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      if (!dirExisted) chmodSync(dir, 0o700);
-      writeFileSync(tmp, JSON.stringify(all, null, 2), { mode: 0o600 });
-      chmodSync(tmp, 0o600);
-      renameSync(tmp, filePath);
-      chmodSync(filePath, 0o600);
-    } catch (err) {
-      try {
-        if (existsSync(tmp)) unlinkSync(tmp);
-      } catch {
-        /* best-effort */
-      }
-      throw err;
-    }
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (!dirExisted) chmodSync(dir, 0o700);
+    writeFileAtomicSync(filePath, JSON.stringify(all, null, 2));
+    chmodSync(filePath, 0o600);
   };
 
   return {

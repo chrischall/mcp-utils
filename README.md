@@ -1253,10 +1253,18 @@ writing the same state file. Two opt-ins cover it (fleet-audit#1116, #1008):
   lockout.
 
 The lock itself is exported as `withFileLock(lockPath, fn, { staleMs, pollMs, signal })`
-(and `withFileLockSync` for synchronous critical sections): an `O_EXCL` lock file
-holding `<pid>:<uuid>`, broken when its holder is dead or after `staleMs`, released
-only by its owner, and skipped (the section runs unlocked) when the directory is
-not writable at all.
+(and `withFileLockSync` for synchronous critical sections): a lock file holding
+`<pid>:<uuid>`, created by hard-linking a staged file into place so it never
+exists without its owner. It is broken when its holder is dead or after `staleMs`
+(an ownerless or unparseable lock counts as held until then), released only by
+its owner, and skipped (the section runs unlocked) when the directory is not
+writable at all.
+
+Every store in this module — `SessionStore`, `createFileStatePersistence`,
+`createKeyedFileStatePersistence` — replaces its file atomically (temp file,
+fsync, rename), so a lock-free reader never sees half a file. A fresh-mode
+`SessionStore` that still fails to parse a file re-reads it under the lock before
+quarantining it as corrupt.
 
 Records are written in a small envelope (`{ v: 1, boundTo?, state }`). A bare
 record written by an earlier version is still read, so nothing already on disk
