@@ -215,6 +215,138 @@ export function extractJsonAfterMarker(
   }
 }
 
+/** Index just past the string literal opening at `text[i]` (`"`, `'` or a backtick), or `-1`. */
+function skipStringLiteral(text: string, i: number): number {
+  const quote = text[i];
+  for (let j = i + 1; j < text.length; j++) {
+    const ch = text[j];
+    if (ch === '\\') j++;
+    else if (ch === quote) return j + 1;
+  }
+  return -1;
+}
+
+/**
+ * Index of the `,` / closer that ends the JS value starting at `text[i]`, or
+ * `-1` if it never ends. Any JS expression a sibling might hold — a nested
+ * object, a `function(a, b) { … }`, `new Date(…)` — is skipped by tracking
+ * `(`/`[`/`{` depth and string literals; only a depth-0 `,` or closer ends it.
+ */
+function skipJsValue(text: string, i: number): number {
+  let depth = 0;
+  while (i < text.length) {
+    const ch = text[i]!;
+    if (ch === '"' || ch === "'" || ch === '`') {
+      i = skipStringLiteral(text, i);
+      if (i < 0) return -1;
+      continue;
+    }
+    if (ch === '{' || ch === '[' || ch === '(') depth++;
+    else if (ch === '}' || ch === ']' || ch === ')') {
+      if (depth === 0) return i;
+      depth--;
+    } else if (ch === ',' && depth === 0) return i;
+    i++;
+  }
+  return -1;
+}
+
+const JS_WHITESPACE = /\s/;
+function skipWhitespace(text: string, i: number): number {
+  while (i < text.length && JS_WHITESPACE.test(text[i]!)) i++;
+  return i;
+}
+
+/**
+ * Find the first of `markers` in `text`, take the object literal that follows
+ * it (the next `{`), and return the parsed value of its **top-level** property
+ * `key` — without parsing the rest of the object.
+ *
+ * For SSR stores that cannot be parsed whole: Tock's `window.$REDUX_STATE`
+ * embeds `function` values in its `navigation` slice, so
+ * {@link extractJsonAfterMarker} fails on the store while every other slice is
+ * plain JSON. Sibling values are skipped as arbitrary JS (nested objects,
+ * function literals, calls); keys may be double-quoted (escapes decoded),
+ * single-quoted, or bare identifiers. A same-named key nested inside a sibling
+ * never matches. One linear pass. Hoisted from tock-mcp's `extractReduxSlice`
+ * (fleet audit #1130).
+ *
+ * Returns `undefined` — never `null`, which is a legitimate slice value (a
+ * logged-out `"patron":null`) — when the marker, the object, or the key is
+ * absent, the object is unterminated, or the value is not valid JSON (pass
+ * `{ sanitize: true }` to repair bare `undefined` literals first, see
+ * {@link sanitizeJsLiterals}). Limitation: a regex literal containing a quote
+ * in a sibling value can confuse the skip, as in every string-aware walker here.
+ */
+export function extractJsonKeyAfterMarker(
+  text: string,
+  markers: string | string[],
+  key: string,
+  opts: ExtractJsonOptions = {},
+): unknown {
+  const list = Array.isArray(markers) ? markers : [markers];
+  let from = -1;
+  for (const m of list) {
+    const i = text.indexOf(m);
+    if (i >= 0) {
+      from = i + m.length;
+      break;
+    }
+  }
+  if (from < 0) return undefined;
+  const open = text.indexOf('{', from);
+  if (open < 0) return undefined;
+
+  let pos = open + 1;
+  for (;;) {
+    pos = skipWhitespace(text, pos);
+    const first = text[pos];
+    if (first === undefined || first === '}') return undefined;
+
+    // Property name.
+    let name: string;
+    if (first === '"' || first === "'") {
+      const end = skipStringLiteral(text, pos);
+      if (end < 0) return undefined;
+      const inner = text.slice(pos + 1, end - 1);
+      name = inner;
+      if (first === '"') {
+        try {
+          name = JSON.parse(text.slice(pos, end)) as string;
+        } catch {
+          // Not a JSON string (e.g. a JS-only escape): compare it raw.
+        }
+      }
+      pos = end;
+    } else {
+      const start = pos;
+      while (pos < text.length && IDENT_CHAR.test(text[pos]!)) pos++;
+      if (pos === start) return undefined;
+      name = text.slice(start, pos);
+    }
+
+    pos = skipWhitespace(text, pos);
+    if (text[pos] !== ':') return undefined;
+    const valueStart = skipWhitespace(text, pos + 1);
+    const valueEnd = skipJsValue(text, valueStart);
+    if (valueEnd < 0) return undefined;
+
+    if (name === key) {
+      let raw = text.slice(valueStart, valueEnd).trim();
+      if (opts.sanitize) raw = sanitizeJsLiterals(raw);
+      try {
+        return JSON.parse(raw) as unknown;
+      } catch {
+        return undefined;
+      }
+    }
+
+    pos = valueEnd;
+    if (text[pos] !== ',') return undefined; // the object's closer: key absent
+    pos++;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // JSON-LD / OpenGraph readers
 // ---------------------------------------------------------------------------
