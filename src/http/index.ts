@@ -506,6 +506,25 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   }
 
   /**
+   * Abandon `attempt` without reading its body: disarm the timer AND cancel
+   * the body stream. Under undici a Response whose body is neither read nor
+   * cancelled keeps its connection reserved until GC, so a burst of 429s —
+   * exactly when retry runs — would pin one socket per discarded attempt
+   * against the upstream's per-host limit for the whole tool call (fleet
+   * audit #1056). Never throws: a custom `fetchImpl` may hand back a body
+   * that is null, already consumed, or lacks `cancel()`.
+   */
+  function discard(attempt: Attempt): void {
+    attempt.done();
+    try {
+      const body = attempt.res.body as { cancel?: () => Promise<void> } | null | undefined;
+      body?.cancel?.()?.catch(() => {});
+    } catch {
+      // A body that refuses cancellation has nothing left to release.
+    }
+  }
+
+  /**
    * Read the body of `attempt` under its timeout, then disarm the timer.
    * Races the read against the timer rather than trusting the stream to
    * honour the abort signal, so a custom `fetchImpl` whose body ignores the
@@ -610,7 +629,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
       const res = current.res;
 
       if (retryStatuses.includes(res.status) && attempt < retry.count) {
-        current.done();
+        discard(current);
         attempt += 1;
         const delay = retry.honorRetryAfter
           ? parseRetryAfterMs(res.headers.get('retry-after'), {
@@ -643,7 +662,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     const res = attempt.res;
     let text = '';
     if (/json/i.test(res.headers.get('content-type') ?? '')) {
-      attempt.done();
+      discard(attempt);
     } else {
       text = await readBody(attempt, (r) => r.text()).catch(() => '');
     }
@@ -657,7 +676,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     const res = attempt.res;
 
     if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);
-    if (res.status === 429 || res.status === 204) attempt.done();
+    if (res.status === 429 || res.status === 204) discard(attempt);
     if (res.status === 429) throw rateLimited();
     if (res.status === 204) return undefined as T;
 
@@ -675,7 +694,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     const res = attempt.res;
 
     if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);
-    if (res.status === 429) attempt.done();
+    if (res.status === 429) discard(attempt);
     if (res.status === 429) throw rateLimited();
 
     const text = await readBody(attempt, (r) => r.text());
@@ -691,7 +710,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     const res = attempt.res;
 
     if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);
-    if (res.status === 429) attempt.done();
+    if (res.status === 429) discard(attempt);
     if (res.status === 429) throw rateLimited();
 
     if (!res.ok) {

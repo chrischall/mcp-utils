@@ -741,7 +741,9 @@ describe('createApiClient retry statuses', () => {
 
   it('an exhausted retried 5xx surfaces as ApiError (not RateLimitedError)', async () => {
     const sleep = vi.fn(async () => {});
-    const { fn, calls } = stubFetch([new Response('boom', { status: 502 })]);
+    // One Response per attempt, as a real fetch returns: the retried one's
+    // body is cancelled (#1056), so it cannot be replayed as the final answer.
+    const { fn, calls } = stubFetch([new Response('boom', { status: 502 }), new Response('boom', { status: 502 })]);
     const client = createApiClient({
       baseUrl: 'https://x.test',
       getToken: () => 't',
