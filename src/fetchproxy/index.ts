@@ -1244,6 +1244,35 @@ export function bridgeHealthcheckDescription(hostLabel: string, probePath: strin
   return `Round-trips a small public ${hostLabel} URL (${probePath}) through ContextMint Bridge (your signed-in browser tab) and returns diagnostics: the bridge's role (host/peer/null), port, version, the extension link (linked / pair pending / not attached / never answered), the elapsed round-trip time, and a plain-English hint distinguishing 'bridge never came up' from 'extension not connected' from 'this browser can't serve a capability' from 'real ${hostLabel}-side problem'. Read-only, no auth required.`;
 }
 
+/** How deep {@link typedCauseOf} follows a `cause` chain. */
+const CAUSE_DEPTH_MAX = 8;
+
+/**
+ * The first error along `err`'s `cause` chain that says something typed — a
+ * fetchproxy error the raw classifier names, a session-not-ready, an edge
+ * block, or a browser capability gap — or `err` itself when nothing does.
+ * Bounded and cycle-safe: a cause chain is consumer data.
+ */
+function typedCauseOf(err: unknown): unknown {
+  const seen = new Set<unknown>([err]);
+  let current: unknown = err;
+  for (let depth = 0; depth < CAUSE_DEPTH_MAX; depth++) {
+    const cause = current instanceof Error ? current.cause : undefined;
+    if (cause === undefined || cause === null || seen.has(cause)) break;
+    seen.add(cause);
+    if (
+      cause instanceof FetchproxySessionNotReadyError ||
+      classifyBridgeErrorKind(cause) !== 'other' ||
+      edgeBlockOf(cause) !== null ||
+      capabilityGapOf(cause) !== null
+    ) {
+      return cause;
+    }
+    current = cause;
+  }
+  return err;
+}
+
 /**
  * The bridge healthcheck's whole body, without the registration.
  *
@@ -1329,26 +1358,36 @@ export async function runBridgeHealthcheck(
   let customDetail: Record<string, unknown> | undefined;
   let capabilityGap: CapabilityGap | undefined;
   let edge: { vendor: string } | null = null;
+  // The typed cause classified in place of a wrapping error, when there was one.
+  let pairCodeSource: unknown = thrown;
   if (rawError) {
     // `runProbe` (or classifyBridgeError on the direct route) already
     // classified the throw in fetchproxy's raw vocabulary. Trust that as
     // the discriminator — mapping `'other'` → `'unknown'` to match the
     // envelope — except for a session-not-ready throw, which a 2.4 server
     // still files under 'other': the typed `thrown` settles it either way.
-    let kind: string = rawError.kind === 'other' ? 'unknown' : rawError.kind;
-    if (thrown instanceof FetchproxySessionNotReadyError) {
+    // A consumer that re-throws a typed bridge failure inside its own Error
+    // (to put a remedy in the message, keeping the original as `cause`) files
+    // as 'other' here. Classify the typed cause instead — hemnet and booli
+    // each hand-rolled a `classifyThrown` for exactly this. `classifyThrown`
+    // below still sees the error as thrown.
+    const subject = rawError.kind === 'other' && thrown !== undefined ? typedCauseOf(thrown) : thrown;
+    if (subject !== thrown) pairCodeSource = subject;
+    const subjectKind = subject === thrown ? rawError.kind : classifyBridgeErrorKind(subject);
+    let kind: string = subjectKind === 'other' ? 'unknown' : subjectKind;
+    if (subject instanceof FetchproxySessionNotReadyError) {
       kind = 'session_not_ready';
-      bridgeHint = thrown.hint;
-    } else if (thrown instanceof FetchproxyBridgeDownError) {
-      bridgeHint = thrown.hint;
-    } else if (thrown !== undefined && mayBeCapabilityError(rawError.kind)) {
+      bridgeHint = subject.hint;
+    } else if (subject instanceof FetchproxyBridgeDownError) {
+      bridgeHint = subject.hint;
+    } else if (subject !== undefined && mayBeCapabilityError(subjectKind)) {
       // The server's classifier files a browser gap under 'protocol' (or
       // 'hello_rejected'); name it, so the ladder can say whose fault it isn't.
-      const gap = capabilityGapOf(thrown);
+      const gap = capabilityGapOf(subject);
       if (gap) {
         kind = 'capability_unavailable';
         capabilityGap = gap;
-      } else if (isCapabilityDenied(thrown)) {
+      } else if (isCapabilityDenied(subject)) {
         kind = 'capability_denied';
       }
     }
@@ -1360,7 +1399,7 @@ export async function runBridgeHealthcheck(
     // failure, so a bridge that is down, unpaired, timed out or missing a
     // capability keeps its own answer.
     if (thrown !== undefined && (kind === 'http' || kind === 'unknown')) {
-      edge = edgeBlockOf(thrown);
+      edge = edgeBlockOf(subject) ?? edgeBlockOf(thrown);
       if (edge !== null) {
         kind = 'edge_blocked';
         customDetail = { vendor: edge.vendor };
@@ -1424,7 +1463,7 @@ export async function runBridgeHealthcheck(
       ...(bridge?.session_state !== undefined ? { state: bridge.session_state } : {}),
       pairCode:
         bridge?.pending_pair_code ??
-        (thrown instanceof FetchproxySessionNotReadyError ? thrown.pairCode : null),
+        (pairCodeSource instanceof FetchproxySessionNotReadyError ? pairCodeSource.pairCode : null),
     },
     direct,
     ...(edge !== null ? { edgeVendor: edge.vendor } : {}),
@@ -1578,3 +1617,19 @@ export function registerAdaptiveHealthcheckTool(args: RegisterAdaptiveHealthchec
         : runCredentialHealthcheck({ server, prefix, hostLabel, ...credential }),
   );
 }
+
+// ---------------------------------------------------------------------------
+// Direct-first transport with a sticky bridge fallback on an edge block
+// (hoisted from hemnet-mcp / booli-mcp — see fallback.ts).
+// ---------------------------------------------------------------------------
+export {
+  createDirectFirstTransport,
+  readTransportMode,
+  type DirectFirstCallContext,
+  type DirectFirstStats,
+  type DirectFirstStatus,
+  type DirectFirstTransport,
+  type DirectFirstTransportOptions,
+  type ReadTransportModeOptions,
+  type TransportMode,
+} from './fallback.js';
