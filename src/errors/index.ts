@@ -188,6 +188,21 @@ const API_KEY_RE = new RegExp(
     .join('|'),
   'g',
 );
+// Google OAuth2 tokens: access tokens (`ya29.…`) and refresh tokens (`1//…`).
+// Upstreamed from gogcli-mcp's local wrapper (fleet audit #1160). Neither
+// shape has a fixed length, so each takes its documented prefix plus 8+
+// token characters — real tokens run to 100+, while prose like `ya29.1` or
+// a `1//2` ratio stays visible.
+//
+// LEFT BOUNDARY: a real token is never WELDED to base64 text — it follows a
+// quote, whitespace, `=`, `:`, a bracket, or the start of the string — while
+// `1//` occurs by chance inside roughly a third of large standard-base64
+// blobs. So the token may not follow a standard-base64 character
+// (`[A-Za-z0-9+/]`). The class is exactly that alphabet and no wider: adding
+// `=` would lose the form-encoded `refresh_token=1//…` spelling, which the
+// query-param rule only catches after a `?`/`&`. The literal prefixes keep
+// match starts sparse, so the scan stays linear.
+const GOOGLE_OAUTH_TOKEN_RE = /(?<![A-Za-z0-9+/])(?:ya29\.|1\/\/)[A-Za-z0-9._-]{8,}/g;
 // Secret-bearing query params — the value after `=` up to `&`/`#`/quote/space/end.
 // Anchored on `?`/`&` so plain prose like `key=primary` (no URL context) never
 // matches; that constraint is what makes short names like `key`/`sig` safe.
@@ -310,7 +325,8 @@ function redactJsonCookie(quote: '"' | "'") {
  * is surfaced to a client: `Bearer <token>` / `Authorization: Basic <…>` headers,
  * `Cookie:` / `Set-Cookie:` header values (cookie names stay visible), standalone
  * JWTs, well-known API-key shapes (OpenAI/Anthropic `sk-…`, GitHub `ghp_…`,
- * Slack `xox?-…`, Google `AIza…`, AWS `AKIA…`, `whsec_…`), secret-bearing
+ * Slack `xox?-…`, Google `AIza…`, AWS `AKIA…`, `whsec_…`), Google OAuth2
+ * access/refresh tokens (`ya29.…` / `1//…`, never mid-base64), secret-bearing
  * URL query params (`access_token`/`accessToken`, `api_key`, `token`, `key`,
  * `sig`, `password`, …) and long OAuth `code=` values, echoed form passwords,
  * `X-Api-Key`-style headers (also as JSON keys, like `"authorization"`), and quote-wrapped JSON secret values (`"refresh_token":"…"` /
@@ -331,6 +347,7 @@ export function redactSecrets(text: string): string {
       (_m, prefix: string, pairs: string) => `${prefix}${pairs.replace(/=[^;,\s]*/g, '=[REDACTED]')}`,
     )
     .replace(API_KEY_RE, '[REDACTED]')
+    .replace(GOOGLE_OAUTH_TOKEN_RE, '[REDACTED]')
     .replace(HEADER_SECRET_RE, '$1[REDACTED]')
     .replace(QUERY_SECRET_RE, '$1[REDACTED]')
     .replace(OAUTH_CODE_RE, '$1[REDACTED]')
