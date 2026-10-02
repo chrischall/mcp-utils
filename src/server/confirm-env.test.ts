@@ -1,5 +1,8 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { CallToolResult, ServerContext } from '@modelcontextprotocol/server';
 import {
   CONFIRM_TOKEN_AUTO_INSTRUCTION,
@@ -11,9 +14,11 @@ import {
 import {
   CONFIRM_TOKEN_INSTRUCTION,
   createSpentTokenStore,
+  hashConfirmPayload,
   requireConfirmationWithFallback,
   verifyConfirmToken,
 } from './confirm-token.js';
+import { createFileSpentTokenStore } from './confirm-spent-file.js';
 
 function ctxDeclaring(capabilities: unknown): ServerContext {
   return {
@@ -245,5 +250,79 @@ describe('confirmationFromEnv with args', () => {
   it('without args, nothing new is bound (back-compatible)', () => {
     const o = confirmationFromEnv({ action: 'a', message: 'm', tool: 't', subject: subjectIdOnly, env: {} });
     expect(o.binding).toBeUndefined();
+  });
+});
+
+describe('a host-provided stable key, and where spends are recorded (fleet audit 2026-09-24, kiaaccess BUG-2)', () => {
+  let dataDir: string;
+  beforeEach(() => { dataDir = mkdtempSync(join(tmpdir(), 'mcpu-confirm-env-')); });
+  afterEach(() => rmSync(dataDir, { recursive: true, force: true }));
+  const sha = (s: string) => createHash('sha256').update(s, 'utf8').digest();
+  const spentDir = () => join(dataDir, '.mcp-confirm', 'spent');
+  const base = {
+    action: 'thing.delete',
+    message: 'Review and confirm this deletion.',
+    tool: 'thing_delete',
+    subject: () => ({ target: 't1', payload: { id: 't1' }, preview: { id: 't1' } }),
+  };
+
+  it('honours MCP_HOST_CONFIRM_SECRET when MCP_DATA_DIR names an absolute directory', () => {
+    const key = confirmKeyFromEnv({ MCP_HOST_CONFIRM_SECRET: 'host', MCP_DATA_DIR: dataDir });
+    expect(Buffer.from(key).equals(sha('host'))).toBe(true);
+  });
+
+  it.each([
+    ['no MCP_DATA_DIR', {}],
+    ['a blank one', { MCP_DATA_DIR: '  ' }],
+    ['an unexpanded placeholder', { MCP_DATA_DIR: '${MCP_DATA_DIR}' }],
+    ['a relative one', { MCP_DATA_DIR: 'data' }],
+  ])('IGNORES MCP_HOST_CONFIRM_SECRET with %s: a stable key with nowhere durable to record spends would re-accept a spent token after a restart', (_, extra) => {
+    const key = confirmKeyFromEnv({ MCP_HOST_CONFIRM_SECRET: 'host', ...extra });
+    expect(Buffer.from(key).equals(sha('host'))).toBe(false);
+    expect(key).toBe(confirmKeyFromEnv({}));
+  });
+
+  it('an operator\'s own MCP_CONFIRM_SECRET wins over the host\'s', () => {
+    const key = confirmKeyFromEnv({ MCP_CONFIRM_SECRET: 'mine', MCP_HOST_CONFIRM_SECRET: 'host', MCP_DATA_DIR: dataDir });
+    expect(Buffer.from(key).equals(sha('mine'))).toBe(true);
+  });
+
+  async function spendOnce(env: Record<string, string>) {
+    const p1 = text(await requireConfirmationWithFallback(CANNOT_BE_ASKED, confirmationFromEnv({ ...base, env })));
+    const confirmToken = p1.confirmToken as string;
+    const p2 = await requireConfirmationWithFallback(CANNOT_BE_ASKED, confirmationFromEnv({ ...base, env, confirmToken }));
+    expect(p2).toBeUndefined();
+    return confirmToken;
+  }
+
+  it.each([
+    ['the host key', { MCP_HOST_CONFIRM_SECRET: 'host' }],
+    ['an operator key', { MCP_CONFIRM_SECRET: 'mine' }],
+  ])('with %s and MCP_DATA_DIR, a spend is recorded on disk and survives a restart', async (_, secret) => {
+    const env = { ...secret, MCP_DATA_DIR: dataDir };
+    const confirmToken = await spendOnce(env);
+    expect(readdirSync(spentDir())).toHaveLength(1);
+    // A restarted process has no memory of the spend; the directory does.
+    const verdict = verifyConfirmToken(
+      confirmKeyFromEnv(env),
+      confirmToken,
+      { tool: 'thing_delete', target: 't1', payloadHash: hashConfirmPayload({ id: 't1' }) },
+      { spent: createFileSpentTokenStore(spentDir()) },
+    );
+    expect(verdict).toEqual({ ok: false, error: 'TOKEN_REUSED' });
+    // And through the env layer itself, the second use is refused.
+    const again = text(await requireConfirmationWithFallback(CANNOT_BE_ASKED, confirmationFromEnv({ ...base, env, confirmToken })));
+    expect(again).toMatchObject({ status: 'confirmation-rejected', error: 'TOKEN_REUSED' });
+  });
+
+  it('a random per-process key never touches the disk: its tokens cannot outlive the process anyway', async () => {
+    await spendOnce({ MCP_DATA_DIR: dataDir });
+    expect(existsSync(join(dataDir, '.mcp-confirm'))).toBe(false);
+  });
+
+  it('a caller\'s own spent store still wins', async () => {
+    const spent = createSpentTokenStore();
+    const opts = confirmationFromEnv({ ...base, spent, env: { MCP_HOST_CONFIRM_SECRET: 'host', MCP_DATA_DIR: dataDir } });
+    expect(opts.tokenFallback?.spent).toBe(spent);
   });
 });
