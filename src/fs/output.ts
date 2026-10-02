@@ -10,11 +10,12 @@
  * the mcp-fleet-builder skill) is that every binary-output tool uses this shape.
  */
 
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { expandPath, readEnvVar, type EnvSource } from '../config/index.js';
 import { assertPathWithinRoots } from './confine.js';
+import { sanitizeBaseName, writeUniqueFileSync } from './write.js';
 
 /**
  * Resolve the directory a binary-output tool should write into:
@@ -47,26 +48,14 @@ export function resolveOutputDir(
 }
 
 /**
- * Reduce a caller-supplied filename stem to a single safe path component:
- * strip directory separators and any `..`, so the stem can never escape the
- * output directory (defense-in-depth — `SafePathSegment` does the same for
- * request-path atoms). A stem that sanitizes away entirely falls back to
- * `'file'`.
- */
-function sanitizeBaseName(base: string): string {
-  const safe = base
-    .replace(/[/\\]+/g, '_') // kill path separators
-    .replace(/\.\.+/g, '_') // neutralize .. (and longer dot runs)
-    .replace(/^\.+/, '') // no leading dots (hidden-file / current-dir)
-    .trim();
-  return safe.length > 0 ? safe : 'file';
-}
-
-/**
  * A non-overwriting path for `base.ext` in `dir`: the bare name when free,
  * else `base-2.ext`, `base-3.ext`, … (gemini's numbering). `ext` is passed
- * without the dot. `base` is sanitized to a single path component
- * ({@link sanitizeBaseName}) so a `../…` stem can't write outside `dir`.
+ * without the dot. `base` is sanitized to a single path component so a `../…`
+ * stem can't write outside `dir`.
+ *
+ * Check-then-use: the name can be taken (or a symlink planted there) between
+ * this call and the caller's write. To write, prefer {@link writeUniqueFile} /
+ * {@link writeBinaryOutput}, which claim the name with an exclusive create.
  */
 export function uniquePath(dir: string, base: string, ext: string): string {
   const safe = sanitizeBaseName(base);
@@ -84,8 +73,14 @@ const MIME_EXT: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/webp': 'webp',
   'image/gif': 'gif',
+  'image/heic': 'heic',
+  'image/avif': 'avif',
   'application/pdf': 'pdf',
   'application/json': 'json',
+  'application/zip': 'zip',
+  'audio/midi': 'mid',
+  'video/mp4': 'mp4',
+  'video/quicktime': 'mov',
 };
 
 /** Options for {@link writeBinaryOutput}. */
@@ -100,6 +95,8 @@ export interface WriteBinaryOutputOptions {
   mimeType?: string;
   /** Explicit extension (no dot); overrides the MIME lookup. */
   extension?: string;
+  /** File mode for the new file (before umask), e.g. `0o600`. Default `0o666`. */
+  mode?: number;
 }
 
 /**
@@ -107,35 +104,14 @@ export interface WriteBinaryOutputOptions {
  * the extension from `extension` → the MIME type → `'bin'`. Returns the
  * absolute path written. The caller returns that path from the tool result
  * (with an `inline` flag for base64 via `imageResult` when the user asks).
+ *
+ * Each candidate name is claimed with an exclusive, no-follow create
+ * (`O_CREAT | O_EXCL | O_NOFOLLOW`) and the next name tried on EEXIST, so the
+ * write is race-free and never goes through a symlink planted at the name —
+ * previously a dangling symlink there looked "free" to `existsSync` and the
+ * write created its target outside `dir`.
  */
 export function writeBinaryOutput(opts: WriteBinaryOutputOptions): string {
   const ext = opts.extension ?? (opts.mimeType ? MIME_EXT[opts.mimeType] : undefined) ?? 'bin';
-  mkdirSync(opts.dir, { recursive: true });
-  const path = uniquePath(opts.dir, opts.baseName, ext);
-  writeFileSync(path, Buffer.from(opts.base64, 'base64'));
-  return path;
-}
-
-/**
- * Magic-byte MIME sniff for the image formats the fleet passes around
- * (PNG / JPEG / WebP / GIF). Returns `undefined` for anything else — callers
- * decide their own default. Pairs with `readFileHead` for on-disk files;
- * consolidates gemini's `sniffMimeBytes` (and evite's dimension sniffer uses
- * the same signatures).
- */
-export function sniffMimeBytes(bytes: Uint8Array): string | undefined {
-  const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
-    return 'image/png';
-  }
-  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
-    return 'image/jpeg';
-  }
-  if (buf.length >= 12 && buf.subarray(0, 4).toString('latin1') === 'RIFF' && buf.subarray(8, 12).toString('latin1') === 'WEBP') {
-    return 'image/webp';
-  }
-  if (buf.length >= 4 && buf.subarray(0, 4).toString('latin1') === 'GIF8') {
-    return 'image/gif';
-  }
-  return undefined;
+  return writeUniqueFileSync(opts.dir, opts.baseName, ext, Buffer.from(opts.base64, 'base64'), opts.mode);
 }

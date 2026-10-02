@@ -57,9 +57,19 @@ function realPathAllowingMissing(p: string): string {
  * `allowedRoots`.
  */
 export function assertPathWithinRoots(path: string, roots: readonly string[]): string {
+  return confineToRoots(path, roots).real;
+}
+
+/**
+ * {@link assertPathWithinRoots}, also reporting WHICH root (its real path)
+ * contained the target — for checks that judge the path relative to its root
+ * (the upload guard's hidden-segment rule). Internal to the fs module.
+ */
+export function confineToRoots(path: string, roots: readonly string[]): { real: string; root: string } {
   const target = realPathAllowingMissing(expandPath(path));
   for (const root of roots) {
-    if (isInside(realPathAllowingMissing(expandPath(root)), target)) return target;
+    const realRoot = realPathAllowingMissing(expandPath(root));
+    if (isInside(realRoot, target)) return { real: target, root: realRoot };
   }
   throw new Error(`Path is outside the allowed directories: ${path}`);
 }
