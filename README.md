@@ -271,6 +271,12 @@ a model can pass on its first call. Make it opt-in. `issueConfirmToken`,
 `verifyConfirmToken` and `hashConfirmPayload` are exported for a flow that
 needs the primitives directly.
 
+**Porting it.** [`docs/CONFIRM-TOKEN.md`](docs/CONFIRM-TOKEN.md) is the
+reference spec for a server not built on this package (apple-swift-mcp first):
+token format and claims, key derivation, verify order, result shapes, refusal
+codes, the model-facing strings verbatim, the env semantics, the spent store,
+the rail selection rule, and a test vector. A test pins it to the source.
+
 #### The confirm kit: `confirmWrite`
 
 Most gated tools need nothing more than "preview exactly what will be sent,
