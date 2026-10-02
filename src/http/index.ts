@@ -17,7 +17,7 @@
  *    yields a fixed "unauthorized" string, not the credential.
  */
 
-import { withAmbientCancellation } from '../cancel/index.js';
+import { currentCallSignal, withAmbientCancellation } from '../cancel/index.js';
 import { truncateErrorMessage } from '../errors/index.js';
 import { isCloudflareChallenge } from '../scrape/index.js';
 
@@ -1201,6 +1201,14 @@ export interface RunBoundedBatchOptions<T, R> {
   setTimer?: (ms: number, cb: () => void) => unknown;
   /** Injectable clear paired with {@link setTimer}. Defaults to `clearTimeout`. */
   clearTimer?: (handle: unknown) => void;
+  /**
+   * The caller's cancellation. Defaults to the running tool call's
+   * ({@link currentCallSignal}). When it aborts the batch answers AT ONCE, as if
+   * the deadline had fired: unsettled slots are backfilled by {@link onTimeout},
+   * workers' signals abort, and nothing more is dispatched — a client that
+   * cancelled is no longer fetched for.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -1215,7 +1223,9 @@ export interface RunBoundedBatchOptions<T, R> {
  * awaited, so a single hung row can't keep the whole call (and the MCP request
  * deadline behind it) pinned open. Queued items not yet started are never
  * dispatched after the deadline; a worker that retries or loops internally
- * should still check `signal.aborted` itself to stop mid-item. When everything settles before the deadline,
+ * should still check `signal.aborted` itself to stop mid-item. The caller's
+ * cancellation ({@link RunBoundedBatchOptions.signal}, the running tool call's
+ * by default) ends the batch the same way, immediately. When everything settles before the deadline,
  * the timer is cleared and every slot holds its real result.
  *
  * Generalises zillow's bulk-tool `runWithDeadline` (`zillow_bulk_get` /
@@ -1237,6 +1247,9 @@ export function runBoundedBatch<T, R>(
 
   // Nothing to do — never arm a timer for an empty batch.
   if (items.length === 0) return Promise.resolve([]);
+  const callerSignal = opts.signal ?? currentCallSignal();
+  // Already cancelled: answer without dispatching a single worker.
+  if (callerSignal?.aborted) return Promise.resolve(items.map((item, index) => opts.onTimeout(item, index)));
 
   const setTimer = opts.setTimer ?? ((ms, cb) => setTimeout(cb, ms));
   const clearTimer = opts.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
@@ -1282,6 +1295,7 @@ export function runBoundedBatch<T, R>(
       if (done) return;
       done = true;
       clearTimer(handle);
+      callerSignal?.removeEventListener('abort', finish);
       // Signal abandoned workers so a cooperative worker can stop early.
       if (!controller.signal.aborted) controller.abort();
       const onError = opts.onError ?? ((item: T, index: number) => opts.onTimeout(item, index));
@@ -1295,6 +1309,8 @@ export function runBoundedBatch<T, R>(
     };
 
     const handle = setTimer(opts.deadlineMs, finish);
+    // The caller going away ends the batch the same way the deadline does.
+    callerSignal?.addEventListener('abort', finish, { once: true });
 
     // Abandon (never await) the fan-out on the deadline path; on full settle,
     // finish() clears the timer and returns the real results.
