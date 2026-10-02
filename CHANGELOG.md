@@ -1,5 +1,36 @@
 # Changelog
 
+## [2.12.0](https://github.com/chrischall/mcp-utils/compare/v2.11.0...v2.12.0) (2026-10-02)
+
+
+### Features
+
+* **concurrency:** verifyAfterWrite, a bounded and cancellable re-read after a write ([7b89cad](https://github.com/chrischall/mcp-utils/commit/7b89cad5bfe7d8fafcdfe30daffe18a8ff5d74de))
+* **fetchproxy:** a shared direct-first transport that falls back to the bridge on an edge block ([#315](https://github.com/chrischall/mcp-utils/issues/315)) ([e8ba3f3](https://github.com/chrischall/mcp-utils/commit/e8ba3f3a551738ab753ac84808de6d430a4af1c5))
+* **fs:** a shared upload guard, exclusive no-follow writes, and PDF/zip/MIDI sniffing ([#320](https://github.com/chrischall/mcp-utils/issues/320)) ([abeb285](https://github.com/chrischall/mcp-utils/commit/abeb2859bd43a21cd89c6cd3b7dda49e36d3cbf1))
+* **graphql:** a shared GraphQL transport and operation-kind lexer ([#322](https://github.com/chrischall/mcp-utils/issues/322)) ([b79405c](https://github.com/chrischall/mcp-utils/commit/b79405c1cda092ecf27e74c61e919a1187fedaed))
+* **redact:** redact Google OAuth2 access and refresh tokens ([#318](https://github.com/chrischall/mcp-utils/issues/318)) ([61cad19](https://github.com/chrischall/mcp-utils/commit/61cad196e6273687bd8155fdde178673ce463c38))
+* **scrape:** a linear extractNextData for __NEXT_DATA__ blobs ([#337](https://github.com/chrischall/mcp-utils/issues/337)) ([8d77a5b](https://github.com/chrischall/mcp-utils/commit/8d77a5bd028f722c51871cc02dd416911acd240d))
+* **scrape:** add htmlToReadableText and extractJsonKeyAfterMarker ([#319](https://github.com/chrischall/mcp-utils/issues/319)) ([895204e](https://github.com/chrischall/mcp-utils/commit/895204e764ba291524589557c1f30cd2d4b246f8))
+* **server:** a shared confirmWrite kit and untrusted-content framing ([#317](https://github.com/chrischall/mcp-utils/issues/317)) ([a1df857](https://github.com/chrischall/mcp-utils/commit/a1df85757d232aacf335dd241c8f61899ce4a5e6))
+* **session:** keep SessionStore and TokenManager stores consistent across processes ([#326](https://github.com/chrischall/mcp-utils/issues/326)) ([f86081d](https://github.com/chrischall/mcp-utils/commit/f86081db48dadf87cd5ea3d7107fbe7bc2736cc8))
+* **session:** login-page expiry predicate and label-only session-tool descriptions ([#327](https://github.com/chrischall/mcp-utils/issues/327)) ([3ad9e57](https://github.com/chrischall/mcp-utils/commit/3ad9e5732085f917e0fd9ece6ee5ad8431ecc347))
+
+
+### Bug Fixes
+
+* **fetchproxy:** retry and classify any declared timeout in bulk rows ([#335](https://github.com/chrischall/mcp-utils/issues/335)) ([47c54c0](https://github.com/chrischall/mcp-utils/commit/47c54c0b5d98e89c067268cf1eac29d50c7b2970))
+* **fs:** refuse a final-component symlink in writeFileSafe even with allowedRoots ([#332](https://github.com/chrischall/mcp-utils/issues/332)) ([ca88027](https://github.com/chrischall/mcp-utils/commit/ca8802789df9051e31df8588183a08117f632086)), closes [#324](https://github.com/chrischall/mcp-utils/issues/324)
+* **http:** cancel abandoned response bodies on retry, 429, 204 and JSON 401 ([#316](https://github.com/chrischall/mcp-utils/issues/316)) ([83f7e19](https://github.com/chrischall/mcp-utils/commit/83f7e19938651ed746d6d97e02bd1e1561c33022))
+* **http:** runBoundedBatch stops when the caller cancels, not only at the deadline ([#329](https://github.com/chrischall/mcp-utils/issues/329)) ([e2c58b6](https://github.com/chrischall/mcp-utils/commit/e2c58b692835e696a73007135c4a17e98fb07158))
+
+
+### Documentation
+
+* **server:** publish the confirm-token format as a reference spec ([#338](https://github.com/chrischall/mcp-utils/issues/338)) ([1c4fa82](https://github.com/chrischall/mcp-utils/commit/1c4fa8266ad8f518350af374aa994f4773539709))
+* **skill:** finish the confirmToken and allowedRoots migration in mcp-fleet-builder ([#321](https://github.com/chrischall/mcp-utils/issues/321)) ([3dfed0e](https://github.com/chrischall/mcp-utils/commit/3dfed0e35cb3b27a9aafa8c725fcc29588fde874))
+* **skill:** point mcp-fleet-builder at the shared confirm, fs, graphql and transport APIs ([#334](https://github.com/chrischall/mcp-utils/issues/334)) ([1b5252b](https://github.com/chrischall/mcp-utils/commit/1b5252ba1105efb8ee7e1625fc9b37313abff1d4))
+
 ## [2.11.0](https://github.com/chrischall/mcp-utils/compare/v2.10.0...v2.11.0) (2026-10-02)
 
 
