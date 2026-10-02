@@ -181,6 +181,17 @@ describe('confirmationFromEnv', () => {
       .toEqual({ ok: false, error: 'TOKEN_REUSED' });
   });
 
+  it('puts the spent-token store on the token fallback only, never on the options themselves (#312)', () => {
+    // `spent` belongs to the token rail; a stray top-level copy is an option
+    // RequireConfirmationOptions does not declare, handed to every consumer.
+    const spent = createSpentTokenStore();
+    for (const env of [{}, { MCP_CONFIRM_MODE: 'refuse' }]) {
+      const opts = confirmationFromEnv({ ...base, spent, env });
+      expect(Object.keys(opts)).not.toContain('spent');
+    }
+    expect(confirmationFromEnv({ ...base, spent, env: {} }).tokenFallback?.spent).toBe(spent);
+  });
+
   it('reads process.env when no env is passed', () => {
     const before = process.env.MCP_CONFIRM_MODE;
     process.env.MCP_CONFIRM_MODE = 'refuse';

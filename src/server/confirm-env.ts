@@ -206,8 +206,10 @@ export interface ConfirmationFromEnvOptions extends RequireConfirmationOptions {
  * ```
  */
 export function confirmationFromEnv(options: ConfirmationFromEnvOptions): RequireConfirmationWithFallbackOptions {
-  const { tool, account, confirmToken, subject, instruction, args, env = process.env, ...rest } = options;
-  const spent = options.spent ?? spentTokenStoreFromEnv(env);
+  const { tool, account, confirmToken, subject, instruction, args, env = process.env, spent: callerSpent, ...rest } = options;
+  // Destructured out of `rest` so it rides the token fallback only, never the
+  // returned options (#312).
+  const spent = callerSpent ?? spentTokenStoreFromEnv(env);
   const mode = readConfirmMode(env);
   const ttlSeconds = readConfirmTtl(env);
   const bound = args === undefined ? undefined : boundArgs(args);
