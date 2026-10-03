@@ -91,6 +91,7 @@
  * answer is not to reorder it silently.
  */
 
+import { setCookiesOf } from '../internal/headers.js';
 import { readEnvVar, parseBoolEnv, type EnvSource } from '../config/index.js';
 import {
   truncateErrorMessage,
@@ -428,12 +429,9 @@ export interface SessionLoginResult {
 const DEFAULT_LOGIN_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
 
-/** Node's `Headers` may carry multiple `Set-Cookie`s; prefer the spec'd getter. */
-function readSetCookies(headers: Headers): string[] {
-  const h = headers as Headers & { getSetCookie?: () => string[] };
-  if (typeof h.getSetCookie === 'function') return h.getSetCookie();
-  const raw = headers.get('set-cookie');
-  return raw ? [raw] : [];
+/** Node's `Headers` may carry multiple `Set-Cookie`s; prefer the spec'd getter. Missing headers read as none. */
+function readSetCookies(headers: Headers | undefined): string[] {
+  return setCookiesOf(headers as Parameters<typeof setCookiesOf>[0]);
 }
 
 /**
