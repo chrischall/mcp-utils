@@ -24,6 +24,7 @@
 
 import { parse, NodeType, type HTMLElement, type Node, type TextNode } from 'node-html-parser';
 import { asciiLower } from '../internal/ascii.js';
+import { codePointOr } from '../internal/code-point.js';
 
 export type { HTMLElement };
 
@@ -308,20 +309,6 @@ function stripElementContent(html: string, tag: string): string {
   }
 }
 
-/**
- * `String.fromCodePoint` guarded against a `RangeError` on an out-of-range
- * (negative or > 0x10FFFF) code point from a scraped numeric entity — returns
- * the raw entity text unchanged instead of throwing. (Lone surrogates do NOT
- * throw and pass the guard, yielding a lone-surrogate string; harmless here.)
- */
-function codePointOr(code: number, raw: string): string {
-  if (!Number.isInteger(code) || code < 0 || code > 0x10ffff) return raw;
-  try {
-    return String.fromCodePoint(code);
-  } catch {
-    return raw;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // htmlToReadableText

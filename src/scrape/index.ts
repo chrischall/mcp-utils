@@ -17,6 +17,7 @@
  */
 
 import { asciiLower } from '../internal/ascii.js';
+import { codePointOr } from '../internal/code-point.js';
 
 // ---------------------------------------------------------------------------
 // Entity decoding / tag stripping
@@ -37,7 +38,9 @@ const NAMED_ENTITIES: Record<string, string> = {
  * double-escaped entity survives exactly one level (`&amp;lt;` → `&lt;`, not
  * `<`) — the ordering both alltrails' `stripHtml` and musescore's `decodeText`
  * depend on when recovering attribute-escaped JSON. Unknown entities pass
- * through untouched.
+ * through untouched, and so does a numeric reference that is not a character
+ * (out of range, or a lone surrogate U+D800–U+DFFF), so it never throws and
+ * never emits an unpaired UTF-16 unit.
  */
 export function decodeHtmlEntities(text: string): string {
   return text
@@ -49,23 +52,6 @@ export function decodeHtmlEntities(text: string): string {
     .replace(/&amp;/gi, '&');
 }
 
-/**
- * `String.fromCodePoint` for a scraped numeric entity, but SAFE: an out-of-range
- * code point (negative or > 0x10FFFF, e.g. `&#999999999999;`) throws
- * `RangeError`, which on hostile input would crash the extractor — the guard
- * returns the raw entity text unchanged instead, preserving the module's
- * never-throw contract. (Lone surrogates, 0xD800–0xDFFF, do NOT throw and pass
- * the guard; `String.fromCodePoint` yields a lone-surrogate string for them,
- * which is harmless here. The `try/catch` is belt-and-suspenders.)
- */
-function codePointOr(code: number, raw: string): string {
-  if (!Number.isInteger(code) || code < 0 || code > 0x10ffff) return raw;
-  try {
-    return String.fromCodePoint(code);
-  } catch {
-    return raw;
-  }
-}
 
 /**
  * Strip an HTML **fragment** to readable text: tags → spaces, entities decoded
