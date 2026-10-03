@@ -26,6 +26,7 @@
  * into a message string, losing the `errors[]` this layer exists to read.
  */
 
+import { responseHeader } from '../internal/headers.js';
 import { withAmbientCancellation } from '../cancel/index.js';
 import { McpToolError, messageOf, truncateErrorMessage } from '../errors/index.js';
 import {
@@ -419,7 +420,7 @@ export function createGraphqlClient(opts: GraphqlClientOptions): GraphqlClient {
       const retryable = retryStatuses.includes(status) && (status === 429 || !write);
       if (retryable && tries < retry.count) {
         const delay = retry.honorRetryAfter
-          ? parseRetryAfterMs(sent.res.headers.get('retry-after'), {
+          ? parseRetryAfterMs(responseHeader(sent.res, 'retry-after'), {
               defaultMs: retry.delayMs,
               capMs: retry.maxRetryAfterMs ?? 30_000,
             })
@@ -441,7 +442,7 @@ export function createGraphqlClient(opts: GraphqlClientOptions): GraphqlClient {
         if (edge) throw new EdgeBlockedError(status, edge.vendor, { service, method: 'POST', path });
       }
       if (status === 429) {
-        const retryAfter = res.headers.get('retry-after');
+        const retryAfter = responseHeader(res, 'retry-after');
         const retryAfterMs = retryAfterToMs(retryAfter);
         throw opts.onRateLimited
           ? opts.onRateLimited({ status, retryAfter, retryAfterMs, edgeBlock: null, method: 'POST', path })

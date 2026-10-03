@@ -17,6 +17,7 @@
  *    yields a fixed "unauthorized" string, not the credential.
  */
 
+import { responseHeader } from '../internal/headers.js';
 import { currentCallSignal, withAmbientCancellation } from '../cancel/index.js';
 import { truncateErrorMessage } from '../errors/index.js';
 import { isCloudflareChallenge } from '../scrape/index.js';
@@ -722,7 +723,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
         discard(current);
         attempt += 1;
         const delay = retry.honorRetryAfter
-          ? parseRetryAfterMs(res.headers.get('retry-after'), {
+          ? parseRetryAfterMs(responseHeader(res, 'retry-after'), {
               defaultMs: retry.delayMs,
               capMs: retry.maxRetryAfterMs ?? 30_000,
             })
@@ -751,7 +752,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   async function unauthorizedOrEdge(attempt: Attempt, method: string, path: string): Promise<Error> {
     const res = attempt.res;
     let text = '';
-    if (/json/i.test(res.headers.get('content-type') ?? '')) {
+    if (/json/i.test(responseHeader(res, 'content-type') ?? '')) {
       discard(attempt);
     } else {
       text = await readBody(attempt, (r) => r.text()).catch(() => '');
@@ -770,14 +771,14 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
    */
   async function rateLimitedError(attempt: Attempt, method: string, path: string): Promise<Error> {
     const res = attempt.res;
-    const retryAfter = res.headers.get('retry-after');
+    const retryAfter = responseHeader(res, 'retry-after');
     const retryAfterMs = retryAfterToMs(retryAfter);
     if (!opts.onRateLimited) {
       discard(attempt);
       return new RateLimitedError(service, retryAfterMs);
     }
     let text = '';
-    if (/json/i.test(res.headers.get('content-type') ?? '')) {
+    if (/json/i.test(responseHeader(res, 'content-type') ?? '')) {
       discard(attempt);
     } else {
       text = await readBody(attempt, (r) => r.text()).catch(() => '');
@@ -838,7 +839,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     const bytes = new Uint8Array(await readBody(attempt, (r) => r.arrayBuffer()));
     return {
       status: res.status,
-      contentType: res.headers.get('content-type'),
+      contentType: responseHeader(res, 'content-type'),
       headers: res.headers,
       bytes,
     };
