@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.13.0](https://github.com/chrischall/mcp-utils/compare/v2.12.0...v2.13.0) (2026-10-03)
+
+
+### Features
+
+* **http:** send form-encoded and raw string request bodies from createApiClient ([#339](https://github.com/chrischall/mcp-utils/issues/339)) ([f5f5328](https://github.com/chrischall/mcp-utils/commit/f5f5328bc7d83eb3ce29f962021885970814e20d))
+* **http:** tell onRateLimited the final 429's Retry-After and edge-block verdict ([#342](https://github.com/chrischall/mcp-utils/issues/342)) ([17a5e91](https://github.com/chrischall/mcp-utils/commit/17a5e91dae622608f0f647c6fb88f3e90037a261))
+* **server:** add prepareMergedUpdate, a read-modify-write helper for full-replace updates ([#346](https://github.com/chrischall/mcp-utils/issues/346)) ([31a5fa4](https://github.com/chrischall/mcp-utils/commit/31a5fa4f58a6329202e3ac68689b1fc8c2f2f141))
+
+
+### Bug Fixes
+
+* **http:** read Content-Disposition filenames ofw-mcp's parser handles ([#344](https://github.com/chrischall/mcp-utils/issues/344)) ([12ac362](https://github.com/chrischall/mcp-utils/commit/12ac36292343cf22b7d162e2b87c7b0463aed092))
+* **scrape:** leave lone-surrogate character references undecoded ([#345](https://github.com/chrischall/mcp-utils/issues/345)) ([f231936](https://github.com/chrischall/mcp-utils/commit/f2319365b03a3d74a248da321138d1db9fd2476d))
+
 ## [2.12.0](https://github.com/chrischall/mcp-utils/compare/v2.11.0...v2.12.0) (2026-10-02)
 
 
