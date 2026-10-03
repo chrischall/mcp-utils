@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.13.1](https://github.com/chrischall/mcp-utils/compare/v2.13.0...v2.13.1) (2026-10-03)
+
+
+### Bug Fixes
+
+* **http:** treat a response with no headers as having none instead of crashing ([#347](https://github.com/chrischall/mcp-utils/issues/347)) ([14b6ba6](https://github.com/chrischall/mcp-utils/commit/14b6ba6de16e936d7dab6bc2cfadf1225d969b35))
+
 ## [2.13.0](https://github.com/chrischall/mcp-utils/compare/v2.12.0...v2.13.0) (2026-10-03)
 
 
