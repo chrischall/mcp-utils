@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.13.2](https://github.com/chrischall/mcp-utils/compare/v2.13.1...v2.13.2) (2026-10-03)
+
+
+### Documentation
+
+* **skill:** describe retryOnceOnTimeout and classifyRowError as timeout-aware wrappers ([#349](https://github.com/chrischall/mcp-utils/issues/349)) ([bb93393](https://github.com/chrischall/mcp-utils/commit/bb93393a860b7319c494a366d9ad6e18d00a8960))
+
 ## [2.13.1](https://github.com/chrischall/mcp-utils/compare/v2.13.0...v2.13.1) (2026-10-03)
 
 
