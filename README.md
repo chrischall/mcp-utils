@@ -122,6 +122,13 @@ so a genuine bug still reads as one. Opt out with `surfaceHints: false`.
 `createTestHarness` applies the same wrapper, so a tool's failure text under
 test is the text production returns.
 
+`maxToolInputElements` caps the combined number of array elements and object
+members one `tools/call` `arguments` payload may contain (the SDK's
+`McpServer` option, 2.3.0+). A call over it gets an `isError` result naming the
+limit before the input schema runs. Off when omitted, as in the SDK; set it
+above the largest arguments your tools legitimately accept. `createTestHarness`
+takes the same option.
+
 For a mutating tool, `requireConfirmation` uses the 2026-07-28 stateless
 multi-round-trip flow instead of a caller-supplied `confirm` argument. Return
 its result when defined; `undefined` means the client accepted the elicitation

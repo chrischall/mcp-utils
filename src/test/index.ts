@@ -16,7 +16,7 @@ import { join, relative } from 'node:path';
 import { vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/client';
 import { McpServer, InMemoryTransport } from '@modelcontextprotocol/server';
-import type { CallToolResult, ElicitRequest, ElicitResult } from '@modelcontextprotocol/server';
+import type { CallToolResult, ElicitRequest, ElicitResult, McpServerOptions } from '@modelcontextprotocol/server';
 import type { Mock } from 'vitest';
 import { SERVER_PROTOCOL_VERSIONS, surfaceToolHints } from '../server/index.js';
 
@@ -44,6 +44,8 @@ export interface TestHarnessOptions {
    * the client capability and lets the v2 client drive `input_required` rounds.
    */
   elicitation?: (request: ElicitRequest) => ElicitResult | Promise<ElicitResult>;
+  /** The production `maxToolInputElements` cap, so a test sees what `createMcpServer` would do with it. */
+  maxToolInputElements?: McpServerOptions['maxToolInputElements'];
 }
 
 /**
@@ -71,7 +73,10 @@ export async function createTestHarness(
 ): Promise<TestHarness> {
   const server = new McpServer(
     { name: 'test', version: '0.0.0' },
-    { supportedProtocolVersions: [...SERVER_PROTOCOL_VERSIONS] },
+    {
+      supportedProtocolVersions: [...SERVER_PROTOCOL_VERSIONS],
+      ...(options.maxToolInputElements !== undefined ? { maxToolInputElements: options.maxToolInputElements } : {}),
+    },
   );
   surfaceToolHints(server);
   await registerFn(server);

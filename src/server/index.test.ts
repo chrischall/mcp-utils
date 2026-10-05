@@ -127,6 +127,54 @@ describe('createMcpServer', () => {
     await server.close();
   });
 
+  describe('maxToolInputElements', () => {
+    const countReg: ToolRegistrar = (server) => {
+      server.registerTool(
+        'count',
+        { description: 'count', inputSchema: z.object({ items: z.array(z.number()) }) },
+        async ({ items }) => ({ content: [{ type: 'text', text: String(items.length) }] }),
+      );
+    };
+    async function callCount(server: McpServer, n: number) {
+      const client = new Client({ name: 'c', version: '0' });
+      const [ct, st] = InMemoryTransport.createLinkedPair();
+      await Promise.all([server.connect(st), client.connect(ct)]);
+      try {
+        return (await client.callTool({ name: 'count', arguments: { items: Array.from({ length: n }, (_, i) => i) } })) as {
+          isError?: boolean;
+          content: { type: string; text: string }[];
+        };
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    }
+
+    it('refuses a call whose arguments exceed the limit, as a tool error', async () => {
+      const server = await createMcpServer({ name: 'x', version: '0', tools: [countReg], maxToolInputElements: 10 });
+      const result = await callCount(server, 50);
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).not.toBe('50');
+    });
+
+    it('serves a call within the limit', async () => {
+      const server = await createMcpServer({ name: 'x', version: '0', tools: [countReg], maxToolInputElements: 100 });
+      const result = await callCount(server, 50);
+      expect(result.isError).toBeFalsy();
+      expect(result.content[0]!.text).toBe('50');
+    });
+
+    it('is off when omitted, as in the SDK', async () => {
+      const server = await createMcpServer({ name: 'x', version: '0', tools: [countReg] });
+      const result = await callCount(server, 5000);
+      expect(result.content[0]!.text).toBe('5000');
+    });
+
+    it('rejects an invalid limit at construction', async () => {
+      await expect(createMcpServer({ name: 'x', version: '0', tools: [], maxToolInputElements: 0 })).rejects.toThrow();
+    });
+  });
+
   it('supports async ToolRegistrars (awaits them before resolving)', async () => {
     let done = false;
     const reg: ToolRegistrar = async () => {
@@ -361,6 +409,25 @@ describe('runMcp', () => {
     vi.restoreAllMocks();
     process.removeAllListeners('SIGINT');
     process.removeAllListeners('SIGTERM');
+  });
+
+  it('passes maxToolInputElements to the server it builds', async () => {
+    const reg: ToolRegistrar = (server) => {
+      server.registerTool(
+        'count',
+        { description: 'count', inputSchema: z.object({ items: z.array(z.number()) }) },
+        async ({ items }) => ({ content: [{ type: 'text', text: String(items.length) }] }),
+      );
+    };
+    const pair = await servedPair({ name: 'x', version: '0', tools: [reg], shutdown: false, maxToolInputElements: 10 });
+    try {
+      const result = (await pair.client.callTool({ name: 'count', arguments: { items: Array.from({ length: 50 }, (_, i) => i) } })) as {
+        isError?: boolean;
+      };
+      expect(result.isError).toBe(true);
+    } finally {
+      await pair.close();
+    }
   });
 
   it('starts the provided transport and returns the stdio handle', async () => {
