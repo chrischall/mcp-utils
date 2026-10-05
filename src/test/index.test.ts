@@ -78,6 +78,16 @@ describe('createTestHarness', () => {
     }
   });
 
+  it('applies maxToolInputElements as production does', async () => {
+    const h = await createTestHarness(registerEcho, { maxToolInputElements: 1 });
+    try {
+      const res = await h.callTool('echo', { value: 'hello', extra: [1, 2, 3] });
+      expect(res.isError).toBe(true);
+    } finally {
+      await h.close();
+    }
+  });
+
   it('callTool defaults arguments to an empty object', async () => {
     const h = await createTestHarness(registerEcho);
     try {

@@ -36,7 +36,7 @@
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import type { StdioServerHandle } from '@modelcontextprotocol/server/stdio';
 import { McpServer, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/server';
-import type { Transport, CallToolResult } from '@modelcontextprotocol/server';
+import type { Transport, CallToolResult, McpServerOptions } from '@modelcontextprotocol/server';
 import { McpToolError, redactSecrets } from '../errors/index.js';
 import { errorResult } from '../response/index.js';
 
@@ -107,6 +107,15 @@ export interface CreateMcpServerOptions<TDeps = unknown> {
    * bare message.
    */
   surfaceHints?: boolean;
+  /**
+   * Cap on the combined number of array elements and object members a single
+   * `tools/call` `arguments` payload may contain, passed to the SDK's
+   * `McpServer`. A call over it gets an `isError` tool result naming the limit
+   * before the input schema runs, and the server keeps serving. Off when
+   * omitted, as in the SDK. Must be at least 1, or `Infinity`; anything else
+   * throws when the server is built.
+   */
+  maxToolInputElements?: McpServerOptions['maxToolInputElements'];
 }
 
 /**
@@ -289,7 +298,10 @@ export async function createMcpServer<TDeps = unknown>(
 ): Promise<McpServer> {
   const server = new McpServer(
     { name: opts.name, version: opts.version },
-    { supportedProtocolVersions: [...SERVER_PROTOCOL_VERSIONS] },
+    {
+      supportedProtocolVersions: [...SERVER_PROTOCOL_VERSIONS],
+      ...(opts.maxToolInputElements !== undefined ? { maxToolInputElements: opts.maxToolInputElements } : {}),
+    },
   );
 
   // Before the registrars run, so every tool they register is wrapped.
