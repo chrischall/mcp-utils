@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.14.0](https://github.com/chrischall/mcp-utils/compare/v2.13.1...v2.14.0) (2026-10-05)
+
+
+### Features
+
+* **deps:** require @modelcontextprotocol/server and client 2.3.0 ([#351](https://github.com/chrischall/mcp-utils/issues/351)) ([b1ce18b](https://github.com/chrischall/mcp-utils/commit/b1ce18bda5458739393790d4d0352b2dc3d90627))
+* **server:** pass maxToolInputElements through createMcpServer, runMcp and the test harness ([#353](https://github.com/chrischall/mcp-utils/issues/353)) ([4007796](https://github.com/chrischall/mcp-utils/commit/400779690c6d16b520888d5be4f158c3ce94402b))
+
+
+### Documentation
+
+* **skill:** describe retryOnceOnTimeout and classifyRowError as timeout-aware wrappers ([#349](https://github.com/chrischall/mcp-utils/issues/349)) ([bb93393](https://github.com/chrischall/mcp-utils/commit/bb93393a860b7319c494a366d9ad6e18d00a8960))
+
 ## [2.13.1](https://github.com/chrischall/mcp-utils/compare/v2.13.0...v2.13.1) (2026-10-03)
 
 
