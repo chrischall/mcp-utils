@@ -243,6 +243,30 @@ describe('requireConfirmation with a caller that cannot be asked', () => {
   });
 });
 
+describe('requireConfirmation with elicitation: false', () => {
+  const options = { action: 'thing.delete', message: 'Review and confirm:', elicitation: false } as const;
+
+  it('refuses even a caller that declares form elicitation, saying prompts are off', () => {
+    const result = requireConfirmation(contextWithCapabilities({ elicitation: { form: {} } }), options);
+
+    expect(result).not.toMatchObject({ resultType: 'input_required' });
+    const content = (result as CallToolResult).content[0];
+    const body = JSON.parse(content?.type === 'text' ? content.text : '');
+    expect(body).toMatchObject({ confirmed: false, dispatched: false, reason: 'confirmation-unsupported' });
+    expect(body.note).toMatch(/confirmation prompts are turned off/);
+  });
+
+  it('refuses on a 2025-era request too, where capabilities cannot be read', () => {
+    expect(requireConfirmation(context(), options)).not.toMatchObject({ resultType: 'input_required' });
+  });
+
+  it('does not honour an acceptance that arrives anyway', () => {
+    const result = requireConfirmation(context({ confirmation: { action: 'accept', content: { confirmed: true } } }), options);
+    expect(result).toMatchObject({ content: [{ type: 'text' }] });
+    expect(result).not.toBeUndefined();
+  });
+});
+
 // ============================================================================
 // audit 2026-09 (SEC-4): opt-in binding of the confirmation to the arguments.
 // Without `binding` any accepted `confirmation` response passes; with it, the

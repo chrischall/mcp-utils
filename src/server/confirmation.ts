@@ -16,6 +16,8 @@ const DEFAULT_REQUEST_KEY = 'confirmation';
 const DEFAULT_CONFIRMATION_LABEL = 'Confirm this action should proceed.';
 const UNSUPPORTED_NOTE = 'Nothing was done because this client cannot show a confirmation prompt '
   + '(it declares no MCP elicitation capability), and this action is never taken without one';
+const DISABLED_NOTE = 'Nothing was done because confirmation prompts are turned off for this server, '
+  + 'and this action is never taken without one';
 
 /** Options for {@link requireConfirmation}. */
 export interface RequireConfirmationOptions {
@@ -65,6 +67,15 @@ export interface RequireConfirmationOptions {
    * `Map`, `Set`, `bigint`); a class instance or function in `args` throws.
    */
   binding?: ConfirmationBinding;
+  /**
+   * `false`: never prompt, and treat the caller as one that cannot be asked —
+   * the refusal (or, through `requireConfirmationWithFallback`, the token
+   * fallback) instead. For a client that declares elicitation but never shows
+   * the prompt, so the call would hang; the server cannot detect that, so the
+   * operator says so (`MCP_CONFIRM_ELICITATION=off` in `confirmationFromEnv`).
+   * An acceptance arriving anyway is not honoured.
+   */
+  elicitation?: false;
 }
 
 /** See {@link RequireConfirmationOptions.binding}. */
@@ -178,6 +189,16 @@ export function requireConfirmation(
     requestKey,
     confirmationSchema,
   );
+
+  if (options.elicitation === false) {
+    return textResult({
+      confirmed: false,
+      dispatched: false,
+      action: options.action,
+      reason: 'confirmation-unsupported',
+      note: options.unsupportedNote ? `${DISABLED_NOTE}. ${options.unsupportedNote}` : `${DISABLED_NOTE}.`,
+    });
+  }
 
   if (response.kind === 'missing') {
     // A CALLER THAT CANNOT BE ASKED IS TOLD SO, rather than being handed a

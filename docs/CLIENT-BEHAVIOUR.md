@@ -96,7 +96,20 @@ it adds over `confirm: true`:
 
 `MCP_CONFIRM_MODE=ask-user` (the default) *instructs* the model to get the user's
 approval in chat. That is an instruction, not a gate. A client that declares
-elicitation still gets the real prompt.
+elicitation still gets the real prompt — unless `MCP_CONFIRM_ELICITATION=off`.
+
+### Declares elicitation, never shows it: opencode 2.0.x
+
+Measured 2026-10-06 on opencode 2.0.11 and 2.0.24 (stdio, `2025-11-25`): it
+declares `elicitation: {form: {applyDefaults: true}, url: {}}` and receives the
+`elicitation/create`, but files the prompt under the hard-coded session
+`"global"` instead of the chat session that made the call (which it does send,
+as `_meta["ai.opencode/sessionID"]` on `tools/call`). No view renders it, so a
+gated tool hangs indefinitely in the TUI; `opencode run` cancels it at once
+(`cancelled: true`). Capability declaration cannot reveal this, and naming the
+client in code would outlive the fix, so it is an operator switch:
+`MCP_CONFIRM_ELICITATION=off` in that server's opencode `env` puts it on the
+token rail.
 
 ### The canonical failure string
 

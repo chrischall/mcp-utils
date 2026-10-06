@@ -9,6 +9,7 @@ import {
   confirmationFromEnv,
   confirmKeyFromEnv,
   confirmTtlFromEnv,
+  readConfirmElicitation,
   readConfirmMode,
 } from './confirm-env.js';
 import {
@@ -204,6 +205,76 @@ describe('confirmationFromEnv', () => {
       if (before === undefined) delete process.env.MCP_CONFIRM_MODE;
       else process.env.MCP_CONFIRM_MODE = before;
     }
+  });
+});
+
+// A client can declare elicitation yet never show the prompt — opencode 2.0.x
+// files it under a session no view renders, so the gated call hangs. The
+// operator turns prompts off for that server; nothing here names a client.
+describe('readConfirmElicitation', () => {
+  it('defaults to on when MCP_CONFIRM_ELICITATION is absent, blank or an unresolved placeholder', () => {
+    expect(readConfirmElicitation({})).toBe('on');
+    expect(readConfirmElicitation({ MCP_CONFIRM_ELICITATION: '' })).toBe('on');
+    expect(readConfirmElicitation({ MCP_CONFIRM_ELICITATION: '${user_config.confirm_elicitation}' })).toBe('on');
+  });
+
+  it.each([['on', 'on'], [' OFF ', 'off'], ['Off', 'off']] as const)('reads %j as %s', (raw, value) => {
+    expect(readConfirmElicitation({ MCP_CONFIRM_ELICITATION: raw })).toBe(value);
+  });
+
+  it('keeps prompts ON for an unrecognised value — the stronger confirmation — and says so on stderr', () => {
+    const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    expect(readConfirmElicitation({ MCP_CONFIRM_ELICITATION: 'no-thanks' })).toBe('on');
+    expect(String(warn.mock.calls[0]?.[0])).toMatch(/MCP_CONFIRM_ELICITATION="no-thanks".*on/);
+    // Once per bad value, not once per gated call.
+    expect(readConfirmElicitation({ MCP_CONFIRM_ELICITATION: 'no-thanks' })).toBe('on');
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('confirmationFromEnv with MCP_CONFIRM_ELICITATION=off', () => {
+  const base = {
+    action: 'thing.delete',
+    message: 'Review and confirm this deletion.',
+    details: { id: 't1' },
+    tool: 'thing_delete',
+    subject: () => ({ target: 't1', payload: { id: 't1' }, preview: { id: 't1' } }),
+  };
+  const OFF = { MCP_CONFIRM_ELICITATION: 'off' };
+
+  it('a client that CAN be prompted gets the token preview instead of a prompt', async () => {
+    const r = text(await requireConfirmationWithFallback(CAN_BE_ASKED, confirmationFromEnv({ ...base, env: OFF })));
+    expect(r).toMatchObject({ status: 'confirmation-required', instruction: CONFIRM_TOKEN_INSTRUCTION, preview: { id: 't1' } });
+  });
+
+  it('and the same call plus that token proceeds', async () => {
+    const spent = createSpentTokenStore();
+    const p1 = text(await requireConfirmationWithFallback(CAN_BE_ASKED, confirmationFromEnv({ ...base, spent, env: OFF })));
+    const opts = confirmationFromEnv({ ...base, spent, env: OFF, confirmToken: p1.confirmToken });
+    expect(await requireConfirmationWithFallback(CAN_BE_ASKED, opts)).toBeUndefined();
+  });
+
+  it('honours MCP_CONFIRM_MODE=auto', async () => {
+    const r = text(await requireConfirmationWithFallback(
+      CAN_BE_ASKED, confirmationFromEnv({ ...base, env: { ...OFF, MCP_CONFIRM_MODE: 'auto' } }),
+    ));
+    expect(r.instruction).toBe(CONFIRM_TOKEN_AUTO_INSTRUCTION);
+  });
+
+  it('with MCP_CONFIRM_MODE=refuse, refuses outright and names both switches', async () => {
+    const subject = vi.fn(base.subject);
+    const opts = confirmationFromEnv({ ...base, subject, env: { ...OFF, MCP_CONFIRM_MODE: 'refuse' } });
+    const r = text(await requireConfirmationWithFallback(CAN_BE_ASKED, opts));
+    expect(r).toMatchObject({ confirmed: false, dispatched: false, reason: 'confirmation-unsupported' });
+    expect(r.note).toMatch(/MCP_CONFIRM_ELICITATION=off/);
+    expect(r.note).toMatch(/MCP_CONFIRM_MODE=ask-user/);
+    expect(subject).not.toHaveBeenCalled();
+  });
+
+  it('on (the default) leaves a promptable client on the prompt', async () => {
+    const opts = confirmationFromEnv({ ...base, env: { MCP_CONFIRM_ELICITATION: 'on' } });
+    expect(opts.elicitation).toBeUndefined();
+    expect(await requireConfirmationWithFallback(CAN_BE_ASKED, opts)).toMatchObject({ resultType: 'input_required' });
   });
 });
 

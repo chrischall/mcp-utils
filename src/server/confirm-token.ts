@@ -352,8 +352,9 @@ async function tokenConfirmation(action: string, fb: ConfirmTokenFallback): Prom
  *
  * Elicitation stays primary and is untouched: a caller that can be asked is
  * asked, and `tokenFallback.subject` is never called. Only when the caller
- * declares it cannot be prompted AND `tokenFallback` is given does the
- * two-phase token flow run instead of the refusal. `undefined` means proceed;
+ * declares it cannot be prompted (or `elicitation: false` says to treat it so)
+ * AND `tokenFallback` is given does the two-phase token flow run instead of the
+ * refusal. `undefined` means proceed;
  * anything else is the result to return unchanged.
  */
 export async function requireConfirmationWithFallback(
@@ -361,7 +362,7 @@ export async function requireConfirmationWithFallback(
   options: RequireConfirmationWithFallbackOptions,
 ): Promise<InputRequiredResult | CallToolResult | undefined> {
   const { tokenFallback, ...confirmation } = options;
-  if (tokenFallback && callerAcceptsFormElicitation(ctx) === false) {
+  if (tokenFallback && (options.elicitation === false || callerAcceptsFormElicitation(ctx) === false)) {
     return tokenConfirmation(options.action, tokenFallback);
   }
   return requireConfirmation(ctx, confirmation);
