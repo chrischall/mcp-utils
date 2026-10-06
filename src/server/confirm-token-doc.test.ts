@@ -89,7 +89,7 @@ describe('docs/CONFIRM-TOKEN.md matches the implementation', () => {
   it('documents exactly the env variables the env layer reads', () => {
     const inSource = new Set([...read('./confirm-env.ts').matchAll(/readEnvVar\('(MCP_[A-Z_]+)'/g)].map((m) => m[1]));
     const inDoc = new Set([...DOC.matchAll(/\b(MCP_[A-Z_]*[A-Z])\b/g)].map((m) => m[1]));
-    expect([...inSource].sort()).toEqual(['MCP_CONFIRM_MODE', 'MCP_CONFIRM_SECRET', 'MCP_CONFIRM_TTL_SECONDS', 'MCP_DATA_DIR', 'MCP_HOST_CONFIRM_SECRET']);
+    expect([...inSource].sort()).toEqual(['MCP_CONFIRM_ELICITATION', 'MCP_CONFIRM_MODE', 'MCP_CONFIRM_SECRET', 'MCP_CONFIRM_TTL_SECONDS', 'MCP_DATA_DIR', 'MCP_HOST_CONFIRM_SECRET']);
     expect([...inDoc].sort()).toEqual([...inSource].sort());
   });
 

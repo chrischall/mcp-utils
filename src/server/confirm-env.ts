@@ -6,6 +6,7 @@
  * | variable | default | |
  * |---|---|---|
  * | `MCP_CONFIRM_MODE` | `ask-user` | what a gated write does on a client that CANNOT show a confirmation prompt |
+ * | `MCP_CONFIRM_ELICITATION` | `on` | `off` never sends a prompt: every client gets the `MCP_CONFIRM_MODE` path |
  * | `MCP_CONFIRM_TTL_SECONDS` | `600` | how long a token stays valid; unparseable → `refuse` + a stderr warning |
  * | `MCP_CONFIRM_SECRET` | random per process | HMAC key; set only if tokens must survive a restart |
  * | `MCP_HOST_CONFIRM_SECRET` | unset | the same, set by a HOST (mcp-host); honoured only beside an absolute `MCP_DATA_DIR` |
@@ -28,6 +29,13 @@
  * A client that CAN be prompted always gets the real prompt, whatever the mode.
  * An unrecognised value fails CLOSED to `refuse` (fleet convention: a typo must
  * not widen what the server will do), with a warning on stderr.
+ *
+ * `MCP_CONFIRM_ELICITATION=off` is for a client that DECLARES elicitation but
+ * never shows the prompt, so a gated call hangs (opencode 2.0.x files it under a
+ * session no view renders). The server cannot tell such a client from one that
+ * works, so the operator says so per server. An unrecognised value stays `on` —
+ * the prompt is the stronger confirmation, so a typo must not trade it away —
+ * with a warning on stderr.
  *
  * The confirm-token module itself stays env-free; this is the opt-in layer a
  * server uses when it wants the fleet defaults.
@@ -63,6 +71,19 @@ export function readConfirmMode(env: EnvSource = process.env): ConfirmMode {
     );
   }
   return 'refuse';
+}
+
+/** `MCP_CONFIRM_ELICITATION`, defaulting to `on`; an unrecognised value is `on`. */
+export function readConfirmElicitation(env: EnvSource = process.env): 'on' | 'off' {
+  const raw = readEnvVar('MCP_CONFIRM_ELICITATION', { env })?.trim().toLowerCase();
+  if (!raw || raw === 'on') return 'on';
+  if (raw === 'off') return 'off';
+  const key = `elicitation:${raw}`;
+  if (!warned.has(key)) {
+    warned.add(key);
+    process.stderr.write(`MCP_CONFIRM_ELICITATION="${raw}" is not one of on, off; treating it as on.\n`);
+  }
+  return 'on';
 }
 
 /**
@@ -151,6 +172,7 @@ export const CONFIRM_TOKEN_AUTO_INSTRUCTION =
   + 'plus confirmToken. (This server runs with MCP_CONFIRM_MODE=auto, so the user\'s approval in chat is not required.)';
 
 const REFUSE_HINT = 'Set MCP_CONFIRM_MODE=ask-user on the server to allow two-step confirmation instead.';
+const ELICITATION_OFF_HINT = 'MCP_CONFIRM_ELICITATION=off on the server turns confirmation prompts off.';
 const BAD_TTL_HINT = 'MCP_CONFIRM_TTL_SECONDS on the server is not a positive whole number of seconds; fix it to allow '
   + 'two-step confirmation.';
 
@@ -212,12 +234,15 @@ export function confirmationFromEnv(options: ConfirmationFromEnvOptions): Requir
   const spent = callerSpent ?? spentTokenStoreFromEnv(env);
   const mode = readConfirmMode(env);
   const ttlSeconds = readConfirmTtl(env);
+  const elicitationOff = readConfirmElicitation(env) === 'off';
   const bound = args === undefined ? undefined : boundArgs(args);
-  const confirmation: RequireConfirmationOptions = bound === undefined || rest.binding
+  const bindingAdded: RequireConfirmationOptions = bound === undefined || rest.binding
     ? rest
     : { ...rest, binding: { key: confirmKeyFromEnv(env), args: bound, ttlSeconds: ttlSeconds ?? DEFAULT_TTL_SECONDS } };
+  const confirmation: RequireConfirmationOptions = elicitationOff ? { ...bindingAdded, elicitation: false } : bindingAdded;
   if (mode === 'refuse' || ttlSeconds === undefined) {
-    const hint = mode === 'refuse' ? REFUSE_HINT : BAD_TTL_HINT;
+    const reason = mode === 'refuse' ? REFUSE_HINT : BAD_TTL_HINT;
+    const hint = elicitationOff ? `${ELICITATION_OFF_HINT} ${reason}` : reason;
     return {
       ...confirmation,
       unsupportedNote: confirmation.unsupportedNote ? `${confirmation.unsupportedNote} ${hint}` : hint,

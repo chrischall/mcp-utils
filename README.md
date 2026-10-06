@@ -245,7 +245,8 @@ throws rather than binding only the target.
 
 | variable | default | |
 |---|---|---|
-| `MCP_CONFIRM_MODE` | `ask-user` | What a gated write does on a client that cannot show a prompt. `ask-user`: two steps, and the model must get the user's approval in chat before using the token. `auto`: two steps, but the model may use the token after reviewing the preview itself. `refuse`: refused on such clients. An unrecognised value is treated as `refuse` (with a stderr warning). A client that can be prompted always is. |
+| `MCP_CONFIRM_MODE` | `ask-user` | What a gated write does on a client that cannot show a prompt. `ask-user`: two steps, and the model must get the user's approval in chat before using the token. `auto`: two steps, but the model may use the token after reviewing the preview itself. `refuse`: refused on such clients. An unrecognised value is treated as `refuse` (with a stderr warning). A client that can be prompted always is, unless `MCP_CONFIRM_ELICITATION=off`. |
+| `MCP_CONFIRM_ELICITATION` | `on` | `off` never sends a confirmation prompt, so every client gets the `MCP_CONFIRM_MODE` path. Set it for a client that declares elicitation but never shows the prompt (the gated call hangs — opencode 2.0.x). Any other value stays `on` (with a stderr warning). |
 | `MCP_CONFIRM_TTL_SECONDS` | `600` | token lifetime, a positive whole number of seconds. Anything else (`60s`, `1e3`) warns on stderr and is treated as `refuse`, never silently as the default. |
 | `MCP_CONFIRM_SECRET` | random per process | HMAC key (any length, stretched through SHA-256); set only if tokens must survive a restart |
 | `MCP_HOST_CONFIRM_SECRET` | unset | The same, set by a host (mcp-host derives one per child). Honoured only beside an absolute `MCP_DATA_DIR`, and `MCP_CONFIRM_SECRET` wins over it. |

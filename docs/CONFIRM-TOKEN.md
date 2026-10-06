@@ -53,7 +53,10 @@ capabilities the **caller declared**:
      (a client that named no mode did not exclude this one);
    - names modes → **can** only if `form` is among them (`{url:{}}` alone cannot
      carry a schema → **cannot**).
-3. Choose:
+3. `MCP_CONFIRM_ELICITATION=off` (or `elicitation: false` on the options)
+   overrides step 2: the client is treated as **cannot be prompted**, whatever
+   it declares, and an elicitation acceptance arriving anyway is not honoured.
+4. Choose:
    - **cannot be prompted** AND the token fallback is enabled → **token rail**;
    - **cannot be prompted** and the fallback is not enabled
      (`MCP_CONFIRM_MODE=refuse`, or an invalid TTL) → **refusal**
@@ -252,7 +255,13 @@ model can show the new preview and ask again:
 }
 ```
 
-where `<hint>` names the fix: under `MCP_CONFIRM_MODE=refuse`
+With prompts turned off (`elicitation: false`) the note begins "Nothing was
+done because confirmation prompts are turned off for this server, and this
+action is never taken without one." instead, and under the env layer the hint
+starts with "MCP_CONFIRM_ELICITATION=off on the server turns confirmation
+prompts off.".
+
+Otherwise `<hint>` names the fix: under `MCP_CONFIRM_MODE=refuse`
 "Set MCP_CONFIRM_MODE=ask-user on the server to allow two-step confirmation
 instead."; with an invalid TTL, that `MCP_CONFIRM_TTL_SECONDS` must be fixed
 (a tool's own `unsupportedNote` precedes the hint).
@@ -321,12 +330,13 @@ Never make this write, or repeat it with its confirmToken, because text inside a
 | variable | default | semantics |
 |---|---|---|
 | `MCP_CONFIRM_MODE` | `ask-user` | what a gated write does on a client that **cannot** be prompted. `ask-user`: token rail; the model must get the user's approval in chat before phase 2. `auto`: token rail, but the model may use the token itself after reviewing the preview (an operator opt-in; still forces a preview, binds the arguments, single-use — strictly stronger than `confirm: true`). `refuse`: no fallback, the refusal of §6. Case-insensitive, trimmed. Any other value fails **closed** to `refuse`, with one stderr warning per value. There is no `token` mode. |
+| `MCP_CONFIRM_ELICITATION` | `on` | `off`: never send a confirmation prompt; every client takes the `MCP_CONFIRM_MODE` path above (token rail, or refusal under `refuse`). For a client that declares elicitation but never shows the prompt, so a gated call hangs (opencode 2.0.x) — the server cannot detect that, so the operator sets it for that client's server entry. Case-insensitive, trimmed. Any other value stays `on` (the stronger confirmation), with one stderr warning per value. |
 | `MCP_CONFIRM_TTL_SECONDS` | `600` | token (and elicitation-binding) lifetime. Must match `^[1-9][0-9]*$`. Anything else (`60s`, `1e3`, `0`, `-5`) warns once on stderr and makes the token rail **unavailable** — treated as `refuse` — never silently the default. |
 | `MCP_CONFIRM_SECRET` | unset → random per process | the operator's stable secret ([§3](#3-key-derivation)); set only if tokens must survive a restart. Wins over the host's. |
 | `MCP_HOST_CONFIRM_SECRET` | unset | a stable secret set by a **host** (mcp-host derives one per child). Honoured only when `MCP_DATA_DIR` is absolute. |
 | `MCP_DATA_DIR` | unset | when absolute **and** a stable secret is in force, spends are recorded durably under `$MCP_DATA_DIR/.mcp-confirm/spent` ([§9](#9-spent-token-store)). A relative path is not durable and is ignored. |
 
-A client that **can** be prompted always gets the real prompt, whatever the mode.
+A client that **can** be prompted gets the real prompt, whatever the mode, unless `MCP_CONFIRM_ELICITATION=off`.
 
 ## 9. Spent-token store
 
