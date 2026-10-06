@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.15.0](https://github.com/chrischall/mcp-utils/compare/v2.14.0...v2.15.0) (2026-10-06)
+
+
+### Features
+
+* **server:** add MCP_CONFIRM_ELICITATION=off for clients that never show the prompt ([#356](https://github.com/chrischall/mcp-utils/issues/356)) ([2acf78f](https://github.com/chrischall/mcp-utils/commit/2acf78f1fe1bf7866da9ec273b91ed1a14b1e594))
+
 ## [2.14.0](https://github.com/chrischall/mcp-utils/compare/v2.13.1...v2.14.0) (2026-10-05)
 
 
