@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.15.1](https://github.com/chrischall/mcp-utils/compare/v2.15.0...v2.15.1) (2026-10-07)
+
+
+### Bug Fixes
+
+* **deps:** build and test the fetchproxy adapter against @fetchproxy/server 3.6.0 ([#359](https://github.com/chrischall/mcp-utils/issues/359)) ([195bcc6](https://github.com/chrischall/mcp-utils/commit/195bcc6dc592c37939407585463a1444c445acef))
+
 ## [2.15.0](https://github.com/chrischall/mcp-utils/compare/v2.14.0...v2.15.0) (2026-10-06)
 
 
