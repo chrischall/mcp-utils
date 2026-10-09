@@ -2345,10 +2345,35 @@ exit code unless you pass `--strict`**:
   (`server.mcp_config.env` + `user_config`), `server.json`
   (`packages[].environmentVariables`) and `.mcp.json`: undeclared reads, dead
   declarations, a var marked required that the code only reads optionally, a
-  `user_config` entry nothing passes to the server, and a cwd-relative script
-  path in `.mcp.json` (anchor it with `${CLAUDE_PLUGIN_ROOT}`). `MCP_*` keys
-  (this library's own knobs) and runtime vars (`NODE_ENV`, `HOME`, …) are
-  ignored. A key built at runtime (`` readEnvVar(`${P}_TOKEN`) ``) is invisible.
+  `user_config` entry nothing passes to the server, and the
+  `${CLAUDE_PLUGIN_ROOT}` rule below. `MCP_*` keys (this library's own knobs)
+  and runtime vars (`NODE_ENV`, `HOME`, …) are ignored. A key built at runtime
+  (`` readEnvVar(`${P}_TOKEN`) ``) is invisible.
+
+The `${CLAUDE_PLUGIN_ROOT}` rule follows the MCP config the **plugin actually
+uses**, because Claude Code defines `CLAUDE_PLUGIN_ROOT` only for a plugin
+install: a project-scoped `.mcp.json` that uses it launches `node /dist/…`
+and the server dies at startup (office-outlook-mcp; tempo-api-mcp regressed by
+following an earlier version of this lint). `.claude-plugin/plugin.json`
+`mcpServers` is resolved against the plugin root (the directory holding
+`.claude-plugin/`):
+
+| `mcpServers` | Plugin config | Root `.mcp.json` | Warns on |
+| --- | --- | --- | --- |
+| `"./.mcp.json"` | the root `.mcp.json` | plugin config | a cwd-relative path in it |
+| absent | the root `.mcp.json` (Claude Code's default) | plugin config | a cwd-relative path in it |
+| another path, e.g. `"./.claude-plugin/mcp.json"` | that file | project-scoped | a cwd-relative path in that file; `${CLAUDE_PLUGIN_ROOT}` in the root file; a path that does not exist |
+| inline object (or an array mixing shapes) | the inline servers (and any named files) | project-scoped unless the array names it | a cwd-relative path inline; `${CLAUDE_PLUGIN_ROOT}` in the root file |
+
+`mcp` is not a key Claude Code reads (`claude plugin validate`: "Unknown field
+'mcp'"). `"mcp": "./.mcp.json"` names the default anyway and is not reported;
+any other `mcp` value is resolved as the author meant (so the root file is
+not told to use the variable) and reported, because a plugin install really
+loads the root `.mcp.json`. `.mcpb`/`.dxt` bundles and URLs are skipped. One
+case is not checked: Claude Code loads the root `.mcp.json` first and merges
+the declared config over it, so a project-scoped root server whose name the
+plugin config does not replace also starts in a plugin install whose source
+ships that file.
 
 The env check reads every `.js`/`.mjs`/`.cjs` under the entry's directory,
 skipping `node_modules`, dot-directories, `test`/`tests`/`__tests__`,

@@ -16,7 +16,9 @@ import {
   formatWarning,
   loadSurface,
   manifestToolDriftFindings,
+  mcpConfigPathFindings,
   mcpJsonPathFindings,
+  resolvePluginMcp,
 } from './surface-checks.mjs';
 
 const tool = (name, annotations) => ({ name, ...(annotations === undefined ? {} : { annotations }) });
@@ -388,5 +390,135 @@ describe('collectSurfaceWarnings', () => {
     const load = () => ({ code: { text: '', reads: new Map() }, manifest: undefined, serverJson: undefined, mcpJson: undefined, errors: [] });
     const ws = collectSurfaceWarnings('dist/index.js', [{ name: 'svc_send', annotations: { readOnlyHint: false } }], { load });
     expect(ws.map((w) => w.code).sort()).toEqual(['destructive-implicit', 'open-world-missing']);
+  });
+});
+
+// Which file the `${CLAUDE_PLUGIN_ROOT}` anchor rule applies to. Claude Code
+// defines CLAUDE_PLUGIN_ROOT for a PLUGIN launch only; a project-scoped
+// `.mcp.json` launched with it runs `node /dist/...` and dies at startup
+// (office-outlook-mcp's tests/server-boot.test.ts; tempo-api-mcp regressed by
+// following the old lint). So the rule follows the config the plugin uses.
+describe('plugin MCP config layouts', () => {
+  let root;
+  const write = (rel, body) => {
+    mkdirSync(dirname(join(root, rel)), { recursive: true });
+    writeFileSync(join(root, rel), typeof body === 'string' ? body : JSON.stringify(body));
+  };
+  afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); root = undefined; });
+
+  const REL = { command: 'node', args: ['dist/index.js'] };
+  const ANCHORED = { command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/dist/index.js'] };
+  const NPX = { command: 'npx', args: ['-y', 'svc-mcp'] };
+  const MCP_CODES = new Set([
+    'mcp-json-relative-path', 'mcp-json-plugin-root-in-project-config',
+    'plugin-json-mcp-ignored', 'plugin-mcp-config-missing',
+  ]);
+  /** Lay out a repo and return its mcp-config findings as `code:subject@file`. */
+  const run = ({ plugin, rootMcp, files = {} }) => {
+    root = mkdtempSync(join(tmpdir(), 'surface-'));
+    write('package.json', {});
+    write('dist/index.js', '');
+    if (plugin !== undefined) write('.claude-plugin/plugin.json', { name: 'svc', ...plugin });
+    if (rootMcp !== undefined) write('.mcp.json', { mcpServers: rootMcp });
+    for (const [rel, body] of Object.entries(files)) write(rel, body);
+    const ws = collectSurfaceWarnings(join(root, 'dist/index.js'), [], { load: (e) => loadSurface(e, root) });
+    return ws.filter((w) => MCP_CODES.has(w.code));
+  };
+  const ids = (fs) => fs.map((f) => `${f.code}:${f.subject}@${f.file}`);
+
+  describe('mcpServers: "./.mcp.json" (the root file IS the plugin config)', () => {
+    it('warns on a cwd-relative path in it', () => {
+      expect(ids(run({ plugin: { mcpServers: './.mcp.json' }, rootMcp: { svc: REL } })))
+        .toEqual(['mcp-json-relative-path:svc@.mcp.json']);
+    });
+    it('is clean when anchored', () => {
+      expect(run({ plugin: { mcpServers: './.mcp.json' }, rootMcp: { svc: ANCHORED } })).toEqual([]);
+    });
+  });
+
+  describe('no mcpServers field (Claude Code defaults to the root .mcp.json)', () => {
+    it('warns on a cwd-relative path in the root file', () => {
+      expect(ids(run({ plugin: {}, rootMcp: { svc: REL } }))).toEqual(['mcp-json-relative-path:svc@.mcp.json']);
+    });
+    it('is clean when anchored', () => {
+      expect(run({ plugin: {}, rootMcp: { svc: ANCHORED } })).toEqual([]);
+    });
+    it('keeps the old behaviour with no plugin.json at all', () => {
+      expect(ids(run({ rootMcp: { svc: REL } }))).toEqual(['mcp-json-relative-path:svc@.mcp.json']);
+    });
+  });
+
+  describe('mcpServers naming a separate file (resolved against the plugin root)', () => {
+    const plugin = { mcpServers: './.claude-plugin/mcp.json' };
+    it('warns on a cwd-relative path in the plugin config', () => {
+      expect(ids(run({ plugin, rootMcp: { svc: REL }, files: { '.claude-plugin/mcp.json': { mcpServers: { svc: REL } } } })))
+        .toEqual(['mcp-json-relative-path:svc@.claude-plugin/mcp.json']);
+    });
+    it('is clean with an anchored plugin config and a relative project-scoped root .mcp.json', () => {
+      expect(run({ plugin, rootMcp: { svc: REL }, files: { '.claude-plugin/mcp.json': { mcpServers: { svc: ANCHORED } } } }))
+        .toEqual([]);
+    });
+    it('warns when the project-scoped root .mcp.json uses ${CLAUDE_PLUGIN_ROOT}, and says why', () => {
+      const fs = run({ plugin, rootMcp: { svc: ANCHORED }, files: { '.claude-plugin/mcp.json': { mcpServers: { svc: ANCHORED } } } });
+      expect(ids(fs)).toEqual(['mcp-json-plugin-root-in-project-config:svc@.mcp.json']);
+      expect(fs[0].message).toMatch(/only for a plugin/);
+      expect(fs[0].message).toMatch(/project-scoped/);
+      expect(fs[0].message).toContain('/dist/index.js');
+    });
+    it('warns when the named file does not exist', () => {
+      expect(ids(run({ plugin: { mcpServers: './mcp.json' }, rootMcp: { svc: REL } })))
+        .toEqual(['plugin-mcp-config-missing:./mcp.json@.claude-plugin/plugin.json']);
+    });
+  });
+
+  describe('the fleet\'s `"mcp": "./mcp.json"` (a key Claude Code ignores)', () => {
+    it('reports the ignored key and the unresolvable path, and treats the root file as project-scoped', () => {
+      const fs = run({
+        plugin: { mcp: './mcp.json' }, rootMcp: { svc: REL },
+        files: { '.claude-plugin/mcp.json': { mcpServers: { svc: ANCHORED } } },
+      });
+      expect(ids(fs)).toEqual([
+        'plugin-json-mcp-ignored:mcp@.claude-plugin/plugin.json',
+        'plugin-mcp-config-missing:./mcp.json@.claude-plugin/plugin.json',
+      ]);
+      expect(fs[0].message).toContain('"mcpServers": "./.claude-plugin/mcp.json"');
+    });
+  });
+
+  describe('inline mcpServers object in plugin.json', () => {
+    it('warns on a cwd-relative path inline', () => {
+      expect(ids(run({ plugin: { mcpServers: { svc: REL } }, rootMcp: { svc: REL } })))
+        .toEqual(['mcp-json-relative-path:svc@.claude-plugin/plugin.json']);
+    });
+    it('is clean with a package launch inline and a relative project-scoped root .mcp.json', () => {
+      expect(run({ plugin: { mcpServers: { svc: NPX } }, rootMcp: { 'svc-dev': REL } })).toEqual([]);
+    });
+    it('warns when the project-scoped root .mcp.json uses ${CLAUDE_PLUGIN_ROOT}', () => {
+      expect(ids(run({ plugin: { mcpServers: { svc: NPX } }, rootMcp: { svc: ANCHORED } })))
+        .toEqual(['mcp-json-plugin-root-in-project-config:svc@.mcp.json']);
+    });
+  });
+
+  describe('an array of shapes', () => {
+    it('treats the root file as plugin config when the array names it, and checks inline entries and skips bundles', () => {
+      const fs = run({
+        plugin: { mcpServers: ['./.mcp.json', { extra: REL }, './svc.mcpb', 'https://example.com/svc.mcpb'] },
+        rootMcp: { svc: REL },
+      });
+      expect(ids(fs)).toEqual([
+        'mcp-json-relative-path:svc@.mcp.json',
+        'mcp-json-relative-path:extra@.claude-plugin/plugin.json',
+      ]);
+    });
+  });
+});
+
+describe('an ignored "mcp" key that names the default', () => {
+  it('is not reported: Claude Code loads the root .mcp.json anyway, which is what it names', () => {
+    const fs = mcpConfigPathFindings({
+      mcpJson: { file: '.mcp.json', json: { mcpServers: { svc: { command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/dist/index.js'] } } } },
+      pluginMcp: resolvePluginMcp({ file: '.claude-plugin/plugin.json', json: { mcp: './.mcp.json' } }, () => null, (rel) => rel === './.mcp.json'),
+    });
+    expect(fs).toEqual([]);
   });
 });
