@@ -1005,6 +1005,24 @@ reference data through the long `static` tier via
 `fetchThrough(key, load, 'static')`, and pair the TTLs with `readTtlMsEnv`.
 Writes are never cached.
 
+`fetchThrough` single-flights per key: concurrent misses for the same key share
+one in-flight `load()`, so an agent fanning out parallel tool calls pays for one
+upstream request, not N. A rejection reaches every waiter and is never cached;
+the next call reloads. A disabled tier (TTL `0`) still dedups in-flight calls
+but stores nothing. `clear()` also drops in-flight loads — callers already
+waiting still settle, but a load started before the clear never writes into the
+cache. Pass the caller's cancellation signal as the fourth argument so one
+caller's cancel never fails the others:
+
+```ts
+cache.fetchThrough(path, () => api.get(path, { signal }), 'dynamic', { signal });
+```
+
+A waiter whose own `signal` aborts rejects with `signal.reason` (the shared load
+keeps going for everyone else). If the shared load itself rejects with an
+`AbortError` / `CancelledError` because the caller leading it cancelled, every
+waiter whose signal is still live re-runs its own `load` instead of failing.
+
 `parseCookieHeader(header)` parses an inbound *request* `Cookie:` header
 (`name=value; name2=value2`) into a `Record<string, string>` (first `=` splits,
 so values may contain `=`; last value wins on a duplicate name). It's the
