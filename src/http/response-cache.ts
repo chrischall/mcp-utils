@@ -42,8 +42,10 @@ export interface FetchThroughOptions {
    * `signal.reason` — other callers sharing the same in-flight load are
    * unaffected. Your `load` should close over the same signal so the request
    * itself is cancelled when you lead the load. If the shared load rejects
-   * with an abort/cancel error (another caller cancelled it) and this signal
-   * is still live, this call re-runs its own `load` instead of failing.
+   * after the caller leading it cancelled (that caller's signal aborted —
+   * whatever the rejection looks like, e.g. the MCP SDK's string reason), or
+   * rejects with an `AbortError`/`CancelledError`/`CanceledError`, and this
+   * signal is still live, this call re-runs its own `load` instead of failing.
    */
   signal?: AbortSignal;
 }
@@ -61,8 +63,10 @@ export interface ResponseCache<V = unknown> {
   /**
    * Cache-through read: return the cached value or run `load` and cache it.
    * Concurrent misses for the same `key` share one in-flight `load` (the
-   * first caller's); every caller gets its value or its rejection. A
-   * rejection is not cached. A disabled tier (TTL 0) still dedups in-flight
+   * first caller's); every caller gets its value or its rejection. The first
+   * caller's `tier` also decides how that shared result is stored — a caller
+   * joining an in-flight load does not change its TTL. A rejection is not
+   * cached. A disabled tier (TTL 0) still dedups in-flight
    * calls but stores nothing. Pass `options.signal` so one caller's
    * cancellation never fails the others.
    */
@@ -93,7 +97,7 @@ export function createResponseCache<V = unknown>(opts: ResponseCacheOptions): Re
   const maxEntries = opts.maxEntries ?? RESPONSE_CACHE_MAX_ENTRIES;
   const store = new Map<string, { expiresAt: number; value: V }>();
   /** In-flight loads, keyed like `store`. Entries are compared by identity. */
-  const inflight = new Map<string, { promise: Promise<V> }>();
+  const inflight = new Map<string, InflightLoad<V>>();
   /** Bumped by `clear()` so a load started before it never repopulates the cache. */
   let generation = 0;
 
@@ -134,7 +138,12 @@ export function createResponseCache<V = unknown>(opts: ResponseCacheOptions): Re
   }
 
   /** Start the shared load for `key`, registering it as in-flight. */
-  function startLoad(key: string, load: () => Promise<V>, tier: string): { promise: Promise<V> } {
+  function startLoad(
+    key: string,
+    load: () => Promise<V>,
+    tier: string,
+    signal: AbortSignal | undefined,
+  ): InflightLoad<V> {
     const gen = generation;
     // The async wrapper turns a synchronous throw from `load` into a
     // rejection, while still invoking `load` synchronously.
@@ -142,7 +151,7 @@ export function createResponseCache<V = unknown>(opts: ResponseCacheOptions): Re
       if (gen === generation) set(key, value, tier);
       return value;
     });
-    const entry = { promise: shared };
+    const entry: InflightLoad<V> = { promise: shared, signal };
     inflight.set(key, entry);
     // Registered before any caller awaits `shared`, so the pending entry is
     // gone by the time a waiter's continuation runs (and can retry).
@@ -165,12 +174,18 @@ export function createResponseCache<V = unknown>(opts: ResponseCacheOptions): Re
       const hit = get(key);
       if (hit !== undefined) return hit;
       const pending = inflight.get(key);
-      if (!pending) return withSignal(startLoad(key, load, tier).promise, signal);
+      if (!pending) return withSignal(startLoad(key, load, tier, signal).promise, signal);
       try {
         return await withSignal(pending.promise, signal);
       } catch (err) {
         // Someone else's load was cancelled; ours is still wanted → re-run.
-        if (isCancellation(err) && !signal?.aborted) continue;
+        // The leader's own signal is the authoritative test: real cancellations
+        // often carry no recognisable name (the MCP SDK aborts with a string
+        // reason, which fetch rejects with as-is and fetchBounded wraps in a
+        // plain `Error`). The error name is a fallback for loads cancelled by
+        // something other than the leader's signal.
+        const cancelled = pending.signal?.aborted === true || isCancellation(err);
+        if (cancelled && !signal?.aborted) continue;
         throw err;
       }
     }
@@ -189,6 +204,12 @@ export function createResponseCache<V = unknown>(opts: ResponseCacheOptions): Re
       return store.size;
     },
   };
+}
+
+/** A pending shared load and the signal of the caller that started it. */
+interface InflightLoad<V> {
+  promise: Promise<V>;
+  signal: AbortSignal | undefined;
 }
 
 /** Race `promise` against `signal`: reject with `signal.reason` if it aborts first. */

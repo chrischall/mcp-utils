@@ -1019,9 +1019,18 @@ cache.fetchThrough(path, () => api.get(path, { signal }), 'dynamic', { signal })
 ```
 
 A waiter whose own `signal` aborts rejects with `signal.reason` (the shared load
-keeps going for everyone else). If the shared load itself rejects with an
-`AbortError` / `CancelledError` because the caller leading it cancelled, every
-waiter whose signal is still live re-runs its own `load` instead of failing.
+keeps going for everyone else). If the shared load fails after the caller
+leading it cancelled (its `signal` aborted), every waiter whose signal is still
+live re-runs its own `load` instead of failing. That works whatever the
+rejection looks like, including the MCP SDK's string abort reason, which raw
+`fetch` rethrows as-is and `fetchBounded` wraps in a plain `Error`. A rejection
+named `AbortError` / `CancelledError` / `CanceledError` is also treated as a
+cancellation, for loads cancelled by something other than the leader's signal.
+
+The first caller's `tier` decides how the shared result is stored: a call for
+`'static'` that joins an in-flight `'dynamic'` load for the same key gets the
+dynamic TTL (or nothing stored, if that tier is disabled). Use distinct keys
+when the same request must be cached under different tiers.
 
 `parseCookieHeader(header)` parses an inbound *request* `Cookie:` header
 (`name=value; name2=value2`) into a `Record<string, string>` (first `=` splits,

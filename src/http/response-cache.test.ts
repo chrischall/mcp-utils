@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { createResponseCache } from './index.js';
+import { createResponseCache, RESPONSE_CACHE_MAX_ENTRIES } from './index.js';
 
 function clock(startMs = 0): { now: () => number; advance: (ms: number) => void } {
   let t = startMs;
@@ -86,6 +86,26 @@ describe('createResponseCache', () => {
     expect(cache.size).toBe(0);
     expect(cache.get('/a')).toBeUndefined();
   });
+  it('defaults to the real clock and the shared entry bound', () => {
+    const cache = createResponseCache<string>({ ttlMs: { dynamic: 60_000 } });
+    for (let i = 0; i <= RESPONSE_CACHE_MAX_ENTRIES; i++) cache.set(`/k${i}`, 'v');
+    expect(cache.size).toBe(RESPONSE_CACHE_MAX_ENTRIES);
+    expect(cache.get('/k0')).toBeUndefined();
+    expect(cache.get(`/k${RESPONSE_CACHE_MAX_ENTRIES}`)).toBe('v');
+  });
+
+  it('an unknown tier is treated as disabled', () => {
+    const cache = createResponseCache<string>({ ttlMs: { dynamic: 1000 }, now: () => 0 });
+    cache.set('/k', 'v', 'nope');
+    expect(cache.size).toBe(0);
+  });
+
+  it('a maxEntries of 0 still stores the newest entry without looping', () => {
+    const cache = createResponseCache<string>({ ttlMs: { dynamic: 1000 }, maxEntries: 0, now: () => 0 });
+    cache.set('/a', 'a');
+    expect(cache.get('/a')).toBe('a');
+  });
+
   describe('fetchThrough in-flight dedup', () => {
     function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void } {
       let resolve!: (v: T) => void;
@@ -239,6 +259,71 @@ describe('createResponseCache', () => {
       expect(await waiter).toBe('w');
       expect(waiterLoads).toBe(1);
       expect(cache.get('/k')).toBe('w');
+    });
+
+    it('the leader aborting with a string reason (fetchBounded-style plain Error) does not fail a live waiter', async () => {
+      // The MCP SDK cancels with `controller.abort(<string reason>)`; fetchBounded
+      // surfaces that as `new Error(String(reason))`, whose name is just "Error".
+      const cache = createResponseCache<string>({ ttlMs: { dynamic: 1000 }, now: () => 0 });
+      const leaderCtl = new AbortController();
+      const leaderLoad = (): Promise<string> =>
+        new Promise<string>((_res, rej) => {
+          leaderCtl.signal.addEventListener('abort', () => rej(new Error(String(leaderCtl.signal.reason))));
+        });
+      let waiterLoads = 0;
+      const waiterLoad = async (): Promise<string> => `w${++waiterLoads}`;
+      const leader = cache.fetchThrough('/k', leaderLoad, 'dynamic', { signal: leaderCtl.signal });
+      const waiterCtl = new AbortController();
+      const waiter = cache.fetchThrough('/k', waiterLoad, 'dynamic', { signal: waiterCtl.signal });
+      leaderCtl.abort('Client cancelled');
+      await expect(leader).rejects.toBe('Client cancelled');
+      expect(await waiter).toBe('w1');
+      expect(waiterLoads).toBe(1);
+      expect(cache.get('/k')).toBe('w1');
+    });
+
+    it('the leader aborting with a string reason (raw-fetch-style string rejection) is retried by a signal-less waiter', async () => {
+      const cache = createResponseCache<string>({ ttlMs: { dynamic: 1000 }, now: () => 0 });
+      const leaderCtl = new AbortController();
+      const leaderLoad = (): Promise<string> =>
+        new Promise<string>((_res, rej) => {
+          leaderCtl.signal.addEventListener('abort', () => rej(leaderCtl.signal.reason));
+        });
+      const leader = cache.fetchThrough('/k', leaderLoad, 'dynamic', { signal: leaderCtl.signal });
+      const waiter = cache.fetchThrough('/k', async () => 'plain');
+      leaderCtl.abort('Client cancelled');
+      await expect(leader).rejects.toBe('Client cancelled');
+      expect(await waiter).toBe('plain');
+    });
+
+    it('a waiter whose own signal aborted does not retry a leader-aborted load', async () => {
+      const cache = createResponseCache<string>({ ttlMs: { dynamic: 1000 }, now: () => 0 });
+      const shared = new AbortController();
+      let waiterLoads = 0;
+      const leader = cache.fetchThrough(
+        '/k',
+        () =>
+          new Promise<string>((_res, rej) => {
+            shared.signal.addEventListener('abort', () => rej(new Error(String(shared.signal.reason))));
+          }),
+        'dynamic',
+        { signal: shared.signal },
+      );
+      const waiter = cache.fetchThrough('/k', async () => `w${++waiterLoads}`, 'dynamic', { signal: shared.signal });
+      shared.abort('gone');
+      await expect(leader).rejects.toBe('gone');
+      await expect(waiter).rejects.toBe('gone');
+      expect(waiterLoads).toBe(0);
+    });
+
+    it('a waiter joining an in-flight load stores under the first caller\'s tier', async () => {
+      const cache = createResponseCache<string>({ ttlMs: { dynamic: 0, static: 1000 }, now: () => 0 });
+      const d = deferred<string>();
+      const leader = cache.fetchThrough('/k', () => d.promise, 'dynamic');
+      const waiter = cache.fetchThrough('/k', async () => 'unused', 'static');
+      d.resolve('v');
+      expect(await Promise.all([leader, waiter])).toEqual(['v', 'v']);
+      expect(cache.size).toBe(0); // leader's disabled tier won
     });
 
     it('a shared abort is retried by a signal-less waiter but not by an aborted one', async () => {
