@@ -35,9 +35,14 @@
  */
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import type { StdioServerHandle } from '@modelcontextprotocol/server/stdio';
-import { McpServer, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/server';
+import {
+  McpServer,
+  ProtocolError,
+  ProtocolErrorCode,
+  SUPPORTED_PROTOCOL_VERSIONS,
+} from '@modelcontextprotocol/server';
 import type { Transport, CallToolResult, McpServerOptions } from '@modelcontextprotocol/server';
-import { McpToolError, redactSecrets } from '../errors/index.js';
+import { McpToolError, messageOf, redactSecrets } from '../errors/index.js';
 import { errorResult } from '../response/index.js';
 
 export * from './confirmation.js';
@@ -104,7 +109,9 @@ export interface CreateMcpServerOptions<TDeps = unknown> {
   /**
    * Append an {@link McpToolError}'s `hint` to the text a failing tool returns.
    * Default `true`. Set `false` only for a server that deliberately wants the
-   * bare message.
+   * bare message. This switches off the whole {@link surfaceToolHints}
+   * wrapper, including the redaction it applies to every thrown error's text,
+   * so a server that opts out must redact its own failures.
    */
   surfaceHints?: boolean;
   /**
@@ -119,18 +126,30 @@ export interface CreateMcpServerOptions<TDeps = unknown> {
 }
 
 /**
- * Turn a thrown value into a tool result carrying its remediation `hint`, or
- * rethrow it untouched.
+ * Turn a thrown value into a redacted tool result, carrying its remediation
+ * `hint` when it has one.
  *
- * Only {@link McpToolError} with a `hint` is converted. Anything else keeps
- * propagating so a genuine bug still reads as one instead of being flattened
- * into advice.
+ * An {@link McpToolError} with a `hint` renders as `message\n\nHint: hint`.
+ * Anything else renders as its bare message, exactly the text the SDK's own
+ * `tools/call` catch would have produced (`error.message`, or `String(value)`
+ * for a non-Error), so a genuine bug still reads as one — but through
+ * {@link errorResult}, i.e. {@link redactSecrets}. Before this the wrapper
+ * rethrew such errors and the SDK rendered the raw message, so a TypeError
+ * quoting a signed URL or a third-party client error echoing a bearer token
+ * reached the caller verbatim (fleet audit library-candidates §16). One
+ * boundary now redacts every tool's failure text. Redaction only, never
+ * truncated, matching `errorResult`.
+ *
+ * The one exception is the SDK's `UrlElicitationRequired` protocol error:
+ * the SDK deliberately lets that through as a JSON-RPC error the client acts
+ * on (it opens the URL), so it is rethrown untouched.
  */
 function hintResultOrRethrow(err: unknown): CallToolResult {
+  if (err instanceof ProtocolError && err.code === ProtocolErrorCode.UrlElicitationRequired) throw err;
   if (err instanceof McpToolError && err.hint) {
     return errorResult(`${err.message}\n\nHint: ${err.hint}`);
   }
-  throw err;
+  return errorResult(messageOf(err));
 }
 
 /**
@@ -210,7 +229,9 @@ function declaredCapabilitiesFrom(server: McpServer): CallerCapabilities | undef
 }
 
 /**
- * Wrap `server.registerTool` so every tool handler surfaces its error `hint`.
+ * Wrap `server.registerTool` so every tool handler surfaces its error `hint`,
+ * and every thrown error's text crosses {@link redactSecrets} before it
+ * reaches the caller.
  *
  * Why this lives here rather than in each repo: the MCP tool boundary renders
  * only a thrown error's `message`. `McpToolError` has carried a `hint` — the

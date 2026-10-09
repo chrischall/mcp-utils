@@ -117,8 +117,15 @@ Hint: Available: 1 (Bus), 2 (Walker)
 
 The MCP tool boundary itself surfaces only `message`, so a `hint` — the
 actionable half — used to be dropped even though `wrapToolError` preserved it.
-Anything that is not an `McpToolError`, or has no `hint`, propagates untouched,
-so a genuine bug still reads as one. Opt out with `surfaceHints: false`.
+Anything that is not an `McpToolError`, or has no `hint`, renders as its bare
+message, so a genuine bug still reads as one, but every thrown error's text
+now goes through `redactSecrets` first (the same redaction `errorResult`
+applies, never truncated). Before, a non-`McpToolError` was rethrown and the
+SDK rendered its raw message, so a `TypeError` quoting a signed URL or a
+third-party client error echoing a token reached the caller verbatim. The
+SDK's `UrlElicitationRequiredError` is still rethrown untouched, because the
+client must receive it as a protocol error. Opt out with `surfaceHints: false`,
+which also switches off that redaction.
 `createTestHarness` applies the same wrapper, so a tool's failure text under
 test is the text production returns.
 
@@ -527,8 +534,8 @@ headers, `Cookie`/`Set-Cookie` values (cookie names stay visible), JWTs,
 well-known API-key shapes (`sk-…`, `ghp_…`, `xox?-…`, `AIza…`, `AKIA…`,
 `whsec_…`), Google OAuth2 access/refresh tokens (`ya29.…` / `1//…` — never
 when welded inside a base64 blob), secret-bearing URL query params (including cookie-style session
-ids such as `sessionid`/`PHPSESSID`/`JSESSIONID`/`sid` and `x-api-key`-style
-names), and secret JSON values — quoted or numeric — plus the values under
+ids such as `sessionid`/`PHPSESSID`/`JSESSIONID`/`sid`, `x-api-key`-style
+names, and PKCE `code_verifier` / bare `verifier` capabilities), and secret JSON values (including `code_verifier`) — quoted or numeric — plus the values under
 `"cookie"`/`"set-cookie"` JSON keys (names kept); `truncateErrorMessage` applies
 it before truncating, and `errorResult` applies it (without truncating). Every
 pattern is linear in the input (`redos.test.ts` times each against 200 KB

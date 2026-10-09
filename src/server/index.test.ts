@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { PassThrough } from 'node:stream';
 import { Client } from '@modelcontextprotocol/client';
-import { McpServer, InMemoryTransport } from '@modelcontextprotocol/server';
+import {
+  McpServer,
+  InMemoryTransport,
+  ProtocolErrorCode,
+  UrlElicitationRequiredError,
+} from '@modelcontextprotocol/server';
 import type { Transport } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import {
@@ -629,9 +634,9 @@ describe('tool error hints', () => {
     await close();
   });
 
-  // An unexpected error must keep propagating, so a genuine bug still reads as
+  // An unexpected error keeps its own message, so a genuine bug still reads as
   // one rather than being flattened into advice.
-  it('leaves a non-McpToolError untouched', async () => {
+  it('renders a non-McpToolError as its bare message', async () => {
     const { client, close } = await harness((s) =>
       void s.registerTool('t', {}, async () => {
         throw new TypeError('undefined is not a function');
@@ -641,6 +646,64 @@ describe('tool error hints', () => {
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain('undefined is not a function');
     expect(textOf(result)).not.toContain('Hint:');
+    await close();
+  });
+
+  // Fleet audit library-candidates §16: the wrapper used to rethrow anything
+  // that was not an McpToolError, and the SDK then rendered its raw `message`
+  // — so a URL-quoting TypeError or a third-party client error reached the
+  // caller with its token intact. Every thrown error now crosses the same
+  // redaction boundary `errorResult` applies.
+  it('redacts a secret in a non-McpToolError message', async () => {
+    const { client, close } = await harness((s) =>
+      void s.registerTool('t', {}, async () => {
+        throw new Error('GET https://h.example/f?verifier=FAKEverif0123456789 failed: Authorization: Bearer FAKEtok0123456789');
+      }),
+    );
+    const result = await client.callTool({ name: 't' });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).not.toContain('FAKEverif0123456789');
+    expect(textOf(result)).not.toContain('FAKEtok0123456789');
+    expect(textOf(result)).toContain('GET https://h.example/f?verifier=[REDACTED] failed');
+    await close();
+  });
+
+  it('redacts a secret in a synchronously thrown non-Error value', async () => {
+    const { client, close } = await harness((s) =>
+      void s.registerTool('t', {}, (() => {
+        throw 'bad redirect to /cb?access_token=FAKEacc0123456789';
+      }) as never),
+    );
+    const result = await client.callTool({ name: 't' });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toBe('bad redirect to /cb?access_token=[REDACTED]');
+    await close();
+  });
+
+  it('redacts a secret in an McpToolError with no hint', async () => {
+    const { client, close } = await harness((s) =>
+      void s.registerTool('t', {}, async () => {
+        throw new McpToolError('upstream said {"password":"FAKEpw0123456789"}');
+      }),
+    );
+    expect(textOf(await client.callTool({ name: 't' }))).toBe('upstream said {"password":"[REDACTED]"}');
+    await close();
+  });
+
+  // The SDK's tools/call handler rethrows exactly this one protocol error so
+  // the client receives a JSON-RPC error it can act on (open the URL); turning
+  // it into a tool result would break URL-mode elicitation.
+  it('still propagates a UrlElicitationRequiredError as a protocol error', async () => {
+    const { client, close } = await harness((s) =>
+      void s.registerTool('t', {}, async () => {
+        throw new UrlElicitationRequiredError([
+          { mode: 'url', message: 'sign in', url: 'https://h.example/login', elicitationId: 'e1' },
+        ]);
+      }),
+    );
+    await expect(client.callTool({ name: 't' })).rejects.toMatchObject({
+      code: ProtocolErrorCode.UrlElicitationRequired,
+    });
     await close();
   });
 
