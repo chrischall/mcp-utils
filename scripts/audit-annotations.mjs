@@ -41,7 +41,12 @@
  *   - env: literal env keys the built code reads vs `manifest.json`
  *     (`server.mcp_config.env` + `user_config`), `server.json` and
  *     `.mcp.json` — undeclared, dead, required-but-optional, unwired
- *     user_config, and cwd-relative `.mcp.json` paths. Reads are taken from
+ *     user_config, and the `${CLAUDE_PLUGIN_ROOT}` rule: a cwd-relative
+ *     path in the MCP config the PLUGIN uses (`.claude-plugin/plugin.json`
+ *     `mcpServers` — a file, inline, or the root `.mcp.json` when absent),
+ *     and `${CLAUDE_PLUGIN_ROOT}` in a root `.mcp.json` that is NOT the
+ *     plugin config (project-scoped launches do not define it, so the server
+ *     dies at startup). Reads are taken from
  *     the server's own tsc output, not an esbuild `bundle.js` beside it (a
  *     bundle inlines dependencies such as `ws` and @fetchproxy/server, whose
  *     env reads are not server config); a bundle-only build falls back to the

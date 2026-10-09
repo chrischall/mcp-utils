@@ -25,7 +25,12 @@
  *   reads, dead declarations, a var marked required that the code only reads
  *   optionally (freshbooks' refresh token, tripadvisor's API key), a
  *   `user_config` entry nothing passes to the server, and a cwd-relative
- *   script path in `.mcp.json` (ioffice).
+ *   script path in the plugin's MCP config (ioffice). That last rule follows
+ *   the config the plugin actually uses (`.claude-plugin/plugin.json`
+ *   `mcpServers`; the root `.mcp.json` when absent): a root `.mcp.json` that
+ *   is NOT the plugin config is project-scoped, where CLAUDE_PLUGIN_ROOT is
+ *   undefined, so there it warns on `${CLAUDE_PLUGIN_ROOT}` instead
+ *   (office-outlook-mcp; tempo-api-mcp). See `mcpConfigPathFindings`.
  *
  * Why the built code and not src/: it is what ships. Which built code: the
  * SERVER's own. Reads are attributed to the tsc output (every built file
@@ -298,9 +303,12 @@ const isRelativePath = (p) =>
   && (p.startsWith('./') || p.startsWith('../') || (SCRIPT_PATH.test(p) && !p.startsWith('-') && !p.startsWith('@')));
 
 /**
- * `.mcp.json` command/args that resolve against the CLIENT's cwd rather than
- * the plugin: they work from the repo root and nowhere else.
- * @param {{ file: string, json: any }} mcpJson
+ * MCP config command/args that resolve against the CLIENT's cwd rather than
+ * the plugin: they work from the repo root and nowhere else. Apply this ONLY
+ * to a config the plugin loads (see `mcpConfigPathFindings`) — the fix it
+ * suggests, `${CLAUDE_PLUGIN_ROOT}`, is undefined for a project-scoped
+ * `.mcp.json`.
+ * @param {{ file: string, json: any }} config
  * @returns {SurfaceFinding[]}
  */
 export function mcpJsonPathFindings({ file, json }) {
@@ -310,8 +318,121 @@ export function mcpJsonPathFindings({ file, json }) {
     if (!bad.length) continue;
     out.push({
       check: 'env', code: 'mcp-json-relative-path', subject: name, file,
-      message: `${file} server "${name}" runs ${bad.join(', ')} relative to the client's working directory; anchor it as \${CLAUDE_PLUGIN_ROOT}/… so it works from any cwd.`,
+      message: `${file} server "${name}" runs ${bad.join(', ')} relative to the client's working directory; this is the plugin's MCP config, so anchor it as \${CLAUDE_PLUGIN_ROOT}/… so it works from any cwd.`,
     });
+  }
+  return out;
+}
+
+const BUNDLE_OR_URL = /^https?:\/\/|\.(?:mcpb|dxt)$/i;
+
+/**
+ * Which MCP config a Claude Code plugin install uses, from
+ * `.claude-plugin/plugin.json` `mcpServers` (Claude Code's plugin manifest
+ * reference, verified with `claude plugin validate` 2.1.295):
+ *
+ * - **no field**: the default, `.mcp.json` at the plugin root — the root file
+ *   IS the plugin config (`rootIsPluginConfig`);
+ * - **a path** (or an array holding paths): resolved against the plugin root
+ *   (the directory holding `.claude-plugin/`, not `.claude-plugin/` itself).
+ *   `"./.mcp.json"` names the root file; any other `.json` is a separate
+ *   plugin config, and the root file is then project-scoped. `.mcpb`/`.dxt`
+ *   bundles and URLs are skipped: their config is not in the repo;
+ * - **an inline object**: the plugin config lives in plugin.json itself, and
+ *   the root file is project-scoped.
+ *
+ * `mcp` is NOT a key Claude Code reads ("Unknown field 'mcp'. Claude Code
+ * ignores it at load time"). Two fleet repos (office-outlook-mcp,
+ * microsoft-teams-mcp) declare `"mcp": "./mcp.json"` meaning
+ * `.claude-plugin/mcp.json`; it is resolved here as the author intended so the
+ * root file is not wrongly told to use `${CLAUDE_PLUGIN_ROOT}`, and reported
+ * (`ignoredMcpKey`) so it gets renamed. The other 60 declare
+ * `"mcp": "./.mcp.json"`, the default Claude Code loads anyway, which is
+ * harmless and not reported.
+ *
+ * Caveat: Claude Code loads the plugin root's `.mcp.json` FIRST and merges the
+ * declared configs over it (a later server name replaces an earlier one), so a
+ * project-scoped root server whose name the plugin config does not override
+ * also starts in a plugin install whose source ships the root file. That is
+ * not checked here.
+ *
+ * @param {{ file: string, json: any } | undefined} plugin parsed plugin.json
+ * @param {(rel: string) => { file: string, json: any } | null | undefined} readConfig
+ *   reads a plugin-root-relative path: the parsed file, `null` when it does
+ *   not exist, `undefined` when it exists but could not be parsed (the loader
+ *   reports that itself).
+ * @param {(rel: string) => boolean} isRootMcpJson whether a path names the root `.mcp.json`
+ */
+export function resolvePluginMcp(plugin, readConfig, isRootMcpJson) {
+  const none = { rootIsPluginConfig: true, configs: [], missing: [], ignoredMcpKey: false };
+  if (!plugin || typeof plugin.json !== 'object' || plugin.json === null) return none;
+  const hasServers = plugin.json.mcpServers !== undefined;
+  const ignoredMcpKey = !hasServers && plugin.json.mcp !== undefined;
+  const value = hasServers ? plugin.json.mcpServers : plugin.json.mcp;
+  if (value === undefined) return none;
+  const field = hasServers ? 'mcpServers' : 'mcp';
+  const out = { rootIsPluginConfig: false, configs: [], missing: [], ignoredMcpKey, field, pluginFile: plugin.file };
+  for (const entry of Array.isArray(value) ? value : [value]) {
+    if (typeof entry === 'string') {
+      if (BUNDLE_OR_URL.test(entry)) continue;
+      if (isRootMcpJson(entry)) { out.rootIsPluginConfig = true; continue; }
+      const cfg = readConfig(entry);
+      if (cfg === null) out.missing.push(entry);
+      else if (cfg) out.configs.push(cfg);
+    } else if (entry && typeof entry === 'object') {
+      out.configs.push({ file: plugin.file, json: { mcpServers: entry } });
+    }
+  }
+  // An ignored `"mcp": "./.mcp.json"` (60 fleet repos) names the default
+  // Claude Code uses anyway, so it changes nothing and is not reported.
+  out.ignoredMcpKey = ignoredMcpKey && (!out.rootIsPluginConfig || out.configs.length > 0 || out.missing.length > 0);
+  return out;
+}
+
+/**
+ * The `${CLAUDE_PLUGIN_ROOT}` anchor rule, applied to the config the plugin
+ * actually uses. Claude Code defines CLAUDE_PLUGIN_ROOT for a plugin install
+ * only; a project-scoped `.mcp.json` that uses it launches `node /dist/…` and
+ * the server dies at startup (office-outlook-mcp, guarded by its
+ * tests/server-boot.test.ts; tempo-api-mcp, regressed by following the
+ * previous version of this lint). So:
+ * - the plugin config (the root `.mcp.json` when it is one, a separate file,
+ *   or inline plugin.json servers) must not run a cwd-relative path;
+ * - a root `.mcp.json` that is NOT the plugin config must not use
+ *   `${CLAUDE_PLUGIN_ROOT}`;
+ * - a declared config that does not exist, and an `mcp` key, are reported.
+ * Without a plugin.json the root `.mcp.json` is treated as the plugin config,
+ * as before.
+ * @param {{ mcpJson?: { file: string, json: any }, pluginMcp?: ReturnType<typeof resolvePluginMcp> }} s
+ * @returns {SurfaceFinding[]}
+ */
+export function mcpConfigPathFindings({ mcpJson, pluginMcp }) {
+  const p = pluginMcp ?? { rootIsPluginConfig: true, configs: [], missing: [], ignoredMcpKey: false };
+  const out = [];
+  if (p.ignoredMcpKey) {
+    out.push({
+      check: 'env', code: 'plugin-json-mcp-ignored', subject: 'mcp', file: p.pluginFile,
+      message: `${p.pluginFile} declares "mcp", a key Claude Code ignores (claude plugin validate: "Unknown field 'mcp'"), so a plugin install loads the root .mcp.json instead. `
+        + 'Rename it to "mcpServers", with the path relative to the plugin root, not to .claude-plugin/ — e.g. "mcpServers": "./.claude-plugin/mcp.json" — and keep the server names the same as the root .mcp.json so the plugin config replaces them.',
+    });
+  }
+  for (const rel of p.missing) {
+    out.push({
+      check: 'env', code: 'plugin-mcp-config-missing', subject: rel, file: p.pluginFile,
+      message: `${p.pluginFile} ${p.field} names ${rel}, which does not exist. Paths resolve against the plugin root (the directory holding .claude-plugin/), so Claude Code fails this plugin's MCP config with "path not found".`,
+    });
+  }
+  if (mcpJson && p.rootIsPluginConfig) out.push(...mcpJsonPathFindings(mcpJson));
+  for (const cfg of p.configs) out.push(...mcpJsonPathFindings(cfg));
+  if (mcpJson && !p.rootIsPluginConfig) {
+    for (const [name, s] of Object.entries(mcpJson.json?.mcpServers ?? {})) {
+      if (!JSON.stringify(s ?? {}).includes('CLAUDE_PLUGIN_ROOT')) continue;
+      out.push({
+        check: 'env', code: 'mcp-json-plugin-root-in-project-config', subject: name, file: mcpJson.file,
+        message: `${mcpJson.file} server "${name}" uses \${CLAUDE_PLUGIN_ROOT}, but this file is not the plugin's MCP config (${p.pluginFile} ${p.field} points elsewhere), so it is loaded project-scoped. `
+          + 'Claude Code defines CLAUDE_PLUGIN_ROOT only for a plugin install, so a project-scoped launch runs e.g. `node /dist/index.js` and the server dies at startup. Use a path relative to the repo root here; keep the anchor in the plugin config.',
+      });
+    }
   }
   return out;
 }
@@ -424,11 +545,19 @@ export function loadSurface(entry, cwd = process.cwd()) {
       return undefined;
     }
   };
+  const rootMcpJson = join(pkgDir, '.mcp.json');
+  const plugin = load(join('.claude-plugin', 'plugin.json'));
+  const pluginMcp = resolvePluginMcp(
+    plugin,
+    (rel) => (existsSync(join(pkgDir, rel)) ? load(rel) : null),
+    (rel) => resolve(pkgDir, rel) === rootMcpJson,
+  );
   return {
     code: { text, reads: collectEnvReads(bundled ? src.bundle : src.own), bundled },
     manifest: load('manifest.json'),
     serverJson: load('server.json'),
     mcpJson: load('.mcp.json'),
+    pluginMcp,
     errors,
   };
 }
@@ -449,7 +578,7 @@ export function collectSurfaceWarnings(entry, tools, { load = loadSurface } = {}
       ...annotationHintFindings(tools),
       ...(surface.manifest ? manifestToolDriftFindings(surface.manifest.json, tools.map((t) => t.name), surface.manifest.file) : []),
       ...envDriftFindings(surface),
-      ...(surface.mcpJson ? mcpJsonPathFindings(surface.mcpJson) : []),
+      ...mcpConfigPathFindings(surface),
       ...surface.errors,
     ];
   } catch (e) {
