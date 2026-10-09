@@ -99,7 +99,14 @@ import {
   createHelpfulError,
   McpToolError,
 } from '../errors/index.js';
-import { parseCookieJar, detectEdgeBlock, EdgeBlockedError } from '../http/index.js';
+import {
+  parseCookieJar,
+  detectEdgeBlock,
+  EdgeBlockedError,
+  RequestTimeoutError,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+} from '../http/index.js';
+import { currentCallSignal } from '../cancel/index.js';
 
 // ---------------------------------------------------------------------------
 // createAuthResolver — three-path (env → fetchproxy → helpful error)
@@ -549,6 +556,16 @@ export interface OAuth2RefresherOptions {
    * succeed and, with rotating tokens, can trip reuse detection.
    */
   retry?: { count: number; delayMs: number };
+  /**
+   * Per-attempt timeout in ms for the token POST, from the request until its
+   * body has been read. Expiry throws `RequestTimeoutError` (retryable under
+   * {@link retry}, like any network failure). Defaults to
+   * `DEFAULT_REQUEST_TIMEOUT_MS` (30 s); `0` or `false` disables it. Before
+   * 2.16 the exchange had no bound at all, so a hung token endpoint held every
+   * tool call waiting on a token until the host killed it (fleet audit
+   * 2026-09, #977).
+   */
+  timeout?: number | false;
   /** Injectable fetch (defaults to global `fetch`) — for tests. */
   fetchImpl?: typeof fetch;
 }
@@ -651,6 +668,17 @@ const sleep = (ms: number): Promise<void> =>
  * reached the endpoint, so {@link TokenManager}'s default revocation check
  * keeps the stored refresh token rather than clearing it. A block is not
  * retried.
+ *
+ * Bounded and cancellable: each attempt is bounded by
+ * {@link OAuth2RefresherOptions.timeout} (default 30 s, body read included).
+ * The caller's cancellation (the ambient tool-call signal) releases THAT
+ * caller at once — and a caller already cancelled never starts an exchange —
+ * but it deliberately does NOT abort an exchange already in flight. The POST
+ * may have reached the endpoint and rotated the refresh token; abandoning the
+ * response would lose the only live copy (the old one is spent), and the
+ * exchange is shared with every other coalesced caller, who still want it.
+ * So the exchange runs to its own timeout and its result (and
+ * {@link OAuth2RefresherOptions.onRotate}) lands as usual.
  */
 export function createOAuth2Refresher(
   opts: OAuth2RefresherOptions,
@@ -659,6 +687,7 @@ export function createOAuth2Refresher(
   const grantType = opts.grantType ?? 'refresh_token';
   const maxRetries = opts.retry?.count ?? 0;
   const retryDelayMs = opts.retry?.delayMs ?? 0;
+  const timeoutMs = opts.timeout === false ? 0 : (opts.timeout ?? DEFAULT_REQUEST_TIMEOUT_MS);
 
   let inFlight: Promise<OAuth2RefreshResult> | null = null;
   let currentRefreshToken = opts.refreshToken;
@@ -675,17 +704,71 @@ export function createOAuth2Refresher(
       ...opts.params,
     }).toString();
 
-    const res = await doFetch(opts.endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Accept: 'application/json',
-      },
-      body,
-    });
+    // The timer runs from the request until the body is read: `fetch`
+    // resolves at the headers, and a body that stalls after them would
+    // otherwise hold the exchange open unbounded. Body reads RACE the timer
+    // rather than trusting the stream to honour the abort, so a custom
+    // `fetchImpl` is bounded too. NO ambient signal here — see the factory
+    // docblock: an in-flight exchange is never abandoned for one caller.
+    const controller = timeoutMs > 0 ? new AbortController() : undefined;
+    const timedOut = (): RequestTimeoutError =>
+      new RequestTimeoutError(endpointWhere(opts.endpoint).service, timeoutMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = controller
+      ? new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            reject(timedOut());
+          }, timeoutMs);
+        })
+      : undefined;
+    expired?.catch(() => {});
+    const bounded = <T>(p: Promise<T>): Promise<T> => (expired ? Promise.race([p, expired]) : p);
+    try {
+      return await exchangeBounded(body, controller?.signal, bounded, timedOut);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function exchangeBounded(
+    body: string,
+    signal: AbortSignal | undefined,
+    bounded: <T>(p: Promise<T>) => Promise<T>,
+    timedOut: () => RequestTimeoutError,
+  ): Promise<OAuth2RefreshResult> {
+    let res: Response;
+    try {
+      res = await bounded(
+        doFetch(opts.endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Accept: 'application/json',
+          },
+          body,
+          ...(signal ? { signal } : {}),
+        }),
+      );
+    } catch (err) {
+      // Our own abort surfaces from fetch as an AbortError; name it a timeout.
+      if (signal?.aborted && !(err instanceof RequestTimeoutError)) throw timedOut();
+      throw err;
+    }
+    // A body read that loses to the timer rethrows the timeout; any other
+    // read failure keeps its previous meaning ('' / null).
+    const keepTimeout =
+      <T>(fallback: T) =>
+      (err: unknown): T => {
+        if (err instanceof RequestTimeoutError) {
+          res.body?.cancel().catch(() => {});
+          throw err;
+        }
+        return fallback;
+      };
 
     if (!res.ok) {
-      const errText = await res.text().catch(() => '');
+      const errText = await bounded(res.text()).catch(keepTimeout(''));
       // A CDN/WAF refusal page is not the token endpoint's verdict: the grant
       // never reached it. Named BEFORE the OAuth2RefreshError below, because
       // TokenManager reads a 4xx one as a revoked refresh token and clears the
@@ -701,7 +784,9 @@ export function createOAuth2Refresher(
       );
     }
 
-    const data = (await res.json().catch(() => null)) as TokenEndpointResponse | null;
+    const data = (await bounded(res.json() as Promise<unknown>).catch(
+      keepTimeout(null),
+    )) as TokenEndpointResponse | null;
     const accessToken = data?.access_token;
     if (typeof accessToken !== 'string' || accessToken.length === 0) {
       throw createHelpfulError('OAuth2 token refresh returned no access_token.', {
@@ -743,6 +828,14 @@ export function createOAuth2Refresher(
   }
 
   return function refresh(refreshToken?: string): Promise<OAuth2RefreshResult> {
+    const signal = currentCallSignal();
+    if (!signal) return shared(refreshToken);
+    // A caller that has already gone never starts (or joins) an exchange.
+    if (signal.aborted) return Promise.reject(abortReasonOf(signal));
+    return releaseOnAbort(shared(refreshToken), signal);
+  };
+
+  function shared(refreshToken?: string): Promise<OAuth2RefreshResult> {
     // Coalesce concurrent callers onto one exchange; clear on settle so the
     // next call starts fresh (and a rejection doesn't stick).
     if (inFlight) return inFlight;
@@ -765,7 +858,25 @@ export function createOAuth2Refresher(
     });
     inFlight = p;
     return p;
-  };
+  }
+}
+
+/**
+ * Settle with `p`, or reject with `signal`'s reason as soon as it aborts —
+ * without cancelling `p` itself, which other callers may share.
+ */
+function releaseOnAbort<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(abortReasonOf(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    p.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
+/** The signal's own reason as an Error, as `throwIfCancelled` reports it. */
+function abortReasonOf(signal: AbortSignal): Error {
+  const reason: unknown = signal.reason;
+  return reason instanceof Error ? reason : new Error(String(reason));
 }
 
 /** The token endpoint as {@link EdgeBlockedError} names it: host, plus `POST <path>`. */
