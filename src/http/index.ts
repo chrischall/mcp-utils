@@ -144,10 +144,17 @@ export interface ApiClientOptions {
    * bounded by an {@link AbortController} — from the request until its body
    * has been read, so a body that stalls after the headers is bounded too; on
    * expiry it throws a {@link RequestTimeoutError} instead of hanging until the
-   * host kills the tool call. A 429 retry gets a fresh timeout. Omit/0 to
-   * disable (default).
+   * host kills the tool call. A 429 retry gets a fresh timeout.
+   *
+   * Defaults to {@link DEFAULT_REQUEST_TIMEOUT_MS} (30 s), matching
+   * `createGraphqlClient`. Before 2.16 the default was unbounded, and the
+   * clients that never passed one (gemini, simplisafe, tripadvisor's web
+   * client — fleet audit 2026-09, cluster 1) held a tool call open on a hung
+   * upstream until the host killed it. Pass `0` or `false` to disable — the
+   * caller's cancellation still applies either way. A download that
+   * legitimately takes longer passes a larger value.
    */
-  timeout?: number;
+  timeout?: number | false;
 }
 
 /**
@@ -252,6 +259,14 @@ export interface RawApiResponse {
 const DEFAULT_RETRY: RetryPolicy = { count: 1, delayMs: 2000 };
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * The per-attempt timeout {@link createApiClient} (and {@link fetchBounded})
+ * apply when the caller names none: 30 s, the same budget
+ * `createGraphqlClient` has always used, so every fleet transport bounds a
+ * hung upstream the same way.
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 /** Thrown for an upstream 401. Carries the status so callers can trigger a re-auth. */
 export class UnauthorizedError extends Error {
@@ -532,7 +547,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   const sleep = opts.sleep ?? defaultSleep;
   const unauthorized = (): Error => (opts.onUnauthorized ? opts.onUnauthorized() : new UnauthorizedError(service));
   const retryStatuses = retry.statuses ?? [429];
-  const timeoutMs = opts.timeout;
+  const timeoutMs = opts.timeout === false ? 0 : (opts.timeout ?? DEFAULT_REQUEST_TIMEOUT_MS);
 
   // Default: `Authorization: Bearer <token>`. With `tokenHeader`, the raw
   // token goes in that named header instead (no `Bearer ` prefix).
@@ -568,7 +583,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     // NO TIMEOUT is no longer "no signal": a service configured without one
     // still honours the caller, which is the case where it matters most,
     // since nothing else was ever going to stop that request.
-    if (timeoutMs == null || timeoutMs <= 0) {
+    if (timeoutMs <= 0) {
       const res = await run(withAmbientCancellation(undefined));
       return { res, done: () => {}, expired: undefined };
     }

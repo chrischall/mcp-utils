@@ -740,15 +740,19 @@ const api = createApiClient({
   getToken: () => store.currentToken(),  // resolved per-request; sync or async
   serviceName: 'Example',
   retry: { count: 1, delayMs: 2000 },    // fleet-wide "retry once after 2s" default
-  timeout: 15_000,                        // abort a hung request, throw RequestTimeoutError
+  timeout: 15_000,                        // default 30 s; 0/false disables
 });
 
 const data = await api.get('/v1/things', { query: { page: 2 } });
 ```
 
-`timeout` (ms) bounds each attempt with an `AbortController`; on expiry it throws
-`RequestTimeoutError` instead of hanging the tool call. A 429 retry gets a fresh
-timeout. Omit it to keep the previous unbounded behavior.
+`timeout` (ms) bounds each attempt with an `AbortController`, from the request
+until its body has been read; on expiry it throws `RequestTimeoutError` instead
+of hanging the tool call. A 429 retry gets a fresh timeout. It **defaults to
+30 s** (`DEFAULT_REQUEST_TIMEOUT_MS`, the same budget `createGraphqlClient`
+uses); before 2.16 an omitted `timeout` meant unbounded. Pass a larger value for
+a slow download, or `0` / `false` to disable it. The caller's cancellation
+applies either way.
 
 `retry` also accepts `statuses` (e.g. `[429, 503]`), `honorRetryAfter: true`
 (sleep the response's `Retry-After` instead of the fixed `delayMs`, bounded by
