@@ -592,12 +592,19 @@ interface TokenEndpointResponse {
  * Thrown by {@link createOAuth2Refresher} when the token endpoint answers
  * non-2xx. Still an {@link McpToolError} (same message and hint as before);
  * it adds the HTTP `status` so callers — and {@link TokenManager}'s default
- * revocation check — can tell a 5xx/429 outage from a rejected grant.
+ * revocation check — can tell a 5xx/429 outage from a rejected grant, and a
+ * `kind`: `'credential_rejected'` for a 4xx other than 408/429 (a rejected
+ * grant; `invalid_grant` is a 400), `'http'` for the rest (an outage — the
+ * grant was never judged).
  */
 export class OAuth2RefreshError extends McpToolError {
   readonly status: number;
   constructor(status: number, message: string, opts?: { hint?: string }) {
-    super(message, opts);
+    super(message, {
+      ...opts,
+      status,
+      kind: status >= 400 && status < 500 && status !== 408 && status !== 429 ? 'credential_rejected' : 'http',
+    });
     this.name = 'OAuth2RefreshError';
     this.status = status;
     Object.setPrototypeOf(this, new.target.prototype);
