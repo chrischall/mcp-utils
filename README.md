@@ -39,6 +39,7 @@ import light:
 | `@chrischall/mcp-utils/fetchproxy` | fetchproxy transport adapter, bot-wall / retry / concurrency helpers |
 | `@chrischall/mcp-utils/healthcheck` | credential-style healthcheck factory (no fetchproxy peer needed) |
 | `@chrischall/mcp-utils/graphql` | GraphQL POST transport + operation-kind lexer (no optional peers) |
+| `@chrischall/mcp-utils/netguard` | SSRF guard for fetching third-party URLs: public-address table, DNS-pinning undici dispatcher, redirect-checked `fetchPublic` (needs `undici`) |
 | `@chrischall/mcp-utils/html` | opt-in HTML scraping helpers (needs `node-html-parser`) |
 | `@chrischall/mcp-utils/scrape` | convenience alias for the zero-dep `scrape` module (also in the core barrel) |
 | `@chrischall/mcp-utils/test` | in-memory test harness for tool registration |
@@ -583,7 +584,7 @@ tool surface can show the user.
 optional `status` (the upstream HTTP status) and `kind` — an `McpToolErrorKind`,
 the credential healthcheck's failure arms: `no_credential`,
 `credential_rejected`, `edge_blocked`, `session_expired`,
-`verification_pending`, `timeout`, `http`, `transport`, `unknown`. Seven fleet
+`verification_pending`, `timeout`, `http`, `transport`, `too_large`, `unknown`. Seven fleet
 repos used to regex the message instead (`/401|403|forbidden/`,
 `/\b429\b|\b503\b/`, a `/auth|sign/` that matched "assign"), because a
 hint-adding `McpToolError` dropped the status of the `ApiError` it wrapped. The
@@ -598,6 +599,7 @@ library's own throwers set them:
 | `UnauthorizedError` | 401 | `credential_rejected` |
 | `RequestTimeoutError` | — | `timeout` |
 | `EdgeBlockedError` | the edge's | `edge_blocked` |
+| `ResponseTooLargeError` | — | `too_large` |
 | `WriteOutcomeUnknownError`, `GraphqlTransportError` | — | `timeout` or `transport` (by `timedOut`) |
 | `OAuth2RefreshError` | the endpoint's | `credential_rejected` for a 4xx other than 408/429, else `http` |
 | `TokenManager`'s "no refresh token is available" | — | `no_credential` |
@@ -779,7 +781,8 @@ clone of this repo: `node scripts/audit-fs-confinement.mjs ../your-mcp`.
 ### `http` — bearer API-client kit
 
 `createApiClient` plus building blocks: `buildQueryString`, `buildOptionalBody`,
-`formatApiError`, `parseLinkHeader`, `parseCookieJar`, `parseCookieHeader`,
+`formatApiError`, `parseLinkHeader`, `parseCookieJar`, `mergeSetCookies`,
+`parseCookieHeader`,
 `runBoundedBatch`, `createThrottle`, `createResponseCache`, `parseRetryAfterMs`,
 `fetchBounded`, the URL-safety atoms `apiPath`, `readOriginEnv`,
 `assertAllowedUrl` and `findPathHazard`,
@@ -906,6 +909,26 @@ const url = assertAllowedUrl(args.url, { allowHosts: ['www.thumbtack.com'] });
 returns the parsed `URL`, or throws a `UrlNotAllowedError` (with a `reason`
 code) that names only the host, never the path or query.
 
+Response size: by default `createApiClient` reads a body of any size. Pass
+`maxResponseBytes` for a client-wide cap, or `maxBytes` on one call (it
+overrides the default, larger or smaller) — e.g. a receipt download. A
+`Content-Length` over the cap is refused before reading; otherwise the body is
+streamed with a running count and cancelled the moment it passes the cap.
+Either way `fetchJson` / `fetchHtml` / `fetchRaw` throw `ResponseTooLargeError`
+(an `McpToolError`, `kind: 'too_large'`, carrying `maxBytes`; it never echoes
+the body). The request timeout still covers the whole read; a write that hits
+the cap is not reported as outcome-unknown (the response arrived); and a non-2xx
+whose error body is over the cap still throws its `ApiError`, body dropped.
+The cap covers every body the client reads, including the 401 / 429 bodies it
+scans for an edge refusal page: over the cap they count as no page, so
+`UnauthorizedError` / `RateLimitedError` (or your hooks' errors) still throw. It
+is the same implementation as `fetchBounded`'s `maxBytes`.
+
+```ts
+const api = createApiClient({ baseUrl, getToken, maxResponseBytes: 5 * 1024 * 1024 });
+const receipt = await api.fetchRaw('GET', apiPath`/receipts/${id}`, { maxBytes: 25 * 1024 * 1024 });
+```
+
 Redirects: by default `createApiClient` leaves `fetch` to follow them, which
 re-sends the bearer wherever they point. Pass `redirect: 'same-origin'` to have
 the client follow them itself: each `Location` is checked against the base
@@ -943,7 +966,8 @@ const { status, ok, headers, body } = await fetchBounded(
   honoured; a cancel rejects with the caller's own reason, never as a timeout.
 - **Size cap** `maxBytes`: a `Content-Length` over it is refused before
   reading, and a body that grows past it is cancelled mid-stream —
-  `ResponseTooLargeError`.
+  `ResponseTooLargeError` (`kind: 'too_large'`, the same error
+  `createApiClient`'s `maxBytes` throws).
 - **Body** `read`: `'text'` (default), `'json'` (empty → `undefined`;
   unparseable → an `McpToolError` naming the status and content type, never
   echoing the body), `'bytes'` (`Uint8Array`), or `'none'` (cancelled unread,
@@ -1005,11 +1029,51 @@ reference data through the long `static` tier via
 `fetchThrough(key, load, 'static')`, and pair the TTLs with `readTtlMsEnv`.
 Writes are never cached.
 
+`fetchThrough` single-flights per key: concurrent misses for the same key share
+one in-flight `load()`, so an agent fanning out parallel tool calls pays for one
+upstream request, not N. A rejection reaches every waiter and is never cached;
+the next call reloads. A disabled tier (TTL `0`) still dedups in-flight calls
+but stores nothing. `clear()` also drops in-flight loads — callers already
+waiting still settle, but a load started before the clear never writes into the
+cache. Pass the caller's cancellation signal as the fourth argument so one
+caller's cancel never fails the others:
+
+```ts
+cache.fetchThrough(path, () => api.get(path, { signal }), 'dynamic', { signal });
+```
+
+A waiter whose own `signal` aborts rejects with `signal.reason` (the shared load
+keeps going for everyone else). If the shared load fails after the caller
+leading it cancelled (its `signal` aborted), every waiter whose signal is still
+live re-runs its own `load` instead of failing. That works whatever the
+rejection looks like, including the MCP SDK's string abort reason, which raw
+`fetch` rethrows as-is and `fetchBounded` wraps in a plain `Error`. A rejection
+named `AbortError` / `CancelledError` / `CanceledError` is also treated as a
+cancellation, for loads cancelled by something other than the leader's signal.
+
+The first caller's `tier` decides how the shared result is stored: a call for
+`'static'` that joins an in-flight `'dynamic'` load for the same key gets the
+dynamic TTL (or nothing stored, if that tier is disabled). Use distinct keys
+when the same request must be cached under different tiers.
+
 `parseCookieHeader(header)` parses an inbound *request* `Cookie:` header
 (`name=value; name2=value2`) into a `Record<string, string>` (first `=` splits,
 so values may contain `=`; last value wins on a duplicate name). It's the
 counterpart to `parseCookieJar`, which parses *response* `Set-Cookie` headers
 with their attributes and deletion semantics.
+
+`mergeSetCookies(jar, setCookie)` applies a response's `Set-Cookie`s to a
+`Map<string, string>` you own (and persist), in place. A deletion marker
+(`Max-Age<=0`, an `Expires` before 2000, or an empty value) removes the name;
+any other entry sets it. It returns `true` only when the jar actually changed,
+so you persist only then. It takes a `Headers` object, the `getSetCookie()`
+array, or a comma-joined string (split safely around `Expires` commas):
+
+```ts
+import { mergeSetCookies } from '@chrischall/mcp-utils';
+
+if (mergeSetCookies(this.jar, res.headers)) await this.save();
+```
 
 `UpstreamHttpError(status, message)` is a directly-`throw new`-able,
 status-carrying HTTP error — the manual-throw parallel to `ApiError` (which
@@ -1929,7 +1993,7 @@ registerCredentialHealthcheckTool({
 
 Arms: `ok`, `no_credential`, `credential_rejected` (401/403),
 `edge_blocked`, `session_expired`, `verification_pending`, `timeout`, `http`,
-`transport`, `unknown` — with the same `classifyThrown` / `hints` hooks as the
+`transport`, `too_large`, `unknown` — with the same `classifyThrown` / `hints` hooks as the
 bridge factory. Every failure arm is an `McpToolErrorKind`, so a thrown error
 that DECLARES a `kind` (see [`errors`](#errors--helpful-errors)) names its arm
 directly: the order is `classifyThrown`, then `edge_blocked`, then the declared
@@ -2130,6 +2194,54 @@ is dropped, and every named entity decodes — use it for article, post and
 message bodies. `extractPlainTextFromHtml` is the older dependency-free regex
 pass (every tag becomes a space, so `<b>F</b>ree` → `F ree`; a short entity
 table); it is unchanged so existing callers' output does not shift.
+
+### `netguard` — SSRF guard for third-party URLs *(subpath, optional peer)*
+
+```ts
+import { isPublicAddress, createPublicOnlyDispatcher, fetchPublic } from '@chrischall/mcp-utils/netguard';
+
+// Follow a link somebody else chose (a tool argument, an email tracker, an images_url):
+const r = await fetchPublic(link, { timeoutMs: 15_000, maxBytes: 10 * 1024 * 1024 });
+r.status; r.headers; r.body; // Uint8Array; r.url is the final URL, r.hops the redirects followed
+
+// Stop at the first hop on your own service, without fetching it:
+const t = await fetchPublic(trackerUrl, { stopBefore: (u) => u.hostname.endsWith('.accessoticketing.com') });
+if (t.stopped) t.url;
+```
+
+Requires the optional `undici` peer (`^7 || ^8`), which is why it is a subpath
+and never in the root barrel. Consolidates accessoticketing-mcp `netguard.ts`,
+gemini-mcp `fetch-image.ts` and mcp-host's `isPublicAddress`
+(chrischall/fleet-audit#1150).
+
+- **`isPublicAddress(ip)`** — one IPv4 + IPv6 block table: RFC 1918, loopback,
+  link-local / cloud metadata (`169.254.169.254`), CGNAT, TEST-NET and
+  benchmarking, multicast, reserved, ULA (`fc00::/7`, incl. Fly's 6PN),
+  IPv6 link-/site-local, Teredo, documentation, and the IPv4-carrying forms
+  (`::ffff:` mapped, SIIT, NAT64, 6to4) judged by the IPv4 inside them. Fails
+  closed on anything that is not a well-formed address.
+- **`createPublicOnlyDispatcher({ resolve?, isAllowedAddress?, agent?, connect? })`**
+  — an undici `Agent` whose connector resolves each connection's host itself,
+  refuses it with `UrlNotAllowedError` (reason `'host'`) when the name resolves
+  to nothing or ANY address is not public, and connects to exactly the
+  addresses it checked. No second lookup means no DNS-rebinding window between
+  check and connect. IP-literal hosts are judged as themselves. `resolve` is
+  injectable (tests never touch DNS); `isAllowedAddress` widens the predicate
+  deliberately (a loopback test server).
+- **`fetchPublic(url, { maxRedirects = 10, timeoutMs, maxBytes, requireHttps, allowHosts, stopBefore, dispatcher, resolve, ...init })`**
+  — undici `fetch` through that dispatcher with manual redirects:
+  `assertAllowedUrl` on the first URL and every hop (https by default), at most
+  `maxRedirects` follow-up requests (`maxRedirects + 1` in all — the limit is
+  exact, never off by one), `authorization`/`cookie`/`proxy-authorization`
+  dropped once a hop leaves the original origin, 303 (and 301/302 after a POST)
+  turned into a body-less GET, one `timeoutMs` deadline across every hop and
+  the body read (`RequestTimeoutError`), and a `maxBytes` cap on the final
+  body (`ResponseTooLargeError`). An unreachable host is an `McpToolError` of
+  kind `'transport'` naming only the host. A dispatcher you pass is used as-is
+  and left open; otherwise one is built per call and destroyed when it settles.
+
+TLS is still validated against the hostname (SNI comes from the URL), so
+pinning the address costs no certificate checking.
 
 ### `test` — in-memory test harness *(subpath)*
 

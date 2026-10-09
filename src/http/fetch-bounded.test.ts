@@ -240,6 +240,18 @@ describe('fetchBounded — maxBytes', () => {
     expect(cancel).toHaveBeenCalled();
   });
 
+  it('throws the same ResponseTooLargeError createApiClient does: an McpToolError of kind too_large', async () => {
+    const err = await fetchBounded('https://x.test/a', undefined, {
+      maxBytes: 2,
+      fetchImpl: respond('secret body'),
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ResponseTooLargeError);
+    expect(err).toBeInstanceOf(McpToolError);
+    expect((err as McpToolError).kind).toBe('too_large');
+    expect((err as Error).name).toBe('ResponseTooLargeError');
+    expect((err as Error).message).not.toContain('secret');
+  });
+
   it('stops reading a body that exceeds the cap mid-stream', async () => {
     let pulls = 0;
     const body = new ReadableStream<Uint8Array>({
