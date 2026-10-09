@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.0.2](https://github.com/chrischall/mcp-utils/compare/v3.0.1...v3.0.2) (2026-10-09)
+
+
+### Bug Fixes
+
+* **lint:** only require CLAUDE_PLUGIN_ROOT in the config the plugin actually uses ([#370](https://github.com/chrischall/mcp-utils/issues/370)) ([318821e](https://github.com/chrischall/mcp-utils/commit/318821ef8e2603f19418bd35d7987bbd5afbc26d))
+* **lint:** warn on every plugin.json mcp key, not just non-default paths ([#372](https://github.com/chrischall/mcp-utils/issues/372)) ([2233bf9](https://github.com/chrischall/mcp-utils/commit/2233bf984b52c165e6be62969aaef7abcb0ec1c4))
+
 ## [3.0.1](https://github.com/chrischall/mcp-utils/compare/v3.0.0...v3.0.1) (2026-10-09)
 
 
