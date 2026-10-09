@@ -1334,6 +1334,12 @@ const offset = calculateOffset(page, size);
 const annotations = toolAnnotations({ readOnly: true });
 ```
 
+`IsoTime` accepts `H:MM` or `HH:MM` (24h) and always **parses to zero-padded
+`HH:MM`** — `'9:05'` comes out `'09:05'`, the form `normalizeTime` emits — so a
+validated time compares equal to an upstream's `09:05` slot. It stays a plain
+`ZodString` (the padding is a `.overwrite()`), so its JSON Schema keeps the
+`pattern`.
+
 `NumericIdString` (`/^\d+$/`) and `SafePathSegment` (rejects `/`, `..`, `?`,
 `#`, and whitespace) harden caller-supplied ids that get interpolated into
 request paths — defense-in-depth against path traversal and query/fragment
