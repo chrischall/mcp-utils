@@ -632,6 +632,16 @@ const port = readPortEnv('MY_WS_PORT', 37149);  // placeholder/NaN/out-of-range 
 const home = expandPath('~/.config/my-mcp');
 ```
 
+`readEnvVar` trims the value by default. For **secrets** — passwords above
+all — pass `{ trim: false }` (also accepted by `requireEnvVar`): a leading or
+trailing space can be part of the credential, and trimming it silently turns a
+correct password into a rejected one. The unset checks still run on the trimmed
+view, so a blank, `'null'`/`'undefined'` or `${...}` placeholder is still unset.
+
+```ts
+const password = requireEnvVar('MY_PASSWORD', { trim: false }); // ' p4ss ' stays ' p4ss '
+```
+
 `readPortEnv` parses a TCP port with the same placeholder hardening as
 `readEnvVar`, plus integer + `1..65535` range validation — so an unexpanded
 `${MY_WS_PORT}` or junk falls back to the default instead of handing `NaN` to
