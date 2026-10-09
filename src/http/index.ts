@@ -1628,6 +1628,44 @@ function setCookieEntries(source: SetCookieSource): string[] {
 }
 
 /**
+ * Apply a response's `Set-Cookie`s to a caller-owned name→value jar, in place,
+ * and report whether the jar changed (so the caller knows when to persist it).
+ *
+ *  - A deletion marker — `Max-Age <= 0`, an `Expires` before 2000 (comma- or
+ *    dash-format epoch), or an **empty value** — removes the name. Unlike
+ *    {@link CookieJar.absorb}, an empty value is a delete here, so a cleared
+ *    session cookie never lingers in a persisted jar as `name=`.
+ *  - Any other entry sets the name (later entries win).
+ *  - Entries with no name (`=v`, `noequals`) are ignored.
+ *
+ * Returns `true` only when a value was added, replaced with a different value,
+ * or removed; re-setting an identical value or deleting an absent name is
+ * `false`. Accepts the same sources as {@link CookieJar.absorb}: a `Headers`
+ * object (prefers `getSetCookie()`), the `getSetCookie()` array, or a single
+ * comma-joined string (split safely around `Expires` commas).
+ *
+ * Consolidates the hand-rolled `getSetCookie` absorb loops in artsonia,
+ * canvas-parent, crowntowncompost, evite, infinitecampus, myatriumhealth, ofw
+ * and simplepractice (myatriumhealth's stored deletions as empty values).
+ */
+export function mergeSetCookies(jar: Map<string, string>, setCookie: SetCookieSource): boolean {
+  let changed = false;
+  for (const entry of setCookieEntries(setCookie)) {
+    const pair = parseNameValue(entry);
+    if (!pair) continue;
+    if (!pair.value || isDeletionCookie(entry)) {
+      if (jar.delete(pair.name)) changed = true;
+      continue;
+    }
+    if (jar.get(pair.name) !== pair.value) {
+      jar.set(pair.name, pair.value);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/**
  * Stateful cookie jar for multi-step session logins (login page → CSRF prime →
  * credential POST → API calls), built on the {@link parseCookieJar} semantics.
  *

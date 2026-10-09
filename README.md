@@ -781,7 +781,8 @@ clone of this repo: `node scripts/audit-fs-confinement.mjs ../your-mcp`.
 ### `http` — bearer API-client kit
 
 `createApiClient` plus building blocks: `buildQueryString`, `buildOptionalBody`,
-`formatApiError`, `parseLinkHeader`, `parseCookieJar`, `parseCookieHeader`,
+`formatApiError`, `parseLinkHeader`, `parseCookieJar`, `mergeSetCookies`,
+`parseCookieHeader`,
 `runBoundedBatch`, `createThrottle`, `createResponseCache`, `parseRetryAfterMs`,
 `fetchBounded`, the URL-safety atoms `apiPath`, `readOriginEnv`,
 `assertAllowedUrl` and `findPathHazard`,
@@ -1060,6 +1061,19 @@ when the same request must be cached under different tiers.
 so values may contain `=`; last value wins on a duplicate name). It's the
 counterpart to `parseCookieJar`, which parses *response* `Set-Cookie` headers
 with their attributes and deletion semantics.
+
+`mergeSetCookies(jar, setCookie)` applies a response's `Set-Cookie`s to a
+`Map<string, string>` you own (and persist), in place. A deletion marker
+(`Max-Age<=0`, an `Expires` before 2000, or an empty value) removes the name;
+any other entry sets it. It returns `true` only when the jar actually changed,
+so you persist only then. It takes a `Headers` object, the `getSetCookie()`
+array, or a comma-joined string (split safely around `Expires` commas):
+
+```ts
+import { mergeSetCookies } from '@chrischall/mcp-utils';
+
+if (mergeSetCookies(this.jar, res.headers)) await this.save();
+```
 
 `UpstreamHttpError(status, message)` is a directly-`throw new`-able,
 status-carrying HTTP error — the manual-throw parallel to `ApiError` (which
