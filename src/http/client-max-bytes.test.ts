@@ -4,8 +4,10 @@ import { McpToolError, MCP_TOOL_ERROR_KINDS, errorKindOf } from '../errors/index
 import {
   ApiError,
   createApiClient,
+  EdgeBlockedError,
   RequestTimeoutError,
   ResponseTooLargeError,
+  UnauthorizedError,
   WriteOutcomeUnknownError,
 } from './index.js';
 
@@ -200,5 +202,76 @@ describe('ResponseTooLargeError', () => {
       expect((err as ApiError).status).toBe(500);
       expect((err as Error).message).not.toContain('exploded');
     }
+  });
+});
+
+/** Like {@link endless} but closes after `n` chunks, so an uncapped read ends. */
+function finite(chunk: number, n: number): ReturnType<typeof endless> {
+  let pulls = 0;
+  const cancel = vi.fn(async () => {});
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulls++;
+      if (pulls > n) controller.close();
+      else controller.enqueue(new Uint8Array(chunk));
+    },
+    cancel,
+  });
+  return { body, pulls: () => pulls, cancel };
+}
+
+describe('createApiClient maxBytes — 401 / 429 bodies', () => {
+  it('reads an oversized 401 body only up to the cap, cancels it, and still throws UnauthorizedError', async () => {
+    const src = finite(400, 100);
+    const client = createApiClient({
+      baseUrl: BASE,
+      maxResponseBytes: 1000,
+      fetchImpl: fetchOf(() => new Response(src.body, { status: 401, headers: { 'content-type': 'text/html' } })),
+    });
+    const err = await client.fetchRaw('GET', '/x').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UnauthorizedError);
+    expect(src.pulls()).toBeLessThan(10);
+    expect(src.cancel).toHaveBeenCalled();
+  });
+
+  it('a per-request maxBytes caps an oversized 401 body on every method', async () => {
+    for (const call of ['fetchJson', 'fetchHtml', 'fetchRaw'] as const) {
+      const src = finite(400, 100);
+      const client = createApiClient({
+        baseUrl: BASE,
+        fetchImpl: fetchOf(() => new Response(src.body, { status: 401, headers: { 'content-type': 'text/plain' } })),
+      });
+      const err = await client[call]('GET', '/x', { maxBytes: 1000 }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(UnauthorizedError);
+      expect(src.cancel).toHaveBeenCalled();
+    }
+  });
+
+  it('an edge-block 401 under the cap is still detected', async () => {
+    const page = '<html><title>Attention Required! | Cloudflare</title><body>cf-ray</body></html>';
+    const client = createApiClient({
+      baseUrl: BASE,
+      fetchImpl: fetchOf(
+        () => new Response(page, { status: 401, headers: { 'content-type': 'text/html', 'cf-mitigated': 'challenge' } }),
+      ),
+    });
+    const err = await client.fetchRaw('GET', '/x', { maxBytes: 100_000 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EdgeBlockedError);
+  });
+
+  it('reads an oversized 429 body for onRateLimited only up to the cap, and cancels it', async () => {
+    const src = finite(400, 100);
+    const onRateLimited = vi.fn(() => new Error('limited'));
+    const client = createApiClient({
+      baseUrl: BASE,
+      maxResponseBytes: 1000,
+      retry: { count: 0, delayMs: 0 },
+      onRateLimited,
+      fetchImpl: fetchOf(() => new Response(src.body, { status: 429, headers: { 'content-type': 'text/html' } })),
+    });
+    await expect(client.fetchJson('GET', '/x')).rejects.toThrow('limited');
+    expect(onRateLimited).toHaveBeenCalledWith(expect.objectContaining({ status: 429, edgeBlock: null }));
+    expect(src.pulls()).toBeLessThan(10);
+    expect(src.cancel).toHaveBeenCalled();
   });
 });

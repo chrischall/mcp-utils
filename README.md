@@ -916,7 +916,10 @@ Either way `fetchJson` / `fetchHtml` / `fetchRaw` throw `ResponseTooLargeError`
 (an `McpToolError`, `kind: 'too_large'`, carrying `maxBytes`; it never echoes
 the body). The request timeout still covers the whole read; a write that hits
 the cap is not reported as outcome-unknown (the response arrived); and a non-2xx
-whose error body is over the cap still throws its `ApiError`, body dropped. It
+whose error body is over the cap still throws its `ApiError`, body dropped.
+The cap covers every body the client reads, including the 401 / 429 bodies it
+scans for an edge refusal page: over the cap they count as no page, so
+`UnauthorizedError` / `RateLimitedError` (or your hooks' errors) still throw. It
 is the same implementation as `fetchBounded`'s `maxBytes`.
 
 ```ts

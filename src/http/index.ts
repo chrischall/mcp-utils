@@ -206,7 +206,10 @@ export interface ApiClientOptions {
    * call by {@link RequestOptions.maxBytes}. A `Content-Length` over it is
    * refused before reading; a body that grows past it is cancelled mid-stream.
    * Either way {@link ResponseTooLargeError} (`kind: 'too_large'`), which never
-   * echoes the body. Omitted (the default), bodies are unlimited, as before.
+   * echoes the body — except on an error status, where the status error
+   * still throws and an over-cap body is dropped (see
+   * {@link RequestOptions.maxBytes}). Omitted (the default), bodies are
+   * unlimited, as before.
    * Must be a non-negative number (a `TypeError` otherwise); `Infinity` is
    * the same as omitting it.
    *
@@ -304,7 +307,10 @@ export interface RequestOptions {
    * Over it: {@link ResponseTooLargeError}, refused on `Content-Length`
    * before reading or cancelled mid-stream. The timeout still covers the
    * whole read. A non-2xx whose error body is over the cap still throws its
-   * {@link ApiError}, with the body dropped. Must be a non-negative number (a
+   * {@link ApiError}, with the body dropped; a 401 / 429 body (read only to
+   * spot an edge refusal page) is capped the same way, and over the cap is
+   * treated as no page, so {@link UnauthorizedError} /
+   * {@link RateLimitedError} (or the hooks' errors) still throw. Must be a non-negative number (a
    * `TypeError` otherwise). Never sent upstream.
    */
   maxBytes?: number;
@@ -958,6 +964,11 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
    */
   function readBytes(attempt: Attempt, maxBytes: number | undefined): Promise<Uint8Array> {
     if (maxBytes === undefined) return readBody(attempt, async (r) => new Uint8Array(await r.arrayBuffer()));
+    // Not redundant with readBody's own race: that one rejects the CALL on
+    // timeout, but the reader holds the stream's lock, so readBody's
+    // `cancelBody` cannot cancel it. Racing each `read()` makes the pending
+    // read reject too, and readBytesCapped then cancels the reader itself, so a
+    // stalled body is released instead of held until GC.
     const race = <T>(p: Promise<T>): Promise<T> => (attempt.expired ? Promise.race([p, attempt.expired]) : p);
     return readBody(attempt, (r) => readBytesCapped(r, maxBytes, service, race));
   }
@@ -978,6 +989,15 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
       if (err instanceof ResponseTooLargeError) return '';
       throw err;
     });
+  }
+
+  /**
+   * A 401 / 429 body read only to scan it for an edge refusal page, under the
+   * call's cap. Any failure — over the cap, the timer, a broken stream — is
+   * no evidence of a block (''), so the status-specific error still throws.
+   */
+  function scanText(attempt: Attempt, maxBytes: number | undefined): Promise<string> {
+    return readText(attempt, maxBytes).catch(() => '');
   }
 
   /** This call's cap: its own `maxBytes`, else the client default. */
@@ -1170,13 +1190,18 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
    * be read is treated as no evidence of a block. The body is only scanned,
    * never echoed, so the token cannot leak through it.
    */
-  async function unauthorizedOrEdge(attempt: Attempt, method: string, path: string): Promise<Error> {
+  async function unauthorizedOrEdge(
+    attempt: Attempt,
+    method: string,
+    path: string,
+    maxBytes: number | undefined,
+  ): Promise<Error> {
     const res = attempt.res;
     let text = '';
     if (/json/i.test(responseHeader(res, 'content-type') ?? '')) {
       discard(attempt);
     } else {
-      text = await readBody(attempt, (r) => r.text()).catch(() => '');
+      text = await scanText(attempt, maxBytes);
     }
     const edge = detectEdgeBlock({ body: text, headers: res.headers, status: res.status });
     if (edge) return new EdgeBlockedError(res.status, edge.vendor, { service, method, path });
@@ -1190,7 +1215,12 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
    * for an edge refusal page (same rule and JSON short-cut as
    * {@link unauthorizedOrEdge}), then the hook gets the whole context.
    */
-  async function rateLimitedError(attempt: Attempt, method: string, path: string): Promise<Error> {
+  async function rateLimitedError(
+    attempt: Attempt,
+    method: string,
+    path: string,
+    maxBytes: number | undefined,
+  ): Promise<Error> {
     const res = attempt.res;
     const retryAfter = responseHeader(res, 'retry-after');
     const retryAfterMs = retryAfterToMs(retryAfter);
@@ -1202,7 +1232,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     if (/json/i.test(responseHeader(res, 'content-type') ?? '')) {
       discard(attempt);
     } else {
-      text = await readBody(attempt, (r) => r.text()).catch(() => '');
+      text = await scanText(attempt, maxBytes);
     }
     const edgeBlock = detectEdgeBlock({ body: text, headers: res.headers, status: res.status });
     return opts.onRateLimited({ status: res.status, retryAfter, retryAfterMs, edgeBlock, method, path });
@@ -1251,8 +1281,8 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     const attempt = await send(method, path, opt, dispatch);
     const res = attempt.res;
 
-    if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);
-    if (res.status === 429) throw await rateLimitedError(attempt, method, path);
+    if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path, maxBytes);
+    if (res.status === 429) throw await rateLimitedError(attempt, method, path, maxBytes);
     if (res.status === 204) {
       discard(attempt);
       return parseJsonBody<T>('', { expect: opt.expect, service, method, path, status: 204 });
@@ -1278,8 +1308,8 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     const attempt = await send(method, path, { ...opt, headers }, dispatch);
     const res = attempt.res;
 
-    if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);
-    if (res.status === 429) throw await rateLimitedError(attempt, method, path);
+    if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path, maxBytes);
+    if (res.status === 429) throw await rateLimitedError(attempt, method, path, maxBytes);
 
     if (!res.ok) {
       throw httpError(res, await readErrorText(attempt, maxBytes), method, path, service);
@@ -1298,8 +1328,8 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     const attempt = await send(method, path, { ...opt, headers }, dispatch);
     const res = attempt.res;
 
-    if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);
-    if (res.status === 429) throw await rateLimitedError(attempt, method, path);
+    if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path, maxBytes);
+    if (res.status === 429) throw await rateLimitedError(attempt, method, path, maxBytes);
 
     if (!res.ok) {
       const text = await readText(attempt, maxBytes).catch((err: unknown) => {
