@@ -166,6 +166,13 @@ describe('createThrottle default sleep', () => {
     }
   });
 
+  it('completes the default sleep normally when the signal never fires', async () => {
+    const throttle = createThrottle({ minIntervalMs: 5 });
+    const ac = new AbortController();
+    await throttle(async () => 'a');
+    await expect(throttle(async () => 'b', { signal: ac.signal })).resolves.toBe('b');
+  });
+
   it('passes the call signal to an injected sleep', async () => {
     const seen: Array<AbortSignal | undefined> = [];
     let t = 0;

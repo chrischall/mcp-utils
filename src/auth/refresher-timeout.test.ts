@@ -106,6 +106,12 @@ describe('createOAuth2Refresher timeout', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('keeps an unparseable success body as "no access_token", not a timeout', async () => {
+    const fetchImpl = (async () => new Response('<html>', { status: 200 })) as unknown as typeof fetch;
+    const refresh = createOAuth2Refresher({ endpoint: ENDPOINT, refreshToken: 'rt', fetchImpl });
+    await expect(refresh()).rejects.toThrow(/no access_token/);
+  });
+
   it('names a non-URL endpoint generically in the timeout message', async () => {
     vi.useFakeTimers();
     const refresh = createOAuth2Refresher({
