@@ -10,7 +10,8 @@
  * `Cannot find package '@fetchproxy/server'`. Nothing here touches fetchproxy.
  */
 import type { McpServer } from '@modelcontextprotocol/server';
-import { truncateErrorMessage, messageOf } from '../errors/index.js';
+import { truncateErrorMessage, messageOf, errorKindOf, errorStatusOf } from '../errors/index.js';
+import type { McpToolErrorKind } from '../errors/index.js';
 import { EdgeBlockedError, detectEdgeBlock } from '../http/index.js';
 import { edgeBlockOf } from '../internal/edge-block.js';
 import { z } from 'zod';
@@ -22,22 +23,17 @@ import { z } from 'zod';
  */
 export type CredentialHealthcheckArm =
   | 'ok'
-  | 'no_credential'
-  | 'credential_rejected'
   /**
-   * A CDN/WAF in front of the API refused the request, so the credential was
-   * never judged. Checked BEFORE the status ladder: the edge answers 403 just
-   * as a rejecting API does (chrischall/mcp-host#1015).
+   * Every failure arm is an `McpToolErrorKind` (the core `errors` module's
+   * vocabulary), so a thrown error's declared `kind` names its arm directly:
+   * `no_credential`, `credential_rejected`, `edge_blocked` (a CDN/WAF refused
+   * the request before the API judged the credential — checked BEFORE the
+   * status ladder, since the edge answers 403 just as a rejecting API does,
+   * chrischall/mcp-host#1015), `session_expired` (credentials fine, no session
+   * live; see {@link sessionProbe}), `verification_pending` (a second factor
+   * is outstanding), `timeout`, `http`, `transport`, `unknown`.
    */
-  | 'edge_blocked'
-  /** Credentials are fine; no session is live. See {@link sessionProbe}. */
-  | 'session_expired'
-  /** A second factor is outstanding, so the far side is holding the sign-in. */
-  | 'verification_pending'
-  | 'timeout'
-  | 'http'
-  | 'transport'
-  | 'unknown';
+  | McpToolErrorKind;
 
 /** What a consumer's resolver reports. NEVER the credential value itself. */
 export interface CredentialState {
@@ -146,14 +142,6 @@ export interface CredentialHealthcheckResult {
   hint: string;
 }
 
-/** HTTP status off a thrown error, when the thrower attached one. */
-function statusOf(err: unknown): number | undefined {
-  if (typeof err !== 'object' || err === null) return undefined;
-  const s = (err as { status?: unknown; statusCode?: unknown }).status ??
-    (err as { statusCode?: unknown }).statusCode;
-  return typeof s === 'number' ? s : undefined;
-}
-
 const CREDENTIAL_ARMS = new Set<string>([
   'ok',
   'no_credential',
@@ -172,6 +160,11 @@ function isArm(kind: string | undefined): kind is CredentialHealthcheckArm {
   return kind !== undefined && CREDENTIAL_ARMS.has(kind);
 }
 
+/** ` from '<source>'`, or nothing when no source resolved (a resolver throw). */
+function fromSource(source: string | null): string {
+  return source !== null ? ` from '${source}'` : '';
+}
+
 function credentialHint(
   arm: CredentialHealthcheckArm,
   prefix: string,
@@ -184,15 +177,15 @@ function credentialHint(
     case 'no_credential':
       return `No credential resolved. Nothing was available to authenticate with — sign in and reconnect the connector so ${prefix} receives a token, or set the documented environment variable.`;
     case 'credential_rejected':
-      return `${hostLabel} rejected the credential from '${source}'. It is present but no longer valid — most often expired or revoked upstream. Re-authenticate and reconnect; retrying will not fix it.`;
+      return `${hostLabel} rejected the credential${fromSource(source)}. It is present but no longer valid — most often expired or revoked upstream. Re-authenticate and reconnect; retrying will not fix it.`;
     case 'edge_blocked':
       return `${hostLabel} refused the request at its CDN/WAF before it reached the API, so the credential${source !== null ? ` from '${source}'` : ''} was never judged — re-signing in or rotating it will not help. This is usually a block on this host's IP address or request fingerprint: route through the ContextMint Bridge if this connector supports it, or retry later from a different network.`;
     case 'session_expired':
-      return `The credential from '${source}' is configured, but no session is live — ${hostLabel} served a sign-in page rather than the data. Sign in again; a cookie-session portal expires these on its own, so this recurs between uses.`;
+      return `The credential${fromSource(source)} is configured, but no session is live — ${hostLabel} served a sign-in page rather than the data. Sign in again; a cookie-session portal expires these on its own, so this recurs between uses.`;
     case 'verification_pending':
       return `${hostLabel} is holding the sign-in on a second factor rather than refusing it. Supply the verification code the ACCOUNT HOLDER received — the credential itself is not the problem, so changing it will not help.`;
     case 'timeout':
-      return `The credential from '${source}' resolved, but ${hostLabel} did not answer in time. Usually transient — retry. If it persists, ${hostLabel} is slow or unreachable from here.`;
+      return `${source !== null ? `The credential from '${source}' resolved, but ` : ''}${hostLabel} did not answer in time. Usually transient — retry. If it persists, ${hostLabel} is slow or unreachable from here.`;
     case 'http':
       return `${hostLabel} answered with an error status that is not an auth rejection. That is USUALLY a ${hostLabel}-side problem rather than an auth one — but a 404 here more often means the probe path is wrong than that ${hostLabel} is broken, so check error.message and probe.url before concluding anything about the credential.`;
     case 'transport':
@@ -260,10 +253,21 @@ export async function runCredentialHealthcheck(
     // same CDN block as the probe. That is not a missing credential either,
     // so it is named before the `no_credential` fallback — after the
     // consumer's own classifier, which still decides first.
+    //
+    // After the edge check, a kind the error itself DECLARES (an
+    // `McpToolErrorKind` on it or its cause chain — a rejected OAuth2 refresh
+    // is `credential_rejected`, a signed-out bridge `session_expired`) names
+    // the arm, so a resolver that failed for a known reason is not told to
+    // set variables either. An undeclared throw keeps `no_credential`.
     const edge = edgeBlockOf(e);
+    const declared = errorKindOf(e);
     const classified =
       classifyThrown?.(e) ??
-      (edge !== null ? { kind: 'edge_blocked', detail: { vendor: edge.vendor } as Record<string, unknown> } : undefined);
+      (edge !== null
+        ? { kind: 'edge_blocked', detail: { vendor: edge.vendor } as Record<string, unknown> }
+        : declared !== undefined
+          ? { kind: declared }
+          : undefined);
     const result: CredentialHealthcheckResult = {
       ok: false,
       // Still false, and still no source: a classification explains WHY
@@ -325,7 +329,9 @@ export async function runCredentialHealthcheck(
   try {
     await probeFn();
   } catch (e) {
-    status = statusOf(e);
+    // Read off the error OR its short cause chain, so a connector that wraps
+    // an ApiError in an McpToolError for its hint keeps the 401.
+    status = errorStatusOf(e);
     // `AbortError` is matched on `err.name`, as src/http/index.ts does — a
     // bare AbortController abort carries it there and NOT in the message,
     // so matching the text alone classified those as 'unknown'.
@@ -334,18 +340,25 @@ export async function runCredentialHealthcheck(
     // rejecting API or a struggling one does, and the status alone would send
     // somebody to re-sign in with a credential that was never looked at.
     const edge = edgeBlockOf(e);
+    // Then a kind the error DECLARES (McpToolError.kind, or the same field on
+    // UnauthorizedError & co.) — the thrower knew what failed, so neither the
+    // status nor the message is asked to guess (fleet audit 2026-09,
+    // cluster 8: a 400 rejected grant is credential_rejected, not http).
+    const declared = errorKindOf(e);
     arm =
       edge !== null
         ? 'edge_blocked'
-        : status === 401 || status === 403
-          ? 'credential_rejected'
-          : status !== undefined
-            ? 'http'
-            : aborted || /timeout|timed out|ETIMEDOUT/i.test(messageOf(e))
-              ? 'timeout'
-              : /fetch failed|ENOTFOUND|ECONNREFUSED|ECONNRESET|network/i.test(messageOf(e))
-                ? 'transport'
-                : 'unknown';
+        : declared !== undefined
+          ? declared
+          : status === 401 || status === 403
+            ? 'credential_rejected'
+            : status !== undefined
+              ? 'http'
+              : aborted || /timeout|timed out|ETIMEDOUT/i.test(messageOf(e))
+                ? 'timeout'
+                : /fetch failed|ENOTFOUND|ECONNREFUSED|ECONNRESET|network/i.test(messageOf(e))
+                  ? 'transport'
+                  : 'unknown';
     let kind: string = arm;
     let detail: Record<string, unknown> | undefined = edge !== null ? { vendor: edge.vendor } : undefined;
     const custom = classifyThrown?.(e);
