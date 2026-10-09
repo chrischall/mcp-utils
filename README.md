@@ -39,6 +39,7 @@ import light:
 | `@chrischall/mcp-utils/fetchproxy` | fetchproxy transport adapter, bot-wall / retry / concurrency helpers |
 | `@chrischall/mcp-utils/healthcheck` | credential-style healthcheck factory (no fetchproxy peer needed) |
 | `@chrischall/mcp-utils/graphql` | GraphQL POST transport + operation-kind lexer (no optional peers) |
+| `@chrischall/mcp-utils/netguard` | SSRF guard for fetching third-party URLs: public-address table, DNS-pinning undici dispatcher, redirect-checked `fetchPublic` (needs `undici`) |
 | `@chrischall/mcp-utils/html` | opt-in HTML scraping helpers (needs `node-html-parser`) |
 | `@chrischall/mcp-utils/scrape` | convenience alias for the zero-dep `scrape` module (also in the core barrel) |
 | `@chrischall/mcp-utils/test` | in-memory test harness for tool registration |
@@ -2179,6 +2180,54 @@ is dropped, and every named entity decodes — use it for article, post and
 message bodies. `extractPlainTextFromHtml` is the older dependency-free regex
 pass (every tag becomes a space, so `<b>F</b>ree` → `F ree`; a short entity
 table); it is unchanged so existing callers' output does not shift.
+
+### `netguard` — SSRF guard for third-party URLs *(subpath, optional peer)*
+
+```ts
+import { isPublicAddress, createPublicOnlyDispatcher, fetchPublic } from '@chrischall/mcp-utils/netguard';
+
+// Follow a link somebody else chose (a tool argument, an email tracker, an images_url):
+const r = await fetchPublic(link, { timeoutMs: 15_000, maxBytes: 10 * 1024 * 1024 });
+r.status; r.headers; r.body; // Uint8Array; r.url is the final URL, r.hops the redirects followed
+
+// Stop at the first hop on your own service, without fetching it:
+const t = await fetchPublic(trackerUrl, { stopBefore: (u) => u.hostname.endsWith('.accessoticketing.com') });
+if (t.stopped) t.url;
+```
+
+Requires the optional `undici` peer (`^7 || ^8`), which is why it is a subpath
+and never in the root barrel. Consolidates accessoticketing-mcp `netguard.ts`,
+gemini-mcp `fetch-image.ts` and mcp-host's `isPublicAddress`
+(chrischall/fleet-audit#1150).
+
+- **`isPublicAddress(ip)`** — one IPv4 + IPv6 block table: RFC 1918, loopback,
+  link-local / cloud metadata (`169.254.169.254`), CGNAT, TEST-NET and
+  benchmarking, multicast, reserved, ULA (`fc00::/7`, incl. Fly's 6PN),
+  IPv6 link-/site-local, Teredo, documentation, and the IPv4-carrying forms
+  (`::ffff:` mapped, SIIT, NAT64, 6to4) judged by the IPv4 inside them. Fails
+  closed on anything that is not a well-formed address.
+- **`createPublicOnlyDispatcher({ resolve?, isAllowedAddress?, agent?, connect? })`**
+  — an undici `Agent` whose connector resolves each connection's host itself,
+  refuses it with `UrlNotAllowedError` (reason `'host'`) when the name resolves
+  to nothing or ANY address is not public, and connects to exactly the
+  addresses it checked. No second lookup means no DNS-rebinding window between
+  check and connect. IP-literal hosts are judged as themselves. `resolve` is
+  injectable (tests never touch DNS); `isAllowedAddress` widens the predicate
+  deliberately (a loopback test server).
+- **`fetchPublic(url, { maxRedirects = 10, timeoutMs, maxBytes, requireHttps, allowHosts, stopBefore, dispatcher, resolve, ...init })`**
+  — undici `fetch` through that dispatcher with manual redirects:
+  `assertAllowedUrl` on the first URL and every hop (https by default), at most
+  `maxRedirects` follow-up requests (`maxRedirects + 1` in all — the limit is
+  exact, never off by one), `authorization`/`cookie`/`proxy-authorization`
+  dropped once a hop leaves the original origin, 303 (and 301/302 after a POST)
+  turned into a body-less GET, one `timeoutMs` deadline across every hop and
+  the body read (`RequestTimeoutError`), and a `maxBytes` cap on the final
+  body (`ResponseTooLargeError`). An unreachable host is an `McpToolError` of
+  kind `'transport'` naming only the host. A dispatcher you pass is used as-is
+  and left open; otherwise one is built per call and destroyed when it settles.
+
+TLS is still validated against the hostname (SNI comes from the URL), so
+pinning the address costs no certificate checking.
 
 ### `test` — in-memory test harness *(subpath)*
 
