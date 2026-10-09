@@ -41,7 +41,11 @@
  *   - env: literal env keys the built code reads vs `manifest.json`
  *     (`server.mcp_config.env` + `user_config`), `server.json` and
  *     `.mcp.json` — undeclared, dead, required-but-optional, unwired
- *     user_config, and cwd-relative `.mcp.json` paths.
+ *     user_config, and cwd-relative `.mcp.json` paths. Reads are taken from
+ *     the server's own tsc output, not an esbuild `bundle.js` beside it (a
+ *     bundle inlines dependencies such as `ws` and @fetchproxy/server, whose
+ *     env reads are not server config); a bundle-only build falls back to the
+ *     bundle minus a list of well-known dependency keys.
  * They are warnings because each has legitimate blind spots (a dynamic env
  * key, a var documented only in a README); `--strict` is for a repo that has
  * cleared them and wants to stay clear. File paths in `file=` are relative to
