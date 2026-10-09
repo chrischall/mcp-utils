@@ -20,7 +20,7 @@
 import { responseHeader } from '../internal/headers.js';
 import { currentCallSignal, withAmbientCancellation } from '../cancel/index.js';
 import { McpToolError, UpstreamFormatError, messageOf, truncateErrorMessage } from '../errors/index.js';
-import type { ExpectedJsonShape, UpstreamBodyKind } from '../errors/index.js';
+import type { ExpectedJsonShape, McpToolErrorKind, UpstreamBodyKind } from '../errors/index.js';
 import { isCloudflareChallenge } from '../scrape/index.js';
 
 export * from './throttle.js';
@@ -349,9 +349,15 @@ function cancelBody(res: Response): void {
   }
 }
 
-/** Thrown for an upstream 401. Carries the status so callers can trigger a re-auth. */
+/**
+ * Thrown for an upstream 401. Carries the status so callers can trigger a
+ * re-auth, and `kind: 'credential_rejected'` (an `McpToolErrorKind`) so a
+ * classifier reads it without matching the message.
+ */
 export class UnauthorizedError extends Error {
   readonly status = 401;
+  /** Always `'credential_rejected'` unless a subclass says otherwise. */
+  readonly kind: McpToolErrorKind = 'credential_rejected';
   constructor(service: string) {
     super(`Unauthorized (401) from ${service} — the token is missing, invalid, or expired.`);
     this.name = 'UnauthorizedError';
@@ -366,6 +372,8 @@ export class UnauthorizedError extends Error {
  */
 export class RateLimitedError extends Error {
   readonly status = 429;
+  /** `'http'`: the far side answered, with a 429 (see `status`). */
+  readonly kind: McpToolErrorKind = 'http';
   readonly retryAfterMs: number | undefined;
   constructor(service: string, retryAfterMs?: number) {
     super(`Rate limited (429) by ${service} after retries.`);
@@ -375,9 +383,11 @@ export class RateLimitedError extends Error {
   }
 }
 
-/** Thrown when a request exceeds {@link ApiClientOptions.timeout}. */
+/** Thrown when a request exceeds {@link ApiClientOptions.timeout}. Its `kind` is `'timeout'`. */
 export class RequestTimeoutError extends Error {
   readonly timeoutMs: number;
+  /** Always `'timeout'` unless a subclass says otherwise. */
+  readonly kind: McpToolErrorKind = 'timeout';
   constructor(service: string, timeoutMs: number) {
     super(`Request to ${service} timed out after ${timeoutMs}ms.`);
     this.name = 'RequestTimeoutError';
@@ -430,6 +440,7 @@ export class WriteOutcomeUnknownError extends McpToolError {
     super(`${what} — the write may already have been applied (outcome is unknown).`, {
       hint: opts.hint ?? DEFAULT_WRITE_OUTCOME_HINT,
       cause: opts.cause,
+      kind: opts.timeoutMs !== undefined ? 'timeout' : 'transport',
     });
     this.name = 'WriteOutcomeUnknownError';
     this.timedOut = opts.timeoutMs !== undefined;
@@ -496,6 +507,8 @@ export class UpstreamHttpError extends ApiError {
 export class EdgeBlockedError extends ApiError {
   /** Which edge refused the request, e.g. `'CloudFront'` or `'Cloudflare'`. */
   readonly vendor: string;
+  /** Always `'edge_blocked'`: the credential was never judged. */
+  readonly kind: McpToolErrorKind = 'edge_blocked';
   /**
    * @param where The service the request was for, and — when the thrower knows
    *   it — the method and path, which the message names.

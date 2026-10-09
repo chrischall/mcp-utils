@@ -172,6 +172,7 @@ export async function fetchBounded<R extends BoundedRead = 'text'>(
       throw new McpToolError(`${service} returned a non-JSON response (HTTP ${res.status}, ${type}).`, {
         hint: 'The upstream may have served an error or sign-in page instead of data.',
         cause,
+        status: res.status,
       });
     }
   } finally {
