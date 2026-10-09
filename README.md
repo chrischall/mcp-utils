@@ -518,7 +518,8 @@ and is never touched.
 `McpToolError` and its subclasses (`SessionNotAuthenticatedError`,
 `BotWallError`, `RateLimitError`, `UnreachableError`, `ModeMismatchError`,
 `UpstreamFormatError`), plus `createHelpfulError`, `wrapToolError`, `truncateErrorMessage`,
-`redactSecrets`, `maskSecret`, `messageOf`, and `isTimeoutError`. `BotWallError` takes an optional
+`redactSecrets`, `maskSecret`, `messageOf`, `isTimeoutError`, and `errorStatusOf` /
+`errorKindOf` (with the `McpToolErrorKind` type and `MCP_TOOL_ERROR_KINDS` set). `BotWallError` takes an optional
 `{ vendor }` (e.g. `'DataDome'`) woven into the message and exposed as a field;
 `maskSecret(value)` renders a `first8…last4` fingerprint for set-credential
 confirmations (short values are fully hidden). `redactSecrets` scrubs `Bearer`/`Basic` auth
@@ -568,6 +569,49 @@ try {
 
 Every error carries an optional `hint` — a "here's how to fix it" string the
 tool surface can show the user.
+
+**Classify by structure, never by message text.** `McpToolError` also takes an
+optional `status` (the upstream HTTP status) and `kind` — an `McpToolErrorKind`,
+the credential healthcheck's failure arms: `no_credential`,
+`credential_rejected`, `edge_blocked`, `session_expired`,
+`verification_pending`, `timeout`, `http`, `transport`, `unknown`. Seven fleet
+repos used to regex the message instead (`/401|403|forbidden/`,
+`/\b429\b|\b503\b/`, a `/auth|sign/` that matched "assign"), because a
+hint-adding `McpToolError` dropped the status of the `ApiError` it wrapped. The
+library's own throwers set them:
+
+| Error | `status` | `kind` |
+| --- | --- | --- |
+| `SessionNotAuthenticatedError` | — | `session_expired` |
+| `RateLimitError` / `RateLimitedError` | 429 | `http` |
+| `UnreachableError` | when given | `http` with a status, else `transport` |
+| `UpstreamFormatError` | when known | — |
+| `UnauthorizedError` | 401 | `credential_rejected` |
+| `RequestTimeoutError` | — | `timeout` |
+| `EdgeBlockedError` | the edge's | `edge_blocked` |
+| `WriteOutcomeUnknownError`, `GraphqlTransportError` | — | `timeout` or `transport` (by `timedOut`) |
+| `OAuth2RefreshError` | the endpoint's | `credential_rejected` for a 4xx other than 408/429, else `http` |
+| `TokenManager`'s "no refresh token is available" | — | `no_credential` |
+| `ApiError` / `UpstreamHttpError` / `GraphqlResponseError` | the response's | — (the status says which; `GraphqlResponseError` takes an optional `kind`) |
+
+`errorStatusOf(err)` / `errorKindOf(err)` read them duck-typed off any error
+and a short `cause` chain (the outermost link that declares one wins; a `kind`
+outside the vocabulary is ignored), and `wrapToolError` carries both over to
+the error it returns. Attach them when you wrap:
+
+```ts
+} catch (err) {
+  throw new McpToolError('Viator rejected the API key.', {
+    hint: 'Check VIATOR_API_KEY.',
+    status: errorStatusOf(err),
+    kind: 'credential_rejected',
+    cause: err,
+  });
+}
+// …and branch on structure:
+if (errorKindOf(err) === 'credential_rejected') reauth();
+if (errorStatusOf(err) === 503) retryLater();
+```
 
 ### `config` — hardened env/config
 
@@ -1837,7 +1881,13 @@ registerCredentialHealthcheckTool({
 Arms: `ok`, `no_credential`, `credential_rejected` (401/403),
 `edge_blocked`, `session_expired`, `verification_pending`, `timeout`, `http`,
 `transport`, `unknown` — with the same `classifyThrown` / `hints` hooks as the
-bridge factory.
+bridge factory. Every failure arm is an `McpToolErrorKind`, so a thrown error
+that DECLARES a `kind` (see [`errors`](#errors--helpful-errors)) names its arm
+directly: the order is `classifyThrown`, then `edge_blocked`, then the declared
+kind, then the status ladder (status read with `errorStatusOf`, so a 401 on
+a wrapped `cause` counts), then message matching. A declared kind also
+replaces the `no_credential` fallback for a `resolveCredential` throw — a
+rejected OAuth2 refresh in the resolver reports `credential_rejected`.
 
 `edge_blocked` is decided BEFORE the status: a CDN/WAF block page answers 403
 exactly as a rejecting API does, and reporting it as `credential_rejected`
