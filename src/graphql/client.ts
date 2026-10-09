@@ -29,6 +29,7 @@
 import { responseHeader } from '../internal/headers.js';
 import { withAmbientCancellation } from '../cancel/index.js';
 import { McpToolError, messageOf, truncateErrorMessage } from '../errors/index.js';
+import type { McpToolErrorKind } from '../errors/index.js';
 import {
   EdgeBlockedError,
   RateLimitedError,
@@ -189,6 +190,10 @@ export interface GraphqlClient {
  * not a GraphQL response at all — then `errors` is empty). The message joins
  * the messages, redacted and truncated; the raw entries, any partial `data`,
  * and the codes ride along for callers that branch.
+ *
+ * It declares no `kind` unless constructed with one: the client throws
+ * `UnauthorizedError` (`kind: 'credential_rejected'`) for an auth answer, so
+ * one that reaches here is one the client's `isAuthError` judged NOT to be.
  */
 export class GraphqlResponseError extends McpToolError {
   readonly status: number;
@@ -199,9 +204,12 @@ export class GraphqlResponseError extends McpToolError {
 
   constructor(
     message: string,
-    details: { status: number; errors?: readonly GraphqlError[]; data?: unknown; hint?: string },
+    details: { status: number; errors?: readonly GraphqlError[]; data?: unknown; hint?: string; kind?: McpToolErrorKind },
   ) {
-    super(message, details.hint !== undefined ? { hint: details.hint } : undefined);
+    super(message, {
+      ...(details.hint !== undefined ? { hint: details.hint } : {}),
+      ...(details.kind !== undefined ? { kind: details.kind } : {}),
+    });
     this.name = 'GraphqlResponseError';
     this.status = details.status;
     this.errors = details.errors ?? [];
@@ -217,14 +225,15 @@ export class GraphqlResponseError extends McpToolError {
  * set, the message says so, and the hint asks for a state check before any
  * retry (a confirmation gate cannot stop a blind retry: a fresh preview earns
  * a fresh approval). A caller's cancellation is not this error; its abort is
- * rethrown untouched.
+ * rethrown untouched. Its `kind` is `'timeout'` or `'transport'`, following
+ * `timedOut`.
  */
 export class GraphqlTransportError extends McpToolError {
   readonly timedOut: boolean;
   readonly outcomeUnknown: boolean;
 
   constructor(message: string, details: { timedOut: boolean; outcomeUnknown: boolean; hint: string; cause: unknown }) {
-    super(message, { hint: details.hint, cause: details.cause });
+    super(message, { hint: details.hint, cause: details.cause, kind: details.timedOut ? 'timeout' : 'transport' });
     this.name = 'GraphqlTransportError';
     this.timedOut = details.timedOut;
     this.outcomeUnknown = details.outcomeUnknown;

@@ -1,8 +1,10 @@
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { McpToolError } from '../errors/index.js';
 
 import { resolveOutputDir, sniffMimeBytes, uniquePath, writeBinaryOutput } from './index.js';
 
@@ -31,8 +33,56 @@ describe('resolveOutputDir', () => {
     expect(existsSync(target)).toBe(true);
   });
 
-  it('falls back to the cwd when neither is set', () => {
-    expect(resolveOutputDir(undefined, 'X_OUTPUT_DIR', { env: {} })).toBe(process.cwd());
+  describe('with neither set — never the cwd', () => {
+    // Under Claude Desktop/.mcpb the cwd is `/`; under Claude Code it is the
+    // user's repo (fleet audit 2026-09, cluster 12).
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it('falls back to ~/Downloads/<name>, created 0700, when a name is given', () => {
+      vi.stubEnv('HOME', dir);
+      const resolved = resolveOutputDir(undefined, 'X_OUTPUT_DIR', { env: {}, name: 'x-mcp' });
+      expect(resolved).toBe(join(dir, 'Downloads', 'x-mcp'));
+      expect(existsSync(resolved)).toBe(true);
+      expect(statSync(resolved).mode & 0o777).toBe(0o700);
+      expect(resolved).not.toBe(process.cwd());
+    });
+
+    it('a placeholder env value still counts as unset', () => {
+      vi.stubEnv('HOME', dir);
+      expect(
+        resolveOutputDir(undefined, 'X_OUTPUT_DIR', { env: { X_OUTPUT_DIR: '${X_OUTPUT_DIR}' }, name: 'x-mcp' }),
+      ).toBe(join(dir, 'Downloads', 'x-mcp'));
+    });
+
+    it('per-call and env still win over the name fallback', () => {
+      const target = join(dir, 'env-out');
+      expect(
+        resolveOutputDir(undefined, 'X_OUTPUT_DIR', { env: { X_OUTPUT_DIR: target }, name: 'x-mcp' }),
+      ).toBe(target);
+      expect(resolveOutputDir(join(dir, 'call'), 'X_OUTPUT_DIR', { env: {}, name: 'x-mcp' })).toBe(
+        join(dir, 'call'),
+      );
+    });
+
+    it('throws a config error naming the env var when no name is given', () => {
+      let err: unknown;
+      try {
+        resolveOutputDir(undefined, 'X_OUTPUT_DIR', { env: {} });
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(McpToolError);
+      expect((err as Error).message).toMatch(/X_OUTPUT_DIR/);
+    });
+
+    it('refuses a name that is not a single safe path segment', () => {
+      vi.stubEnv('HOME', dir);
+      for (const name of ['', '.', '..', '../x', 'a/b', 'a\\b']) {
+        expect(() => resolveOutputDir(undefined, 'X_OUTPUT_DIR', { env: {}, name })).toThrow(TypeError);
+      }
+    });
   });
 });
 

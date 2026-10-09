@@ -5,36 +5,59 @@
  *
  * Consolidates the duplicated trio in gemini (`images.ts#resolveOutputDir` /
  * `uniquePath` / `writeImage`) and flightaware (`shared.ts#resolveOutputDir` /
- * `writePng`): per-call dir → `<SVC>_OUTPUT_DIR` env → cwd, non-overwriting
+ * `writePng`): per-call dir → `<SVC>_OUTPUT_DIR` env → `~/Downloads/<name>`
+ * (never the cwd — `/` under Claude Desktop, the user's repo under Claude
+ * Code), non-overwriting
  * filenames, extension derived from the MIME type. The fleet convention (see
  * the mcp-fleet-builder skill) is that every binary-output tool uses this shape.
  */
 
 import { existsSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import { expandPath, readEnvVar, type EnvSource } from '../config/index.js';
+import { McpToolError } from '../errors/index.js';
 import { assertPathWithinRoots } from './confine.js';
 import { sanitizeBaseName, writeUniqueFileSync } from './write.js';
 
+/** Options for {@link resolveOutputDir}. */
+export interface ResolveOutputDirOptions {
+  /** Where to read `envVar` from. Defaults to `process.env`. */
+  env?: EnvSource;
+  /** Confine the per-call directory to these roots (see below). */
+  allowedRoots?: readonly string[];
+  /**
+   * The server's name, e.g. `'splitwise-mcp'`. When neither the per-call dir
+   * nor `envVar` is set, the output goes to `~/Downloads/<name>` (created
+   * `0700`). Without it, that case throws a config error naming `envVar`. Must
+   * be a single path segment.
+   */
+  name?: string;
+}
+
 /**
  * Resolve the directory a binary-output tool should write into:
- * the per-call argument → the named env var → the current working directory.
+ * the per-call argument → the named env var → `~/Downloads/<name>` (when
+ * `opts.name` is given) → a config error ({@link McpToolError}) naming the env
+ * var. It **never** falls back to the current working directory: that is `/`
+ * (unwritable) under Claude Desktop/.mcpb and the user's repo under Claude
+ * Code (fleet audit 2026-09, cluster 12 — receipts and images landed there).
  * `~` and relative paths are expanded ({@link expandPath}) and the directory is
  * created recursively so the subsequent write can't ENOENT.
  *
  * `allowedRoots` (opt-in) confines the **per-call** directory — the value a
  * tool argument supplies — to those roots, checked through symlinks before
- * anything is created. The env var and cwd are operator configuration and are
- * not constrained.
+ * anything is created. The env var and the `name` fallback are operator
+ * configuration and are not constrained.
  */
 export function resolveOutputDir(
   perCall: string | undefined,
   envVar: string,
-  opts: { env?: EnvSource; allowedRoots?: readonly string[] } = {},
+  opts: ResolveOutputDirOptions = {},
 ): string {
   const raw = perCall ?? readEnvVar(envVar, opts.env ? { env: opts.env } : {});
-  if (!raw) return process.cwd();
+  if (!raw) return defaultOutputDir(envVar, opts.name);
   const dir = expandPath(raw);
   if (perCall !== undefined && opts.allowedRoots) {
     assertPathWithinRoots(dir, opts.allowedRoots);
@@ -44,6 +67,21 @@ export function resolveOutputDir(
     return dir;
   }
   mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/** `~/Downloads/<name>` (created 0700), or a config error naming `envVar`. */
+function defaultOutputDir(envVar: string, name: string | undefined): string {
+  if (name === undefined) {
+    throw new McpToolError(`No output directory is configured: ${envVar} is not set.`, {
+      hint: `Set ${envVar} to a writable directory, or pass an output directory with the call.`,
+    });
+  }
+  if (!name || name === '.' || name === '..' || /[/\\]/.test(name)) {
+    throw new TypeError(`resolveOutputDir: name must be a single path segment, got ${JSON.stringify(name)}`);
+  }
+  const dir = join(homedir(), 'Downloads', name);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
 }
 

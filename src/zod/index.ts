@@ -34,10 +34,17 @@ export const IsoDate = z.iso.date();
  * carried as bare `HH:MM`, never parsed through `Date` so they aren't shifted
  * by the server's timezone. Accepts `9:05` and `09:05`; rejects `24:00`,
  * `19:60`, and anything with seconds.
+ *
+ * The parsed value is always zero-padded `HH:MM` — `9:05` comes out as
+ * `09:05`, the same canonical form {@link normalizeTime} emits — so a value
+ * that passed the atom compares equal to an upstream's `09:05` slot (fleet
+ * audit 2026-09, resy #680). The padding is a zod `.overwrite()`, so this
+ * stays a `ZodString`: chainable, and its JSON Schema keeps the `pattern`.
  */
 export const IsoTime = z
   .string()
-  .regex(/^([01]?\d|2[0-3]):[0-5]\d$/, 'must be HH:MM (24h), e.g. 19:30');
+  .regex(/^([01]?\d|2[0-3]):[0-5]\d$/, 'must be HH:MM (24h), e.g. 19:30')
+  .overwrite((v) => v.padStart(5, '0'));
 
 /**
  * A bare numeric id as a string, e.g. App Store Connect's `1234567890`.

@@ -67,9 +67,19 @@ describe('atoms', () => {
   describe('IsoTime', () => {
     it('accepts HH:MM and H:MM 24h', () => {
       expect(IsoTime.parse('19:30')).toBe('19:30');
-      expect(IsoTime.parse('9:05')).toBe('9:05');
       expect(IsoTime.parse('00:00')).toBe('00:00');
       expect(IsoTime.parse('23:59')).toBe('23:59');
+    });
+    it('zero-pads a single-digit hour, matching normalizeTime', () => {
+      // resy #680: '9:05' passed the atom but never matched a '09:05' slot.
+      expect(IsoTime.parse('9:05')).toBe('09:05');
+      expect(IsoTime.parse('0:00')).toBe('00:00');
+      expect(IsoTime.parse('9:05')).toBe(normalizeTime('9:05'));
+    });
+    it('stays a plain string schema (JSON Schema keeps the pattern; chainable)', () => {
+      expect(IsoTime).toBeInstanceOf(z.ZodString);
+      expect(z.toJSONSchema(IsoTime)).toMatchObject({ type: 'string', pattern: expect.any(String) });
+      expect(IsoTime.optional().parse('7:15')).toBe('07:15');
     });
     it('rejects out-of-range, seconds, and junk', () => {
       expect(IsoTime.safeParse('24:00').success).toBe(false);

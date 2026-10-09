@@ -19,6 +19,7 @@ import {
   UnauthorizedError,
   RateLimitedError,
   RequestTimeoutError,
+  DEFAULT_REQUEST_TIMEOUT_MS,
   type ApiClientOptions,
   type RateLimitContext,
 } from './index.js';
@@ -642,11 +643,36 @@ describe('createApiClient timeout', () => {
     expect((calls[0]!.init as { signal?: unknown }).signal).toBeInstanceOf(AbortSignal);
   });
 
-  it('sets no signal when no timeout is configured', async () => {
-    const { fn, calls } = stubFetch([jsonResponse({})]);
-    const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn });
-    await client.fetchJson('GET', '/a');
-    expect((calls[0]!.init as { signal?: unknown }).signal).toBeUndefined();
+  it('sets no signal when the timeout is disabled with 0 or false', async () => {
+    for (const timeout of [0, false] as const) {
+      const { fn, calls } = stubFetch([jsonResponse({})]);
+      const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl: fn, timeout });
+      await client.fetchJson('GET', '/a');
+      expect((calls[0]!.init as { signal?: unknown }).signal).toBeUndefined();
+    }
+  });
+
+  it('bounds a request at 30 s by default, matching createGraphqlClient', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = ((_url: string, init: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => {
+            const e = new Error('aborted');
+            (e as { name: string }).name = 'AbortError';
+            reject(e);
+          });
+        })) as unknown as typeof fetch;
+      const client = createApiClient({ baseUrl: 'https://x.test', getToken: () => 't', fetchImpl });
+      const p = client.fetchJson('GET', '/a');
+      const assertion = expect(p).rejects.toMatchObject({ name: 'RequestTimeoutError', timeoutMs: 30_000 });
+      await vi.advanceTimersByTimeAsync(29_999);
+      await vi.advanceTimersByTimeAsync(1);
+      await assertion;
+      expect(DEFAULT_REQUEST_TIMEOUT_MS).toBe(30_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('passes a non-abort fetch error through unchanged', async () => {

@@ -11,6 +11,16 @@ export interface ReadEnvOptions {
   env?: EnvSource;
   /** Value to return when the variable is unset. */
   default?: string;
+  /**
+   * Trim surrounding whitespace from the returned value. Default `true`.
+   *
+   * Pass `false` for secrets — passwords especially — where a leading or
+   * trailing space is part of the credential (fleet audit 2026-09, schoolpass
+   * #691). The unset checks (empty / whitespace-only / `'undefined'` /
+   * `'null'` / `${...}`) still run on the trimmed view, so a blank or
+   * placeholder value is still unset; only a real value comes back untrimmed.
+   */
+  trim?: boolean;
 }
 
 /**
@@ -35,6 +45,7 @@ const PLACEHOLDER_RE = /^\$\{[^}]*\}$/;
  *  - an unsubstituted `${...}` placeholder.
  *
  * When unset, returns `opts.default` if provided, otherwise `undefined`.
+ * Pass `{ trim: false }` to get a set value back untrimmed (secrets).
  *
  * Consolidates the `readVar`/`readEnv`/`readEnvString`/`sanitizeEnvVar` snippet
  * duplicated across 12+ MCP servers.
@@ -50,7 +61,7 @@ export function readEnvVar(key: string, opts: ReadEnvOptions = {}): string | und
       trimmed !== 'null' &&
       !PLACEHOLDER_RE.test(trimmed)
     ) {
-      return trimmed;
+      return opts.trim === false ? raw : trimmed;
     }
   }
   return opts.default;
@@ -62,6 +73,8 @@ export interface RequireEnvOptions {
   env?: EnvSource;
   /** Remediation text appended to the thrown error ("here's how to fix it"). */
   hint?: string;
+  /** As {@link ReadEnvOptions.trim}: `false` returns a set value untrimmed (secrets). */
+  trim?: boolean;
 }
 
 /**
@@ -71,7 +84,7 @@ export interface RequireEnvOptions {
  * placeholder is not echoed back to the caller.
  */
 export function requireEnvVar(key: string, opts: RequireEnvOptions = {}): string {
-  const value = readEnvVar(key, { env: opts.env });
+  const value = readEnvVar(key, { env: opts.env, trim: opts.trim });
   if (value === undefined) {
     const base = `Missing required environment variable ${key}`;
     throw new Error(opts.hint ? `${base}. ${opts.hint}` : base);

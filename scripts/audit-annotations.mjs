@@ -5,6 +5,7 @@
  *   node scripts/audit-annotations.mjs ../some-mcp/dist/index.js
  *   node scripts/audit-annotations.mjs ../some-mcp/dist/index.js --summary
  *   node scripts/audit-annotations.mjs ../some-mcp/dist/index.js --expect 45
+ *   node scripts/audit-annotations.mjs ../some-mcp/dist/index.js --strict
  *
  * Why this exists rather than a grep: across a 16-repo annotation sweep every
  * bug that mattered was found here and none was found by reading source.
@@ -29,17 +30,35 @@
  * gate) and makes the run exit non-zero; a non-read tool without a
  * `confirmToken` input is marked `ungated?` for a human to judge. See
  * lib/confirm-gates.mjs.
+ *
+ * Surface checks (lib/surface-checks.mjs) print GitHub `::warning::` lines
+ * and do NOT change the exit code unless `--strict` is passed:
+ *   - annotations: a non-read tool without an explicit boolean
+ *     `destructiveHint` (the spec defaults it to true), and any tool without
+ *     an explicit `openWorldHint`;
+ *   - manifest-tools: `manifest.json` `tools[]` names vs the served names,
+ *     both directions, when a manifest.json sits beside the package.json;
+ *   - env: literal env keys the built code reads vs `manifest.json`
+ *     (`server.mcp_config.env` + `user_config`), `server.json` and
+ *     `.mcp.json` — undeclared, dead, required-but-optional, unwired
+ *     user_config, and cwd-relative `.mcp.json` paths.
+ * They are warnings because each has legitimate blind spots (a dynamic env
+ * key, a var documented only in a README); `--strict` is for a repo that has
+ * cleared them and wants to stay clear. File paths in `file=` are relative to
+ * the cwd, which in CI is the repo root.
  */
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { confirmGateFinding, summariseConfirmGates } from './lib/confirm-gates.mjs';
+import { collectSurfaceWarnings, formatWarning } from './lib/surface-checks.mjs';
 
 const entry = process.argv[2];
 if (!entry) {
-  console.error('usage: audit-annotations.mjs <path/to/dist/entry.js> [--summary] [--expect <n>]');
+  console.error('usage: audit-annotations.mjs <path/to/dist/entry.js> [--summary] [--expect <n>] [--strict]');
   process.exit(2);
 }
 const summaryOnly = process.argv.includes('--summary');
+const strict = process.argv.includes('--strict');
 const expectAt = process.argv.indexOf('--expect');
 const expected = expectAt === -1 ? undefined : Number(process.argv[expectAt + 1]);
 if (expectAt !== -1 && !Number.isInteger(expected)) {
@@ -93,6 +112,14 @@ console.log(`${tools.length} tools   read ${counts.read}   additive ${counts.add
 const gates = summariseConfirmGates(tools);
 console.log(`confirm gates   confirm-boolean ${gates.errors.length}   ungated writes ${gates.suspects.length}`);
 
+// Warn-only unless --strict. Printed after the summary lines so nothing CI
+// parses moves; `::warning` lines never match its per-tool `^  <class>` sed.
+// collectSurfaceWarnings never throws, so a crash here cannot change the exit code.
+const warnings = collectSurfaceWarnings(entry, tools);
+const byCheck = (c) => warnings.filter((w) => w.check === c).length;
+console.log(`surface checks   annotations ${byCheck('annotations')}   manifest-tools ${byCheck('manifest-tools')}   env ${byCheck('env') + byCheck('surface')}`);
+for (const w of warnings) console.log(formatWarning(w));
+
 if (expected !== undefined && tools.length !== expected) {
   console.error(
     `\nMISMATCH: served ${tools.length}, expected ${expected}. `
@@ -108,4 +135,7 @@ if (gates.errors.length) {
   );
   process.exit(1);
 }
-
+if (strict && warnings.length) {
+  console.error(`\n--strict: ${warnings.length} surface warning(s) above. Fix them, or drop --strict to keep them advisory.`);
+  process.exit(1);
+}

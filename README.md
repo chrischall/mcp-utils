@@ -117,8 +117,15 @@ Hint: Available: 1 (Bus), 2 (Walker)
 
 The MCP tool boundary itself surfaces only `message`, so a `hint` — the
 actionable half — used to be dropped even though `wrapToolError` preserved it.
-Anything that is not an `McpToolError`, or has no `hint`, propagates untouched,
-so a genuine bug still reads as one. Opt out with `surfaceHints: false`.
+Anything that is not an `McpToolError`, or has no `hint`, renders as its bare
+message, so a genuine bug still reads as one, but every thrown error's text
+now goes through `redactSecrets` first (the same redaction `errorResult`
+applies, never truncated). Before, a non-`McpToolError` was rethrown and the
+SDK rendered its raw message, so a `TypeError` quoting a signed URL or a
+third-party client error echoing a token reached the caller verbatim. The
+SDK's `UrlElicitationRequiredError` is still rethrown untouched, because the
+client must receive it as a protocol error. Opt out with `surfaceHints: false`,
+which also switches off that redaction.
 `createTestHarness` applies the same wrapper, so a tool's failure text under
 test is the text production returns.
 
@@ -516,9 +523,10 @@ and is never touched.
 ### `errors` — helpful errors
 
 `McpToolError` and its subclasses (`SessionNotAuthenticatedError`,
-`BotWallError`, `RateLimitError`, `UnreachableError`, `ModeMismatchError`),
-plus `createHelpfulError`, `wrapToolError`, `truncateErrorMessage`,
-`redactSecrets`, `maskSecret`, `messageOf`, and `isTimeoutError`. `BotWallError` takes an optional
+`BotWallError`, `RateLimitError`, `UnreachableError`, `ModeMismatchError`,
+`UpstreamFormatError`), plus `createHelpfulError`, `wrapToolError`, `truncateErrorMessage`,
+`redactSecrets`, `maskSecret`, `messageOf`, `isTimeoutError`, and `errorStatusOf` /
+`errorKindOf` (with the `McpToolErrorKind` type and `MCP_TOOL_ERROR_KINDS` set). `BotWallError` takes an optional
 `{ vendor }` (e.g. `'DataDome'`) woven into the message and exposed as a field;
 `maskSecret(value)` renders a `first8…last4` fingerprint for set-credential
 confirmations (short values are fully hidden). `redactSecrets` scrubs `Bearer`/`Basic` auth
@@ -526,8 +534,8 @@ headers, `Cookie`/`Set-Cookie` values (cookie names stay visible), JWTs,
 well-known API-key shapes (`sk-…`, `ghp_…`, `xox?-…`, `AIza…`, `AKIA…`,
 `whsec_…`), Google OAuth2 access/refresh tokens (`ya29.…` / `1//…` — never
 when welded inside a base64 blob), secret-bearing URL query params (including cookie-style session
-ids such as `sessionid`/`PHPSESSID`/`JSESSIONID`/`sid` and `x-api-key`-style
-names), and secret JSON values — quoted or numeric — plus the values under
+ids such as `sessionid`/`PHPSESSID`/`JSESSIONID`/`sid`, `x-api-key`-style
+names, and PKCE `code_verifier` / bare `verifier` capabilities), and secret JSON values (including `code_verifier`) — quoted or numeric — plus the values under
 `"cookie"`/`"set-cookie"` JSON keys (names kept); `truncateErrorMessage` applies
 it before truncating, and `errorResult` applies it (without truncating). Every
 pattern is linear in the input (`redos.test.ts` times each against 200 KB
@@ -569,6 +577,49 @@ try {
 Every error carries an optional `hint` — a "here's how to fix it" string the
 tool surface can show the user.
 
+**Classify by structure, never by message text.** `McpToolError` also takes an
+optional `status` (the upstream HTTP status) and `kind` — an `McpToolErrorKind`,
+the credential healthcheck's failure arms: `no_credential`,
+`credential_rejected`, `edge_blocked`, `session_expired`,
+`verification_pending`, `timeout`, `http`, `transport`, `unknown`. Seven fleet
+repos used to regex the message instead (`/401|403|forbidden/`,
+`/\b429\b|\b503\b/`, a `/auth|sign/` that matched "assign"), because a
+hint-adding `McpToolError` dropped the status of the `ApiError` it wrapped. The
+library's own throwers set them:
+
+| Error | `status` | `kind` |
+| --- | --- | --- |
+| `SessionNotAuthenticatedError` | — | `session_expired` |
+| `RateLimitError` / `RateLimitedError` | 429 | `http` |
+| `UnreachableError` | when given | `http` with a status, else `transport` |
+| `UpstreamFormatError` | when known | — |
+| `UnauthorizedError` | 401 | `credential_rejected` |
+| `RequestTimeoutError` | — | `timeout` |
+| `EdgeBlockedError` | the edge's | `edge_blocked` |
+| `WriteOutcomeUnknownError`, `GraphqlTransportError` | — | `timeout` or `transport` (by `timedOut`) |
+| `OAuth2RefreshError` | the endpoint's | `credential_rejected` for a 4xx other than 408/429, else `http` |
+| `TokenManager`'s "no refresh token is available" | — | `no_credential` |
+| `ApiError` / `UpstreamHttpError` / `GraphqlResponseError` | the response's | — (the status says which; `GraphqlResponseError` takes an optional `kind`) |
+
+`errorStatusOf(err)` / `errorKindOf(err)` read them duck-typed off any error
+and a short `cause` chain (the outermost link that declares one wins; a `kind`
+outside the vocabulary is ignored), and `wrapToolError` carries both over to
+the error it returns. Attach them when you wrap:
+
+```ts
+} catch (err) {
+  throw new McpToolError('Viator rejected the API key.', {
+    hint: 'Check VIATOR_API_KEY.',
+    status: errorStatusOf(err),
+    kind: 'credential_rejected',
+    cause: err,
+  });
+}
+// …and branch on structure:
+if (errorKindOf(err) === 'credential_rejected') reauth();
+if (errorStatusOf(err) === 503) retryLater();
+```
+
 ### `config` — hardened env/config
 
 `readEnvVar`, `requireEnvVar`, `parseBoolEnv`, `readPortEnv`, `readIntEnv`,
@@ -586,6 +637,16 @@ const apiKey = requireEnvVar('MY_API_KEY');
 const debug = parseBoolEnv('MY_DEBUG', { default: false });
 const port = readPortEnv('MY_WS_PORT', 37149);  // placeholder/NaN/out-of-range → fallback
 const home = expandPath('~/.config/my-mcp');
+```
+
+`readEnvVar` trims the value by default. For **secrets** — passwords above
+all — pass `{ trim: false }` (also accepted by `requireEnvVar`): a leading or
+trailing space can be part of the credential, and trimming it silently turns a
+correct password into a rejected one. The unset checks still run on the trimmed
+view, so a blank, `'null'`/`'undefined'` or `${...}` placeholder is still unset.
+
+```ts
+const password = requireEnvVar('MY_PASSWORD', { trim: false }); // ' p4ss ' stays ' p4ss '
 ```
 
 `readPortEnv` parses a TCP port with the same placeholder hardening as
@@ -624,7 +685,11 @@ without re-reading). Pass `readFile` to inject a reader in tests.
 
 The binary-output kit (hoisted from gemini + flightaware) is the fleet
 convention for tools that generate bytes: `resolveOutputDir(perCall,
-'<SVC>_OUTPUT_DIR')` resolves arg → env → cwd (creating the dir),
+'<SVC>_OUTPUT_DIR', { name: '<svc>-mcp' })` resolves arg → env →
+`~/Downloads/<svc>-mcp` (created `0700`) and creates the dir. It **never falls
+back to the cwd** — that is `/` (unwritable) under Claude Desktop/.mcpb and the
+user's repo under Claude Code. Without `name`, the no-arg/no-env case throws a
+config error (`McpToolError`) naming the env var, so pass `name`.
 `writeBinaryOutput({ dir, baseName, base64, mimeType })` writes to a
 **non-overwriting** path (`name.png`, `name-2.png`, …) and returns it.
 Each name is claimed with an exclusive, no-follow create
@@ -714,11 +779,14 @@ clone of this repo: `node scripts/audit-fs-confinement.mjs ../your-mcp`.
 `createApiClient` plus building blocks: `buildQueryString`, `buildOptionalBody`,
 `formatApiError`, `parseLinkHeader`, `parseCookieJar`, `parseCookieHeader`,
 `runBoundedBatch`, `createThrottle`, `createResponseCache`, `parseRetryAfterMs`,
+`fetchBounded`, the URL-safety atoms `apiPath`, `readOriginEnv`,
+`assertAllowedUrl` and `findPathHazard`,
 `splitHost`, `buildUserAgent`, `parseContentDispositionFilename`, JWT helpers
 (`decodeJwtExp`, `decodeJwtSessionId`, `decodeJwtClaim`, `validateJwtExpiry`),
-`detectEdgeBlock`, and the `ApiError` / `UpstreamHttpError` /
+`detectEdgeBlock`, `parseJsonBody`, and the `ApiError` / `UpstreamHttpError` /
 `EdgeBlockedError` / `UnauthorizedError` / `RateLimitedError` /
-`RequestTimeoutError` classes.
+`RequestTimeoutError` / `WriteOutcomeUnknownError` / `ResponseTooLargeError` /
+`UrlNotAllowedError` / `RedirectRefusedError` classes.
 
 `parseContentDispositionFilename(header)` returns the download's filename or
 `undefined`. It prefers RFC 8187 `filename*=` (charset prefix optional; UTF-8
@@ -740,21 +808,156 @@ const api = createApiClient({
   getToken: () => store.currentToken(),  // resolved per-request; sync or async
   serviceName: 'Example',
   retry: { count: 1, delayMs: 2000 },    // fleet-wide "retry once after 2s" default
-  timeout: 15_000,                        // abort a hung request, throw RequestTimeoutError
+  timeout: 15_000,                        // default 30 s; 0/false disables
 });
 
 const data = await api.get('/v1/things', { query: { page: 2 } });
 ```
 
-`timeout` (ms) bounds each attempt with an `AbortController`; on expiry it throws
-`RequestTimeoutError` instead of hanging the tool call. A 429 retry gets a fresh
-timeout. Omit it to keep the previous unbounded behavior.
+`timeout` (ms) bounds each attempt with an `AbortController`, from the request
+until its body has been read; on expiry it throws `RequestTimeoutError` instead
+of hanging the tool call. A 429 retry gets a fresh timeout. It **defaults to
+30 s** (`DEFAULT_REQUEST_TIMEOUT_MS`, the same budget `createGraphqlClient`
+uses); before 2.16 an omitted `timeout` meant unbounded. Pass a larger value for
+a slow download, or `0` / `false` to disable it. The caller's cancellation
+applies either way.
+
+**A write whose outcome is unknown says so.** When a request whose method is
+not safe (anything but `GET` / `HEAD` / `OPTIONS` / `TRACE`) was sent but timed
+out, lost its connection, or broke off while its response body was read, the
+client throws `WriteOutcomeUnknownError` instead of a plain
+`RequestTimeoutError` or `fetch`'s raw `TypeError` — those read as "safe to
+retry", and the model re-sent the email or booking (fleet audit 2026-09,
+cluster 7). It is an `McpToolError` with `outcomeUnknown: true`,
+`retrySafe: false` (so `retryOnceOnTimeout` never replays it), `timedOut` /
+`timeoutMs`, `method`, the original error as `cause`, and the hint *"The write
+may have happened — check before retrying; do not resend blindly."* Name the
+tool that checks with `writeOutcomeHint`. Reads, failures before anything was
+sent (a token that would not mint, a refused path), any HTTP response, and a
+caller's cancellation are unchanged. A request that is safe to repeat although
+it is a POST (a search) passes `idempotent: true`; `writeOutcomeUnknown: false`
+turns the behaviour off for a whole client. `createGraphqlClient` has the same
+rule (`GraphqlTransportError.outcomeUnknown`).
+
+```ts
+try {
+  await api.fetchJson('POST', '/messages', { body });
+} catch (err) {
+  if (err instanceof WriteOutcomeUnknownError) {
+    // Do NOT resend: tell the model to check the sent folder first.
+  }
+  throw err;
+}
+```
 
 `retry` also accepts `statuses` (e.g. `[429, 503]`), `honorRetryAfter: true`
 (sleep the response's `Retry-After` instead of the fixed `delayMs`, bounded by
 `maxRetryAfterMs`, default 30 s — hoisted from getyourguide / musicbrainz /
 viator / tripadvisor), and the standalone `parseRetryAfterMs(header)` for custom
 clients.
+
+#### URL safety — paths, base-URL overrides, links and redirects
+
+`createApiClient` keeps every request on `baseUrl`'s origin, and it also
+**refuses a path that URL normalisation would rewrite**: a dot segment
+(`/trails/../admin`, `%2e%2e`, `.%2e`, …), a backslash, a control character
+(U+0000–U+001F or DEL), or a trailing space, anywhere before the `?`. The URL
+parser deletes tab, LF and CR and strips trailing controls and spaces before
+it resolves dot segments, so `.\t.` and a final `.. ` would both become `..`. `encodeURIComponent('..')` is `..`, so an encoded tool argument
+could still walk the path to another endpoint with the credential attached
+(fleet audit 2026-09, cluster 5). The query string is not judged. Build paths
+with the `apiPath` tag, which encodes each value as exactly one segment and
+throws a `TypeError` on an empty, `.` or `..` value:
+
+```ts
+import { apiPath } from '@chrischall/mcp-utils';
+
+await api.fetchJson('GET', apiPath`/trails/${args.id}/reviews`);
+// args.id = '../admin'  → '/trails/..%2Fadmin/reviews' (one segment)
+// args.id = '..'        → TypeError before any request
+```
+
+`findPathHazard(path)` is the check itself, for clients that build URLs by
+hand.
+
+A base-URL override read from the environment goes through `readOriginEnv`,
+which accepts a bare `host[:port]` or an origin URL and returns
+`https://host[:port]`. It refuses, with a `UrlNotAllowedError` that names the
+variable but never its value: a non-http(s) scheme, `http:` (unless
+`requireHttps: false`, or `allowHttpLoopback: true` for localhost), userinfo,
+any path/query/fragment (so `https://https://host` is caught), and a host
+outside `allowHosts`. `default` is checked by the same rules.
+
+```ts
+import { readOriginEnv, assertAllowedUrl } from '@chrischall/mcp-utils';
+
+const baseUrl = readOriginEnv('GROUPON_API_URL', {
+  default: 'https://api.groupon.com',
+  allowHosts: ['api.groupon.com', '*.groupon.com'], // exact, *.suffix, or an anchored RegExp
+});
+
+// A link from a tool argument or an upstream response, before sending a cookie to it:
+const url = assertAllowedUrl(args.url, { allowHosts: ['www.thumbtack.com'] });
+```
+
+`assertAllowedUrl(url, { allowHosts, requireHttps?, allowHttpLoopback? })`
+returns the parsed `URL`, or throws a `UrlNotAllowedError` (with a `reason`
+code) that names only the host, never the path or query.
+
+Redirects: by default `createApiClient` leaves `fetch` to follow them, which
+re-sends the bearer wherever they point. Pass `redirect: 'same-origin'` to have
+the client follow them itself: each `Location` is checked against the base
+origin before anything is re-sent, and a hop to another origin, a scheme
+downgrade or a hop that adds userinfo throws `RedirectRefusedError`.
+`maxRedirects` defaults to 5 (`DEFAULT_MAX_REDIRECTS`) and must be a
+non-negative integer. A 303, or a 301/302
+after a POST, becomes a body-less GET, while 307/308 keep the method and body.
+`'manual'`, `'error'` and `'follow'` are passed straight to `fetch`.
+
+```ts
+const api = createApiClient({ baseUrl, getToken, redirect: 'same-origin' });
+```
+
+#### `fetchBounded` — for clients that cannot use `createApiClient`
+
+Cookie scrapers, multi-host clients, HTML readers and downloads don't fit a
+single-base bearer client, and a bare `fetch` gets none of its protections.
+`fetchBounded` is one call that does:
+
+```ts
+import { fetchBounded } from '@chrischall/mcp-utils';
+
+const { status, ok, headers, body } = await fetchBounded(
+  'https://files.example.com/report.pdf',
+  { headers: { Cookie: jar.header() } },       // any RequestInit, incl. its own signal
+  { read: 'bytes', maxBytes: 20 * 1024 * 1024, service: 'Example' },
+);
+```
+
+- **Timeout** `timeoutMs` (default 30 s, `DEFAULT_REQUEST_TIMEOUT_MS`; `0` /
+  `false` disables) runs from the request until the body has been read, raced
+  rather than trusted to the stream, and throws `RequestTimeoutError`.
+- **Cancellation**: `init.signal` and the ambient tool-call signal are both
+  honoured; a cancel rejects with the caller's own reason, never as a timeout.
+- **Size cap** `maxBytes`: a `Content-Length` over it is refused before
+  reading, and a body that grows past it is cancelled mid-stream —
+  `ResponseTooLargeError`.
+- **Body** `read`: `'text'` (default), `'json'` (empty → `undefined`;
+  unparseable → an `McpToolError` naming the status and content type, never
+  echoing the body), `'bytes'` (`Uint8Array`), or `'none'` (cancelled unread,
+  for a status check).
+
+It does not judge the status — a 404 comes back like a 200, body read — since
+these clients each decide what a non-2xx means. Every failure path cancels
+the body stream so the connection is released.
+
+`createThrottle({ minIntervalMs })` serializes calls and spaces their starts
+(a proactive rate limit, e.g. MusicBrainz's 1 req/s). A call that has not
+started yet is **cancellable**: when the ambient tool-call signal (or a
+per-call `throttle(fn, { signal })`) fires while it is queued or sleeping its
+interval, it rejects at once with the signal's reason, `fn` never runs, and
+the slot does not consume the interval. Once `fn` has started, the task owns
+its own cancellation.
 
 Request bodies: `body` is JSON (`application/json`, the default); `form`
 (a `URLSearchParams` or a plain record) is sent form-encoded as
@@ -836,6 +1039,31 @@ page (or that carries `cf-mitigated`) throws `EdgeBlockedError` rather than
 the API's own answer and its body is not read; any other 401 is still an
 `UnauthorizedError` exactly as before.
 
+A 2xx body that is not JSON (an HTML sign-in page or interstitial served with a
+200) makes `fetchJson` throw `UpstreamFormatError` (an `McpToolError` with a
+hint) instead of a raw `SyntaxError: Unexpected token '<'`. The message names
+the service, request, status and content type, never the body; the parser's
+error is kept as `cause`. A Cloudflare challenge (or `cf-mitigated`) served
+with a 200 is checked for first and throws `EdgeBlockedError`. Pass
+`expect: 'object' | 'array'` per request to also reject `null`, a scalar, the
+other container, an empty body or a 204 (`err.received` says which); without
+it, any valid JSON is returned and an empty body or 204 still resolves
+`undefined`. `parseJsonBody(text, { expect, service, method, path, status,
+headers })` is the same rule for a client that reads the body itself, such as
+an OAuth token exchange:
+
+```ts
+import { UpstreamFormatError, parseJsonBody } from '@chrischall/mcp-utils';
+
+const me = await api.fetchJson<Me>('GET', '/v1/me', { expect: 'object' });
+
+const res = await fetch(tokenUrl, { method: 'POST', body: form });
+const token = parseJsonBody<TokenResponse>(await res.text(), {
+  expect: 'object', service: 'Skylight', method: 'POST', path: '/oauth/token',
+  status: res.status, headers: res.headers,
+});
+```
+
 ```ts
 import { runBoundedBatch } from '@chrischall/mcp-utils';
 
@@ -881,6 +1109,10 @@ await fetch(url, { signal: currentCallSignal() });
 // For a spawned child, which passing a signal to fetch does nothing about:
 const done = killOnCancel(child);
 try { /* … */ } finally { done(); }   // the disposer is required
+
+// `createThrottle` slots and `createOAuth2Refresher` waits honour it too.
+// For a fetch that cannot go through createApiClient, `fetchBounded` adds a
+// timeout, a body-read deadline and a byte cap (see the `http` section).
 
 // For a long loop with no fetch to hang the signal on:
 for (const page of pages) { throwIfCancelled(); /* … */ }
@@ -1018,7 +1250,8 @@ through `reportProgress` before each re-read. Lifted from kiaaccess-mcp's
 ### `dates` — date-format converters
 
 `isoToDmy`, `dmyToIso`, `isoToCompactTimestamp`, `todayIso`, `toIsoDateUtc`,
-`shiftIsoDate`, `ensureSeconds`. For upstreams that don't speak
+`shiftIsoDate`, `ensureSeconds`, `resolveUserTimeZone`, `isValidTimeZone`,
+`USER_TIME_ZONE_ENV`. For upstreams that don't speak
 ISO 8601, so a server can keep its surface ISO (`yyyy-MM-dd`) and translate at
 the API boundary. Pair with `deepMapStringField` to normalize a date field
 across a whole response.
@@ -1028,6 +1261,25 @@ import { dmyToIso, isoToDmy, deepMapStringField } from '@chrischall/mcp-utils';
 
 const apiDate = isoToDmy('2025-08-28');                 // '28-08-2025' (request)
 deepMapStringField(payload, 'eventDate', dmyToIso);     // '28-08-2025' → '2025-08-28' (response)
+```
+
+**"Today" is the user's date, and hosted servers run in UTC.** `todayIso()`
+reads the calendar date in `opts.timeZone` → the fleet-wide **`MCP_USER_TZ`**
+env var (an IANA zone such as `America/New_York`) → the host's local zone. On
+a laptop the host zone is the user's own; on mcp-host every child runs in
+**UTC**, so without `MCP_USER_TZ` "today" rolls over at UTC midnight (7–8 pm
+US Eastern). Set `MCP_USER_TZ` per registration there, or pass `timeZone`
+when the zone comes from the account or venue. An invalid `MCP_USER_TZ` is
+ignored (host zone); an invalid explicit `timeZone` throws a `RangeError`.
+`resolveUserTimeZone({ timeZone?, env? })` returns the same choice (or
+`undefined` for "host zone") for your own `Intl` formatting.
+
+```ts
+import { todayIso } from '@chrischall/mcp-utils';
+
+todayIso();                                     // MCP_USER_TZ, else host-local
+todayIso({ timeZone: 'America/Los_Angeles' });  // the venue's date
+todayIso(new Date(2026, 0, 5));                 // legacy form: pinned clock (tests)
 ```
 
 ### `scrape` — SSR JSON-store & page extraction (zero-dep)
@@ -1113,6 +1365,12 @@ const offset = calculateOffset(page, size);
 const annotations = toolAnnotations({ readOnly: true });
 ```
 
+`IsoTime` accepts `H:MM` or `HH:MM` (24h) and always **parses to zero-padded
+`HH:MM`** — `'9:05'` comes out `'09:05'`, the form `normalizeTime` emits — so a
+validated time compares equal to an upstream's `09:05` slot. It stays a plain
+`ZodString` (the padding is a `.overwrite()`), so its JSON Schema keeps the
+`pattern`.
+
 `NumericIdString` (`/^\d+$/`) and `SafePathSegment` (rejects `/`, `..`, `?`,
 `#`, and whitespace) harden caller-supplied ids that get interpolated into
 request paths — defense-in-depth against path traversal and query/fragment
@@ -1137,6 +1395,12 @@ discard its only live copy.
 If `onRotate` throws, the exchange is not retried; the refresher keeps the new
 token and throws `OAuth2RotationPersistError` (carrying the `result`), which
 `TokenManager` surfaces without wiping its store.
+Each exchange is bounded by `timeout` (default 30 s, body read included; `0` /
+`false` disables) and throws `RequestTimeoutError` on expiry. A cancelled tool
+call is released at once — and one already cancelled never starts an exchange
+— but an exchange already in flight is never aborted for it: the POST may have
+rotated the refresh token upstream, and it is shared with every coalesced
+caller, so it finishes (or times out) and `onRotate` still runs.
 
 `createCachedTokenSource({ mint, bufferMs })` caches any minted token until
 shortly before expiry with a single-flight mint and an `invalidate()` hook for
@@ -1664,7 +1928,13 @@ registerCredentialHealthcheckTool({
 Arms: `ok`, `no_credential`, `credential_rejected` (401/403),
 `edge_blocked`, `session_expired`, `verification_pending`, `timeout`, `http`,
 `transport`, `unknown` — with the same `classifyThrown` / `hints` hooks as the
-bridge factory.
+bridge factory. Every failure arm is an `McpToolErrorKind`, so a thrown error
+that DECLARES a `kind` (see [`errors`](#errors--helpful-errors)) names its arm
+directly: the order is `classifyThrown`, then `edge_blocked`, then the declared
+kind, then the status ladder (status read with `errorStatusOf`, so a 401 on
+a wrapped `cause` counts), then message matching. A declared kind also
+replaces the `no_credential` fallback for a `resolveCredential` throw — a
+rejected OAuth2 refresh in the resolver reports `credential_rejected`.
 
 `edge_blocked` is decided BEFORE the status: a CDN/WAF block page answers 403
 exactly as a rejecting API does, and reporting it as `credential_rejected`
@@ -1897,6 +2167,51 @@ This repo also hosts composite GitHub Actions the MCP fleet reuses, under
   ```yaml
   - uses: chrischall/workflows/.github/actions/install-mcp-publisher@main
   ```
+
+## Fleet lint scripts
+
+`scripts/` holds the lints chrischall/workflows' `reusable-mcp-ci.yml` runs
+against every fleet repo (read from a pinned release tag of this repo; the
+scripts are not in the npm package, so run them from a clone).
+
+`node scripts/audit-annotations.mjs <repo>/dist/index.js` serves the built
+server over stdio, prints each tool's effective class, and **fails** on a
+boolean `confirm` input or an `--expect <n>` count mismatch. It also prints
+GitHub `::warning::` lines for three surface checks, which **do not change the
+exit code unless you pass `--strict`**:
+
+- **annotations** — a tool that is not `readOnlyHint: true` without an
+  explicit boolean `destructiveHint` (the spec default is `true`, so silence
+  publishes it as destructive), and any tool without an explicit
+  `openWorldHint` (local-only tools declare `openWorld: false`).
+- **manifest-tools** — when a `manifest.json` sits beside the server's
+  `package.json`: its `tools[]` names vs the served `tools/list`, both
+  directions (`tools_generated: true` limits it to stale entries).
+- **env** — literal env keys the built code reads (`readEnvVar`,
+  `requireEnvVar`, `parseBoolEnv`, `readPortEnv`, `readIntEnv`,
+  `readTtlMsEnv`, `process.env.X`) vs `manifest.json`
+  (`server.mcp_config.env` + `user_config`), `server.json`
+  (`packages[].environmentVariables`) and `.mcp.json`: undeclared reads, dead
+  declarations, a var marked required that the code only reads optionally, a
+  `user_config` entry nothing passes to the server, and a cwd-relative script
+  path in `.mcp.json` (anchor it with `${CLAUDE_PLUGIN_ROOT}`). `MCP_*` keys
+  (this library's own knobs) and runtime vars (`NODE_ENV`, `HOME`, …) are
+  ignored. A key built at runtime (`` readEnvVar(`${P}_TOKEN`) ``) is invisible.
+
+The env check reads every `.js`/`.mjs`/`.cjs` under the entry's directory,
+skipping `node_modules`, dot-directories, `test`/`tests`/`__tests__`,
+`coverage` and `*.test.*`/`*.spec.*` files. A file or directory it cannot read
+(a dangling symlink, `EACCES`) becomes a warning, not a crash, and so does any
+other failure inside the surface checks: they can never change the exit code
+without `--strict`.
+
+These warnings reach fleet PRs only after a release of this repo that carries
+them ships **and** `MCP_UTILS_LINT_TAG` in chrischall/workflows'
+`reusable-mcp-ci.yml` is bumped past `v2.7.0`, which is the tag it pins today.
+Until then, run the script from a clone to see them.
+
+`node scripts/audit-fs-confinement.mjs <repo>` is the source lint described
+under [`fs`](#fs--streaming-file-helpers-uploads--binary-output).
 
 ## Development
 

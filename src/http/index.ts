@@ -19,14 +19,18 @@
 
 import { responseHeader } from '../internal/headers.js';
 import { currentCallSignal, withAmbientCancellation } from '../cancel/index.js';
-import { truncateErrorMessage } from '../errors/index.js';
+import { McpToolError, UpstreamFormatError, messageOf, truncateErrorMessage } from '../errors/index.js';
+import type { ExpectedJsonShape, McpToolErrorKind, UpstreamBodyKind } from '../errors/index.js';
 import { isCloudflareChallenge } from '../scrape/index.js';
 
 export * from './throttle.js';
 export * from './response-cache.js';
 export * from './net-atoms.js';
+export * from './fetch-bounded.js';
+export * from './url-safety.js';
 
 import { parseRetryAfterMs } from './net-atoms.js';
+import { RedirectRefusedError, findPathHazard } from './url-safety.js';
 import { retryAfterToMs } from '../internal/retry-after.js';
 
 // ---------------------------------------------------------------------------
@@ -144,10 +148,58 @@ export interface ApiClientOptions {
    * bounded by an {@link AbortController} — from the request until its body
    * has been read, so a body that stalls after the headers is bounded too; on
    * expiry it throws a {@link RequestTimeoutError} instead of hanging until the
-   * host kills the tool call. A 429 retry gets a fresh timeout. Omit/0 to
-   * disable (default).
+   * host kills the tool call (a {@link WriteOutcomeUnknownError} for a sent
+   * write — see {@link writeOutcomeUnknown}). A 429 retry gets a fresh timeout.
+   *
+   * Defaults to {@link DEFAULT_REQUEST_TIMEOUT_MS} (30 s), matching
+   * `createGraphqlClient`. Before 2.16 the default was unbounded, and the
+   * clients that never passed one (gemini, simplisafe, tripadvisor's web
+   * client — fleet audit 2026-09, cluster 1) held a tool call open on a hung
+   * upstream until the host killed it. Pass `0` or `false` to disable — the
+   * caller's cancellation still applies either way. A download that
+   * legitimately takes longer passes a larger value.
    */
-  timeout?: number;
+  timeout?: number | false;
+  /**
+   * How redirects are handled. Omitted (the default) leaves `fetch`'s own
+   * behaviour unchanged: it follows them, re-sending the credential to
+   * wherever they point. `'manual'` and `'error'` are passed straight to
+   * `fetch`.
+   *
+   * `'same-origin'` follows redirects itself (`fetch` is called with
+   * `redirect: 'manual'`) and re-checks every `Location` against the base
+   * origin BEFORE re-sending: a hop to another origin, a scheme downgrade or
+   * a hop that adds userinfo throws {@link RedirectRefusedError} and nothing
+   * is sent to it (fleet audit 2026-09, cluster 6: accessoticketing #322,
+   * thumbtack #768). A 303, or a 301/302 answering a POST, becomes a
+   * body-less GET; 307/308 keep the method and body. Needs a server-side
+   * `fetch` (Node/undici) that exposes the 3xx and its `Location`.
+   */
+  redirect?: 'same-origin' | 'manual' | 'error' | 'follow';
+  /**
+   * With `redirect: 'same-origin'`, the most hops followed per request.
+   * Default 5. Must be a non-negative integer (a `TypeError` otherwise).
+   */
+  maxRedirects?: number;
+  /**
+   * Report a write whose outcome is unknown as such. On (the default), a
+   * request whose method is not safe (anything but GET / HEAD / OPTIONS /
+   * TRACE) that was SENT but timed out, lost its connection, or broke off
+   * while its response body was read throws {@link WriteOutcomeUnknownError}
+   * instead of a plain {@link RequestTimeoutError} or `fetch`'s raw
+   * `TypeError` — both of which read as "safe to retry", and the model
+   * re-sent the email or booking (fleet audit 2026-09, cluster 7). Mirrors
+   * `createGraphqlClient`'s `outcomeUnknown`. Pass `false` to keep the plain
+   * errors for every request; {@link RequestOptions.idempotent} does it for
+   * one (a search sent as POST).
+   */
+  writeOutcomeUnknown?: boolean;
+  /**
+   * The `hint` on a {@link WriteOutcomeUnknownError}, e.g. to name the read
+   * tool that checks whether the write landed. Defaults to
+   * {@link DEFAULT_WRITE_OUTCOME_HINT}.
+   */
+  writeOutcomeHint?: string;
 }
 
 /**
@@ -214,6 +266,23 @@ export interface RequestOptions {
   headers?: Record<string, string>;
   /** Query params appended via {@link buildQueryString} when present. */
   query?: Record<string, unknown>;
+  /**
+   * `fetchJson` only: the JSON shape the body must have. When set, a `null`,
+   * a scalar, the other container, an empty body or a 204 throws
+   * {@link UpstreamFormatError} instead of being returned. Omitted (the
+   * default), any valid JSON is returned and an empty body or 204 resolves
+   * `undefined`, exactly as before. Never sent upstream; `fetchHtml` and
+   * `fetchRaw` ignore it. Shape validation beyond the container kind belongs
+   * to `parseLenient`.
+   */
+  expect?: ExpectedJsonShape;
+  /**
+   * This request is safe to repeat even though its method is not (a search or
+   * lookup sent as POST): a timeout or dropped connection then throws the
+   * plain {@link RequestTimeoutError} / `fetch` error, as a read does, never
+   * {@link WriteOutcomeUnknownError}. Never sent upstream.
+   */
+  idempotent?: boolean;
 }
 
 /** The minimal client surface returned by {@link createApiClient}. */
@@ -221,7 +290,10 @@ export interface ApiClient {
   /**
    * Authenticated JSON request. Returns the parsed body, or `undefined` for a
    * 204 / empty body. Throws on 401 (unauthorized), exhausted-429, and other
-   * non-2xx responses (with a redacted, truncated message).
+   * non-2xx responses (with a redacted, truncated message). A 2xx body is read
+   * by {@link parseJsonBody}: a non-JSON body throws {@link UpstreamFormatError}
+   * (or {@link EdgeBlockedError} for a CDN challenge), and `opts.expect`
+   * rejects a body of the wrong shape the same way.
    */
   fetchJson: <T = unknown>(method: string, path: string, opts?: RequestOptions) => Promise<T>;
   /** Authenticated request returning the raw response body as text (e.g. HTML scrapes). */
@@ -253,9 +325,39 @@ const DEFAULT_RETRY: RetryPolicy = { count: 1, delayMs: 2000 };
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-/** Thrown for an upstream 401. Carries the status so callers can trigger a re-auth. */
+/**
+ * The per-attempt timeout {@link createApiClient} (and {@link fetchBounded})
+ * apply when the caller names none: 30 s, the same budget
+ * `createGraphqlClient` has always used, so every fleet transport bounds a
+ * hung upstream the same way.
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+/** Default hop limit for `createApiClient({ redirect: 'same-origin' })`. */
+export const DEFAULT_MAX_REDIRECTS = 5;
+
+/** The statuses `redirect: 'same-origin'` follows (when they carry a `Location`). */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/** Cancel a response body we will not read. Never throws (a custom fetchImpl's body may be odd). */
+function cancelBody(res: Response): void {
+  try {
+    const body = res.body as { cancel?: () => Promise<void> } | null | undefined;
+    body?.cancel?.()?.catch(() => {});
+  } catch {
+    // nothing left to release
+  }
+}
+
+/**
+ * Thrown for an upstream 401. Carries the status so callers can trigger a
+ * re-auth, and `kind: 'credential_rejected'` (an `McpToolErrorKind`) so a
+ * classifier reads it without matching the message.
+ */
 export class UnauthorizedError extends Error {
   readonly status = 401;
+  /** Always `'credential_rejected'` unless a subclass says otherwise. */
+  readonly kind: McpToolErrorKind = 'credential_rejected';
   constructor(service: string) {
     super(`Unauthorized (401) from ${service} — the token is missing, invalid, or expired.`);
     this.name = 'UnauthorizedError';
@@ -270,6 +372,8 @@ export class UnauthorizedError extends Error {
  */
 export class RateLimitedError extends Error {
   readonly status = 429;
+  /** `'http'`: the far side answered, with a 429 (see `status`). */
+  readonly kind: McpToolErrorKind = 'http';
   readonly retryAfterMs: number | undefined;
   constructor(service: string, retryAfterMs?: number) {
     super(`Rate limited (429) by ${service} after retries.`);
@@ -279,9 +383,11 @@ export class RateLimitedError extends Error {
   }
 }
 
-/** Thrown when a request exceeds {@link ApiClientOptions.timeout}. */
+/** Thrown when a request exceeds {@link ApiClientOptions.timeout}. Its `kind` is `'timeout'`. */
 export class RequestTimeoutError extends Error {
   readonly timeoutMs: number;
+  /** Always `'timeout'` unless a subclass says otherwise. */
+  readonly kind: McpToolErrorKind = 'timeout';
   constructor(service: string, timeoutMs: number) {
     super(`Request to ${service} timed out after ${timeoutMs}ms.`);
     this.name = 'RequestTimeoutError';
@@ -289,6 +395,62 @@ export class RequestTimeoutError extends Error {
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
+
+/** The default `hint` on a {@link WriteOutcomeUnknownError}. */
+export const DEFAULT_WRITE_OUTCOME_HINT =
+  'The write may have happened — check before retrying; do not resend blindly.';
+
+/**
+ * A write (a request whose method is not safe) was SENT, but no usable
+ * response came back: it timed out, the connection dropped, or the response
+ * body broke off. The server may already have committed it, so the outcome is
+ * UNKNOWN, and re-sending it blindly can duplicate an email, a booking or a
+ * payment (fleet audit 2026-09, cluster 7: opentable #632, honeybook #1023,
+ * office-outlook #1073, vibo #1135, untappd #1132).
+ *
+ * An {@link McpToolError}, so its {@link McpToolError.hint} ("check before
+ * retrying") reaches the model through `wrapToolError` / `errorResult`. It
+ * still DECLARES a timeout when one caused it (`timedOut: true`, the marker
+ * `isTimeoutError` reads), but carries `retrySafe: false`, so
+ * `retryOnceOnTimeout` never replays it. Mirrors `GraphqlTransportError`'s
+ * `outcomeUnknown` and fetchproxy's `FetchproxyTimeoutError.retrySafe`.
+ *
+ * Thrown by {@link createApiClient} (see
+ * {@link ApiClientOptions.writeOutcomeUnknown}); exported so a hand-rolled
+ * client can throw the same thing.
+ */
+export class WriteOutcomeUnknownError extends McpToolError {
+  /** Always `true`: whether the write happened is not known. */
+  readonly outcomeUnknown = true as const;
+  /** Always `false`: never replay this request without checking first. */
+  readonly retrySafe = false as const;
+  /** `true` when the request's timeout expired; `false` for a dropped connection or broken body. */
+  readonly timedOut: boolean;
+  /** The timeout that expired, when {@link timedOut}. */
+  readonly timeoutMs: number | undefined;
+  /** The request method, upper-cased. */
+  readonly method: string;
+
+  constructor(service: string, method: string, opts: { timeoutMs?: number; cause?: unknown; hint?: string } = {}) {
+    const verb = method.toUpperCase();
+    const what =
+      opts.timeoutMs !== undefined
+        ? `${verb} to ${service} timed out after ${opts.timeoutMs}ms`
+        : `${verb} to ${service} failed: ${truncateErrorMessage(messageOf(opts.cause), 200)}`;
+    super(`${what} — the write may already have been applied (outcome is unknown).`, {
+      hint: opts.hint ?? DEFAULT_WRITE_OUTCOME_HINT,
+      cause: opts.cause,
+      kind: opts.timeoutMs !== undefined ? 'timeout' : 'transport',
+    });
+    this.name = 'WriteOutcomeUnknownError';
+    this.timedOut = opts.timeoutMs !== undefined;
+    this.timeoutMs = opts.timeoutMs;
+    this.method = verb;
+  }
+}
+
+/** RFC 9110 safe methods: a request with one of these never writes. */
+const SAFE_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE']);
 
 /**
  * Thrown by {@link ApiClient.fetchJson} / {@link ApiClient.fetchHtml} for a
@@ -345,6 +507,8 @@ export class UpstreamHttpError extends ApiError {
 export class EdgeBlockedError extends ApiError {
   /** Which edge refused the request, e.g. `'CloudFront'` or `'Cloudflare'`. */
   readonly vendor: string;
+  /** Always `'edge_blocked'`: the credential was never judged. */
+  readonly kind: McpToolErrorKind = 'edge_blocked';
   /**
    * @param where The service the request was for, and — when the thrower knows
    *   it — the method and path, which the message names.
@@ -461,6 +625,89 @@ export function detectEdgeBlock(input: {
   return null;
 }
 
+/** Options for {@link parseJsonBody}. All optional; the request fields only enrich the error message. */
+export interface ParseJsonBodyOptions {
+  /**
+   * The JSON shape the body must have. When set, `null`, a scalar, the other
+   * container or an empty body throws {@link UpstreamFormatError}. Omitted,
+   * any valid JSON is returned and an empty body yields `undefined`.
+   */
+  expect?: ExpectedJsonShape;
+  /** The upstream's display name, for the error message. */
+  service?: string;
+  /** The request method, for the error message. */
+  method?: string;
+  /** The request path, for the error message. */
+  path?: string;
+  /**
+   * The response status. Also passed to {@link detectEdgeBlock}, so on a 2xx
+   * only a challenge (or `cf-mitigated`) counts as an edge block.
+   */
+  status?: number;
+  /** The response headers: read for `cf-mitigated` and, absent `contentType`, the `Content-Type`. */
+  headers?: EdgeBlockHeaders;
+  /** The response `Content-Type`, for the error message. */
+  contentType?: string;
+}
+
+function jsonKind(value: unknown): Exclude<UpstreamBodyKind, 'non-json' | 'empty'> {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  return typeof value as 'object' | 'string' | 'number' | 'boolean';
+}
+
+/**
+ * Parse an upstream response body as JSON, turning every way it can fail into
+ * a typed, message-safe error instead of a raw `SyntaxError` (whose message
+ * quotes the body) or a later `TypeError` on `null`:
+ *
+ *  - a body that is not JSON is first checked with {@link detectEdgeBlock}
+ *    (a Cloudflare challenge served with a 200 becomes {@link EdgeBlockedError});
+ *    otherwise it throws {@link UpstreamFormatError} with `received: 'non-json'`,
+ *    naming the service, request, status and content type but never the body;
+ *  - with `expect`, an empty body, `null`, a scalar or the wrong container
+ *    throws {@link UpstreamFormatError} too.
+ *
+ * An empty (or whitespace-only) body without `expect` returns `undefined`, the
+ * same contract `fetchJson` has for a 204. `fetchJson` runs every 2xx body
+ * through this; export it for hand-rolled clients and OAuth token exchanges
+ * that read the body themselves (skylight, ofw).
+ */
+export function parseJsonBody<T = unknown>(text: string, opts: ParseJsonBodyOptions = {}): T {
+  const contentType = opts.contentType ?? headerOf(opts.headers, 'content-type');
+  const details = {
+    service: opts.service,
+    method: opts.method,
+    path: opts.path,
+    status: opts.status,
+    contentType,
+    expected: opts.expect,
+  };
+  if (text.trim().length === 0) {
+    if (opts.expect === undefined) return undefined as T;
+    throw new UpstreamFormatError({ ...details, received: 'empty' });
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch (cause) {
+    const edge = detectEdgeBlock({ body: text, headers: opts.headers, status: opts.status });
+    if (edge) {
+      throw new EdgeBlockedError(opts.status ?? 200, edge.vendor, {
+        service: opts.service ?? 'the upstream service',
+        method: opts.method,
+        path: opts.path,
+      });
+    }
+    throw new UpstreamFormatError({ ...details, expected: undefined, received: 'non-json', cause });
+  }
+  if (opts.expect !== undefined) {
+    const kind = jsonKind(value);
+    if (kind !== opts.expect) throw new UpstreamFormatError({ ...details, received: kind });
+  }
+  return value as T;
+}
+
 /**
  * The error a non-2xx response becomes: {@link EdgeBlockedError} when an edge
  * refused it, otherwise the {@link ApiError} the client has always thrown.
@@ -532,7 +779,14 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   const sleep = opts.sleep ?? defaultSleep;
   const unauthorized = (): Error => (opts.onUnauthorized ? opts.onUnauthorized() : new UnauthorizedError(service));
   const retryStatuses = retry.statuses ?? [429];
-  const timeoutMs = opts.timeout;
+  const timeoutMs = opts.timeout === false ? 0 : (opts.timeout ?? DEFAULT_REQUEST_TIMEOUT_MS);
+  const redirectMode = opts.redirect;
+  const maxRedirects = opts.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
+  const reportWriteOutcome = opts.writeOutcomeUnknown !== false;
+  // NaN would make `hops >= maxRedirects` never true: an endless redirect loop.
+  if (!Number.isSafeInteger(maxRedirects) || maxRedirects < 0) {
+    throw new TypeError(`createApiClient: maxRedirects must be a non-negative integer, got ${String(maxRedirects)}.`);
+  }
 
   // Default: `Authorization: Bearer <token>`. With `tokenHeader`, the raw
   // token goes in that named header instead (no `Bearer ` prefix).
@@ -552,7 +806,34 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     done: () => void;
     /** Rejects with RequestTimeoutError if the timer fires; never resolves. */
     expired: Promise<never> | undefined;
+    /** Whether this attempt's own timer has fired. */
+    timedOut: () => boolean;
   }
+
+  /**
+   * Per-call record of whether a request actually left: set just before
+   * `fetch` is called with a live signal. A failure before that (a token
+   * that would not mint, a refused path, a timer that fired while the token
+   * was still minting) sent nothing, so it can never be outcome-unknown.
+   */
+  interface Dispatch {
+    sent: boolean;
+  }
+
+  /**
+   * Errors that came out of the TRANSPORT — `fetch` itself, or reading a
+   * response body — as opposed to whatever else runs in between (a
+   * `tokenManager` refresh, a redirect refusal, JSON parsing). Only these,
+   * and this client's own {@link RequestTimeoutError}, make a write's
+   * outcome unknown.
+   */
+  const transportFailures = new WeakSet<object>();
+  const markTransportFailure = (err: unknown): void => {
+    // A cancellation is not a failure: the caller's abort is rethrown untouched.
+    if (typeof err === 'object' && err !== null && (err as { name?: unknown }).name !== 'AbortError') {
+      transportFailures.add(err);
+    }
+  };
 
   // Bound `run` with an AbortController when a timeout is configured, mapping the
   // abort to a RequestTimeoutError. No timeout → no timer (the caller's
@@ -568,9 +849,9 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     // NO TIMEOUT is no longer "no signal": a service configured without one
     // still honours the caller, which is the case where it matters most,
     // since nothing else was ever going to stop that request.
-    if (timeoutMs == null || timeoutMs <= 0) {
+    if (timeoutMs <= 0) {
       const res = await run(withAmbientCancellation(undefined));
-      return { res, done: () => {}, expired: undefined };
+      return { res, done: () => {}, expired: undefined, timedOut: () => false };
     }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -596,7 +877,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     });
     // Only observed if a body read is racing it; never an unhandled rejection.
     expired.catch(() => {});
-    return { res, done: () => clearTimeout(timer), expired };
+    return { res, done: () => clearTimeout(timer), expired, timedOut: () => controller.signal.aborted };
   }
 
   /**
@@ -610,12 +891,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
    */
   function discard(attempt: Attempt): void {
     attempt.done();
-    try {
-      const body = attempt.res.body as { cancel?: () => Promise<void> } | null | undefined;
-      body?.cancel?.()?.catch(() => {});
-    } catch {
-      // A body that refuses cancellation has nothing left to release.
-    }
+    cancelBody(attempt.res);
   }
 
   /**
@@ -629,9 +905,17 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
       if (!attempt.expired) return await read(attempt.res);
       return await Promise.race([read(attempt.res), attempt.expired]);
     } catch (err) {
-      if (err instanceof RequestTimeoutError) {
-        attempt.res.body?.cancel().catch(() => {});
+      // The body's own abort listener was registered (at fetch time) before
+      // the timer's, so when OUR timer fires its `AbortError` can win the
+      // race: that is still this timeout, not a caller cancellation.
+      const timeout =
+        err instanceof RequestTimeoutError ||
+        (err instanceof Error && err.name === 'AbortError' && attempt.timedOut());
+      if (timeout) {
+        cancelBody(attempt.res);
+        throw err instanceof RequestTimeoutError ? err : new RequestTimeoutError(service, timeoutMs);
       }
+      markTransportFailure(err);
       throw err;
     } finally {
       attempt.done();
@@ -660,6 +944,20 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
    * can neither introduce nor change it. Checked before any token is minted.
    */
   function resolveUrl(path: string, query: string): string {
+    // Dot segments and backslashes first: they stay on the base ORIGIN, so the
+    // origin check below never saw them, but normalisation rewrites them —
+    // `/trails/../admin` is sent as `/admin` with the credential attached
+    // (fleet audit 2026-09, cluster 5). `encodeURIComponent('..')` is `..`,
+    // so encoding the value was never enough; see `apiPath`.
+    const hazard = findPathHazard(path);
+    if (hazard !== undefined) {
+      throw new Error(
+        // Quote only the path part: this fires on hostile input, and the
+        // query may carry values that do not belong in a log line.
+        `Refusing request to ${service}: path ${JSON.stringify(path.split(/[?#]/, 1)[0])} contains a ${hazard}, which URL ` +
+          'normalisation would rewrite. Build paths with apiPath`...` so each value is one encoded segment.',
+      );
+    }
     const url = `${base}${path}${query}`;
     if (baseOrigin === undefined) return url; // unparseable base: nothing to compare against
     let parsed: URL;
@@ -681,7 +979,34 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     return url;
   }
 
-  async function send(method: string, path: string, opt: RequestOptions): Promise<Attempt> {
+  /**
+   * Resolve a redirect's `Location` against the URL that returned it and
+   * refuse it unless it stays on the base origin with the base's own
+   * userinfo — the same rule {@link resolveUrl} applies to a path. The message
+   * names only the target origin: the rest may carry a token.
+   */
+  function sameOriginHop(location: string, from: string): string {
+    let next: URL;
+    try {
+      next = new URL(location, from);
+    } catch {
+      throw new RedirectRefusedError(`Refusing redirect from ${service}: the Location header is not a valid URL.`);
+    }
+    if (
+      baseOrigin === undefined ||
+      next.origin !== baseOrigin ||
+      next.username !== baseParts?.username ||
+      next.password !== baseParts?.password
+    ) {
+      throw new RedirectRefusedError(
+        `Refusing redirect from ${service} to ${next.origin}: it leaves the base origin ${baseOrigin ?? '(unparseable)'}, ` +
+          'and following it would re-send the credential there.',
+      );
+    }
+    return next.href;
+  }
+
+  async function send(method: string, path: string, opt: RequestOptions, dispatch: Dispatch): Promise<Attempt> {
     const { body: reqBody, contentType } = encodeBody(opt);
     const query = opt.query ? buildQueryString(opt.query) : '';
     const url = resolveUrl(path, query);
@@ -689,19 +1014,53 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
 
     // One fetch with the given token; Authorization comes last from the auth
     // mechanism, then per-request headers can still override it if needed.
-    const fetchWith = (token: string | undefined, signal?: AbortSignal): Promise<Response> =>
-      doFetch(url, {
-        method,
+    const fetchHop = (
+      hopUrl: string,
+      hopMethod: string,
+      withBody: boolean,
+      token: string | undefined,
+      signal?: AbortSignal,
+    ): Promise<Response> => {
+      // A fetch handed an already-aborted signal rejects without sending.
+      if (!signal?.aborted) dispatch.sent = true;
+      return doFetch(hopUrl, {
+        method: hopMethod,
         headers: {
           Accept: 'application/json',
-          ...(contentType !== undefined ? { 'Content-Type': contentType } : {}),
+          ...(withBody && contentType !== undefined ? { 'Content-Type': contentType } : {}),
           ...opts.baseHeaders,
           ...authHeader(token || undefined),
           ...opt.headers,
         },
         ...(signal ? { signal } : {}),
-        ...bodyInit,
+        ...(redirectMode !== undefined ? { redirect: redirectMode === 'same-origin' ? 'manual' : redirectMode } : {}),
+        ...(withBody ? bodyInit : {}),
+      }).catch((err: unknown) => {
+        markTransportFailure(err);
+        throw err;
       });
+    };
+
+    const fetchWith = async (token: string | undefined, signal?: AbortSignal): Promise<Response> => {
+      if (redirectMode !== 'same-origin') return fetchHop(url, method, true, token, signal);
+      let hopUrl = url;
+      let hopMethod = method;
+      let withBody = true;
+      for (let hops = 0; ; hops += 1) {
+        const res = await fetchHop(hopUrl, hopMethod, withBody, token, signal);
+        const location = REDIRECT_STATUSES.has(res.status) ? responseHeader(res, 'location') : undefined;
+        if (location === undefined || location === null) return res;
+        cancelBody(res);
+        if (hops >= maxRedirects) {
+          throw new RedirectRefusedError(`Refusing request to ${service}: too many redirects (more than ${maxRedirects}).`);
+        }
+        hopUrl = sameOriginHop(location, hopUrl);
+        if (res.status === 303 || ((res.status === 301 || res.status === 302) && hopMethod === 'POST')) {
+          if (hopMethod !== 'HEAD') hopMethod = 'GET';
+          withBody = false;
+        }
+      }
+    };
 
     // tokenManager (reactive refresh + 401-replay) takes precedence over getToken.
     // Each attempt is wrapped by withTimeout, so the abort signal reaches fetch
@@ -787,28 +1146,72 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     return opts.onRateLimited({ status: res.status, retryAfter, retryAfterMs, edgeBlock, method, path });
   }
 
-  async function fetchJson<T>(method: string, path: string, opt: RequestOptions = {}): Promise<T> {
-    const attempt = await send(method, path, opt);
+  /**
+   * Run one client call, turning a SENT write's transport failure into
+   * {@link WriteOutcomeUnknownError}. Everything else — a read, an
+   * `idempotent` request, a failure before anything was sent, any HTTP
+   * response, a caller's cancellation — propagates exactly as before.
+   */
+  async function guardWrite<T>(
+    method: string,
+    opt: RequestOptions,
+    call: (dispatch: Dispatch) => Promise<T>,
+  ): Promise<T> {
+    const dispatch: Dispatch = { sent: false };
+    try {
+      return await call(dispatch);
+    } catch (err) {
+      const write = reportWriteOutcome && opt.idempotent !== true && !SAFE_METHODS.has(method.toUpperCase());
+      if (!write || !dispatch.sent) throw err;
+      if (err instanceof RequestTimeoutError) {
+        throw new WriteOutcomeUnknownError(service, method, {
+          timeoutMs: err.timeoutMs,
+          cause: err,
+          hint: opts.writeOutcomeHint,
+        });
+      }
+      if (typeof err === 'object' && err !== null && transportFailures.has(err)) {
+        throw new WriteOutcomeUnknownError(service, method, { cause: err, hint: opts.writeOutcomeHint });
+      }
+      throw err;
+    }
+  }
+
+  const fetchJson = <T>(method: string, path: string, opt: RequestOptions = {}): Promise<T> =>
+    guardWrite(method, opt, (dispatch) => fetchJsonOnce<T>(method, path, opt, dispatch));
+  const fetchHtml = (method: string, path: string, opt: RequestOptions = {}): Promise<string> =>
+    guardWrite(method, opt, (dispatch) => fetchHtmlOnce(method, path, opt, dispatch));
+  const fetchRaw = (method: string, path: string, opt: RequestOptions = {}): Promise<RawApiResponse> =>
+    guardWrite(method, opt, (dispatch) => fetchRawOnce(method, path, opt, dispatch));
+
+  async function fetchJsonOnce<T>(method: string, path: string, opt: RequestOptions, dispatch: Dispatch): Promise<T> {
+    const attempt = await send(method, path, opt, dispatch);
     const res = attempt.res;
 
     if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);
     if (res.status === 429) throw await rateLimitedError(attempt, method, path);
     if (res.status === 204) {
       discard(attempt);
-      return undefined as T;
+      return parseJsonBody<T>('', { expect: opt.expect, service, method, path, status: 204 });
     }
 
     const text = await readBody(attempt, (r) => r.text());
     if (!res.ok) {
       throw httpError(res, text, method, path, service);
     }
-    if (text.length === 0) return undefined as T;
-    return JSON.parse(text) as T;
+    return parseJsonBody<T>(text, {
+      expect: opt.expect,
+      service,
+      method,
+      path,
+      status: res.status,
+      headers: res.headers,
+    });
   }
 
-  async function fetchHtml(method: string, path: string, opt: RequestOptions = {}): Promise<string> {
+  async function fetchHtmlOnce(method: string, path: string, opt: RequestOptions, dispatch: Dispatch): Promise<string> {
     const headers = { Accept: 'text/html,*/*', ...opt.headers };
-    const attempt = await send(method, path, { ...opt, headers });
+    const attempt = await send(method, path, { ...opt, headers }, dispatch);
     const res = attempt.res;
 
     if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);
@@ -821,9 +1224,14 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     return text;
   }
 
-  async function fetchRaw(method: string, path: string, opt: RequestOptions = {}): Promise<RawApiResponse> {
+  async function fetchRawOnce(
+    method: string,
+    path: string,
+    opt: RequestOptions,
+    dispatch: Dispatch,
+  ): Promise<RawApiResponse> {
     const headers = { Accept: '*/*', ...opt.headers };
-    const attempt = await send(method, path, { ...opt, headers });
+    const attempt = await send(method, path, { ...opt, headers }, dispatch);
     const res = attempt.res;
 
     if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);

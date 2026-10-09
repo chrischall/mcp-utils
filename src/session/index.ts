@@ -47,6 +47,7 @@ import { randomBytes, createHmac } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { textResult } from '../response/index.js';
 import { readEnvVar } from '../config/index.js';
+import { McpToolError } from '../errors/index.js';
 import { ApiError, EdgeBlockedError, RateLimitedError, RequestTimeoutError } from '../http/index.js';
 import { responseEdgeBlock } from '../internal/edge-block.js';
 
@@ -1543,7 +1544,11 @@ export class TokenManager {
   /** Spend `rt`, then install and persist what comes back. */
   private async exchange(rt: string | undefined): Promise<void> {
     if (rt === undefined) {
-      throw new Error('TokenManager: cannot refresh — no refresh token is available.');
+      // An McpToolError (still an Error, same message) so its `kind` says
+      // "nothing to authenticate with" to a classifier, not "rejected".
+      throw new McpToolError('TokenManager: cannot refresh — no refresh token is available.', {
+        kind: 'no_credential',
+      });
     }
     const tok = await this.refreshFn(rt);
     this.tokens = {

@@ -68,6 +68,26 @@ describe('readEnvVar', () => {
   it('does not apply the default when a real value is present', () => {
     expect(readEnvVar('K', { env: { K: 'real' }, default: 'd' })).toBe('real');
   });
+
+  describe('{ trim: false } (secrets)', () => {
+    it('returns the value byte-for-byte, keeping surrounding whitespace', () => {
+      // A password may legitimately start or end with a space (schoolpass #691).
+      expect(readEnvVar('PW', { env: { PW: ' p4ss ' }, trim: false })).toBe(' p4ss ');
+      expect(readEnvVar('PW', { env: { PW: 'p4ss\t' }, trim: false })).toBe('p4ss\t');
+    });
+
+    it('still treats empty, whitespace-only, sentinels and placeholders as unset', () => {
+      for (const v of ['', '   ', 'undefined', ' null ', '${PW}', ' ${PW} ']) {
+        expect(readEnvVar('PW', { env: { PW: v }, trim: false })).toBeUndefined();
+      }
+      expect(readEnvVar('PW', { env: {}, trim: false, default: 'd' })).toBe('d');
+    });
+
+    it('defaults to trimming (existing behaviour)', () => {
+      expect(readEnvVar('PW', { env: { PW: ' p4ss ' } })).toBe('p4ss');
+      expect(readEnvVar('PW', { env: { PW: ' p4ss ' }, trim: true })).toBe('p4ss');
+    });
+  });
 });
 
 describe('requireEnvVar', () => {
@@ -89,6 +109,12 @@ describe('requireEnvVar', () => {
     expect(() =>
       requireEnvVar('API_KEY', { env: {}, hint: 'get one at example.com' }),
     ).toThrow(/get one at example\.com/);
+  });
+
+  it('passes { trim: false } through for secrets', () => {
+    expect(requireEnvVar('PW', { env: { PW: ' p4ss ' }, trim: false })).toBe(' p4ss ');
+    expect(requireEnvVar('PW', { env: { PW: ' p4ss ' } })).toBe('p4ss');
+    expect(() => requireEnvVar('PW', { env: { PW: '  ' }, trim: false })).toThrow(/PW/);
   });
 
   it('does not leak any value into the error message', () => {

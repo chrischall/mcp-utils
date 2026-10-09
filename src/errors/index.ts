@@ -22,21 +22,130 @@ export const DEFAULT_BOT_WALL_RETRY_AFTER_S = 30;
 export const DEFAULT_ERROR_MESSAGE_MAX = 500;
 
 /**
+ * What kind of failure an {@link McpToolError} is, in the vocabulary of the
+ * credential healthcheck's arms (`@chrischall/mcp-utils/healthcheck`'s
+ * `CredentialHealthcheckArm`, minus `'ok'`):
+ *
+ *  - `'no_credential'` — nothing to authenticate with;
+ *  - `'credential_rejected'` — the far side refused the credential (401/403,
+ *    a rejected grant, a GraphQL `UNAUTHENTICATED`);
+ *  - `'edge_blocked'` — a CDN/WAF refused the request before the API saw it;
+ *  - `'session_expired'` — credentials are fine, but no session is live;
+ *  - `'verification_pending'` — a second factor is outstanding;
+ *  - `'timeout'` — the far side did not answer in time;
+ *  - `'http'` — the far side answered with an error status that is not an
+ *    auth rejection (see `status` for which);
+ *  - `'transport'` — the far side could not be reached at all;
+ *  - `'unknown'` — none of the above is known.
+ *
+ * Fleet audit 2026-09, cluster 8: without this, repos classified failures by
+ * regex over the message text (`/401|403|forbidden/`, `/auth|sign/` matching
+ * "assign"). Branch on `err.kind` / `err.status` (or {@link errorKindOf} /
+ * {@link errorStatusOf}) instead.
+ */
+export type McpToolErrorKind =
+  | 'no_credential'
+  | 'credential_rejected'
+  | 'edge_blocked'
+  | 'session_expired'
+  | 'verification_pending'
+  | 'timeout'
+  | 'http'
+  | 'transport'
+  | 'unknown';
+
+/** Every {@link McpToolErrorKind}, for validating a `kind` read off an unknown error. */
+export const MCP_TOOL_ERROR_KINDS: ReadonlySet<McpToolErrorKind> = new Set<McpToolErrorKind>([
+  'no_credential',
+  'credential_rejected',
+  'edge_blocked',
+  'session_expired',
+  'verification_pending',
+  'timeout',
+  'http',
+  'transport',
+  'unknown',
+]);
+
+/** Constructor options for {@link McpToolError}. Every field is optional. */
+export interface McpToolErrorOptions {
+  /** Actionable remediation text. */
+  hint?: string;
+  /** The underlying error, chained as `cause`. */
+  cause?: unknown;
+  /** The upstream HTTP status this failure came from, when there was one. */
+  status?: number;
+  /** What kind of failure this is. See {@link McpToolErrorKind}. */
+  kind?: McpToolErrorKind;
+}
+
+/**
  * Base class for every tool-facing error. Carries an optional `hint` —
  * actionable remediation text ("set ZOLA_REFRESH_TOKEN", "sign in at compass.com")
- * the tool surface can present separately from the message.
+ * the tool surface can present separately from the message — and, when the
+ * thrower knows them, the upstream HTTP `status` and a {@link McpToolErrorKind}
+ * `kind`, so callers classify a failure by structure rather than by matching
+ * its text. The library's own throwers (http, graphql, auth/session) set them.
  */
 export class McpToolError extends Error {
   /** Actionable remediation text, when one applies. */
   readonly hint?: string;
+  /** The upstream HTTP status this failure came from, when known. */
+  readonly status?: number;
+  /** What kind of failure this is, when the thrower knows. */
+  readonly kind?: McpToolErrorKind;
 
-  constructor(message: string, opts?: { hint?: string; cause?: unknown }) {
+  constructor(message: string, opts?: McpToolErrorOptions) {
     super(message, opts?.cause !== undefined ? { cause: opts.cause } : undefined);
     this.name = 'McpToolError';
     if (opts?.hint !== undefined) this.hint = opts.hint;
+    if (opts?.status !== undefined) this.status = opts.status;
+    if (opts?.kind !== undefined) this.kind = opts.kind;
     // Restore the prototype chain for transpiled `extends Error`.
     Object.setPrototypeOf(this, new.target.prototype);
   }
+}
+
+/** How many `cause` links {@link errorStatusOf} / {@link errorKindOf} follow (also bounds a cyclic chain). */
+const DECLARATION_CAUSE_DEPTH = 4;
+
+/** The first value `read` finds on `err` or its short `cause` chain, outside-in. */
+function firstDeclared<T>(err: unknown, read: (link: object) => T | undefined): T | undefined {
+  let cur: unknown = err;
+  for (let depth = 0; depth < DECLARATION_CAUSE_DEPTH && cur !== null && typeof cur === 'object'; depth++) {
+    const found = read(cur);
+    if (found !== undefined) return found;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return undefined;
+}
+
+/**
+ * The HTTP status a thrown error carries: a numeric `status` (or `statusCode`)
+ * on the error or, failing that, on a short `cause` chain — so a hint-adding
+ * wrapper around an `ApiError` still answers 401. The outermost link that has
+ * one wins. `undefined` when none does. Duck-typed: any error class qualifies.
+ */
+export function errorStatusOf(err: unknown): number | undefined {
+  return firstDeclared(err, (link) => {
+    const e = link as { status?: unknown; statusCode?: unknown };
+    if (typeof e.status === 'number') return e.status;
+    return typeof e.statusCode === 'number' ? e.statusCode : undefined;
+  });
+}
+
+/**
+ * The {@link McpToolErrorKind} a thrown error declares, on itself or a short
+ * `cause` chain (outermost wins). A `kind` outside the vocabulary — another
+ * library's own `kind` field — is ignored, not returned. Duck-typed.
+ */
+export function errorKindOf(err: unknown): McpToolErrorKind | undefined {
+  return firstDeclared(err, (link) => {
+    const k = (link as { kind?: unknown }).kind;
+    return typeof k === 'string' && MCP_TOOL_ERROR_KINDS.has(k as McpToolErrorKind)
+      ? (k as McpToolErrorKind)
+      : undefined;
+  });
 }
 
 /**
@@ -50,7 +159,7 @@ export class SessionNotAuthenticatedError extends McpToolError {
     super(
       `Not signed in to ${name}. ${where} ` +
         'Saved searches, saved homes, and other account data require a signed-in session.',
-      { hint: where },
+      { hint: where, kind: 'session_expired' },
     );
     this.name = 'SessionNotAuthenticatedError';
   }
@@ -94,7 +203,7 @@ export class RateLimitError extends McpToolError {
   constructor(service: string, retryAfterSeconds?: number) {
     const wait =
       retryAfterSeconds !== undefined ? ` Retry after ${retryAfterSeconds}s.` : ' Back off and retry.';
-    super(`Rate limited by ${service}.${wait}`, { hint: wait.trim() });
+    super(`Rate limited by ${service}.${wait}`, { hint: wait.trim(), status: 429, kind: 'http' });
     this.name = 'RateLimitError';
     if (retryAfterSeconds !== undefined) this.retryAfterSeconds = retryAfterSeconds;
   }
@@ -102,16 +211,18 @@ export class RateLimitError extends McpToolError {
 
 /** Upstream is unreachable (5xx / transport failure) — not the caller's fault. */
 export class UnreachableError extends McpToolError {
-  /** Upstream HTTP status, when one was observed. */
-  readonly status?: number;
-
+  /**
+   * @param status The upstream HTTP status, when one was observed. It becomes
+   *   `status`, and the `kind` is `'http'` with one and `'transport'` without.
+   */
   constructor(service: string, status?: number) {
     const suffix = status !== undefined ? ` (status ${status})` : '';
     super(`${service} unreachable${suffix}. The service may be down — try again later.`, {
       hint: 'The upstream service is temporarily unavailable; retry later.',
+      kind: status !== undefined ? 'http' : 'transport',
+      ...(status !== undefined ? { status } : {}),
     });
     this.name = 'UnreachableError';
-    if (status !== undefined) this.status = status;
   }
 }
 
@@ -131,6 +242,104 @@ export class ModeMismatchError extends McpToolError {
       { hint },
     );
     this.name = 'ModeMismatchError';
+  }
+}
+
+/**
+ * What an upstream body turned out to be, as {@link UpstreamFormatError}
+ * reports it: `'non-json'` when it did not parse at all, `'empty'` for an empty
+ * (or whitespace-only) body or a 204, otherwise the JSON kind it parsed to.
+ */
+export type UpstreamBodyKind = 'non-json' | 'empty' | 'null' | 'array' | 'object' | 'string' | 'number' | 'boolean';
+
+/** The JSON shape a caller can require of an upstream body. */
+export type ExpectedJsonShape = 'object' | 'array';
+
+/** Constructor input for {@link UpstreamFormatError}. Every field but `received` is optional. */
+export interface UpstreamFormatErrorDetails {
+  /** What the body turned out to be. */
+  received: UpstreamBodyKind;
+  /** The shape the caller required, when it required one. */
+  expected?: ExpectedJsonShape;
+  /** The upstream's display name. Defaults to "The upstream service". */
+  service?: string;
+  /** The request method, named in the message alongside `path`. */
+  method?: string;
+  /** The request path, named in the message alongside `method`. */
+  path?: string;
+  /** The response status. */
+  status?: number;
+  /** The response `Content-Type`. */
+  contentType?: string;
+  /** The parse failure, chained as `cause` (never put in the message). */
+  cause?: unknown;
+}
+
+const UPSTREAM_BODY_PHRASE: Record<UpstreamBodyKind, string> = {
+  'non-json': 'a non-JSON response',
+  empty: 'an empty body',
+  null: 'null',
+  array: 'an array',
+  object: 'an object',
+  string: 'a string',
+  number: 'a number',
+  boolean: 'a boolean',
+};
+
+/**
+ * An upstream answered with a body that is not the JSON the caller needs: an
+ * HTML sign-in page or interstitial served with a 200, an empty body, or a
+ * `null`/scalar/wrong-container where an object or array was required.
+ *
+ * Consolidates the fleet's raw `SyntaxError: Unexpected token '<'` and
+ * `TypeError: Cannot read properties of null` failures (alltrails, etix, resy,
+ * skylight, tripadvisor, accessoticketing, angi, ofw): those reach the model as
+ * parser noise carrying a fragment of the upstream page. This one names the
+ * service, request, status and content type instead, and never the body —
+ * the parser's own error is kept as `cause`. The message is redacted, so a
+ * credential in the path's query cannot leak through it.
+ *
+ * Thrown by `createApiClient`'s `fetchJson` and by `parseJsonBody` (both in
+ * `http`), which check for a CDN/WAF challenge first and throw
+ * `EdgeBlockedError` for that instead.
+ */
+export class UpstreamFormatError extends McpToolError {
+  /** What the body turned out to be. */
+  readonly received: UpstreamBodyKind;
+  /** The shape the caller required, when it required one. */
+  readonly expected?: ExpectedJsonShape;
+  /** The response `Content-Type`, when known. (`status` is the base class's.) */
+  readonly contentType?: string;
+
+  constructor(details: UpstreamFormatErrorDetails) {
+    const service = details.service ?? 'The upstream service';
+    const request =
+      details.method !== undefined && details.path !== undefined
+        ? `${details.method.toUpperCase()} ${details.path}`
+        : undefined;
+    const meta = [
+      details.status !== undefined ? `HTTP ${details.status}` : undefined,
+      details.contentType || undefined,
+    ].filter((p): p is string => p !== undefined);
+    const what =
+      details.expected !== undefined
+        ? `${UPSTREAM_BODY_PHRASE[details.received]} where a JSON ${details.expected} was expected` +
+          (request ? ` for ${request}` : '')
+        : `${UPSTREAM_BODY_PHRASE[details.received]}` + (request ? ` to ${request}` : '');
+    const message = `${service} returned ${what}${meta.length > 0 ? ` (${meta.join(', ')})` : ''}.`;
+    const hint =
+      details.received === 'non-json'
+        ? 'The service answered with something other than JSON, usually a sign-in page or interstitial, or its API has changed. Check the session, then retry.'
+        : 'The service answered with a body of the wrong shape: the resource may be missing or its API may have changed.';
+    super(truncateErrorMessage(message), {
+      hint,
+      cause: details.cause,
+      ...(details.status !== undefined ? { status: details.status } : {}),
+    });
+    this.name = 'UpstreamFormatError';
+    this.received = details.received;
+    if (details.expected !== undefined) this.expected = details.expected;
+    if (details.contentType) this.contentType = details.contentType;
   }
 }
 
@@ -216,8 +425,11 @@ const GOOGLE_OAUTH_TOKEN_RE = /(?<![A-Za-z0-9+/])(?:ya29\.|1\/\/)[A-Za-z0-9._-]{
 // used as params (`?x-api-key=…`), which the colon-anchored HEADER_SECRET_RE
 // never sees (fleet audit 2026-09-24 PRIV-1). The `x-` branch reuses the
 // bounded HEADER_NAME_RUN so it stays linear.
+// A PKCE `code_verifier` (and Canvas's bare `?verifier=` file capability) is a
+// bearer secret: whoever holds it can complete the exchange or fetch the file
+// (fleet audit library-candidates §16 — canvas-parent #380 quoted one in a 404).
 const QUERY_SECRET_RE = new RegExp(
-  `([?&](?:(?:access|refresh|id|auth|session|csrf|xsrf)[_-]?token|client[_-]?secret|api[_-]?secret|api[_-]?key|password|passwd|signature|token|key|sig|(?:php|j)?sess(?:ion)?[_-]?id|sid|x[-_]${HEADER_NAME_RUN}?(?:api[-_]?key|token|secret|auth)${HEADER_NAME_RUN})=)[^&#\\s"'<>\`]+`,
+  `([?&](?:(?:access|refresh|id|auth|session|csrf|xsrf)[_-]?token|client[_-]?secret|api[_-]?secret|api[_-]?key|password|passwd|signature|token|key|sig|(?:code[_-]?)?verifier|(?:php|j)?sess(?:ion)?[_-]?id|sid|x[-_]${HEADER_NAME_RUN}?(?:api[-_]?key|token|secret|auth)${HEADER_NAME_RUN})=)[^&#\\s"'<>\`]+`,
   'gi',
 );
 // An OAuth authorization code (`?code=…` on a redirect). Only values of 16+
@@ -275,6 +487,7 @@ const JSON_SECRET_KEYS = [
   'api[_-]?secret',
   '(?:x[_-])?api[_-]?key',
   'private[_-]?key',
+  'code[_-]?verifier', // PKCE; a bare `verifier` key is too generic for JSON
   `x[_-]${HEADER_NAME_RUN}?(?:api[_-]?key|token|secret|auth)${HEADER_NAME_RUN}`, // bounded like HEADER_SECRET_RE
   '(?:proxy-)?authorization',
   'password',
@@ -461,13 +674,24 @@ export function isTimeoutError(err: unknown): boolean {
  * preserving any `hint` and chaining the original via `cause`. The message is
  * run through {@link truncateErrorMessage} (redaction + truncation). Re-wrapping
  * an already-prefixed error does not double-prefix.
+ *
+ * The wrapped error's HTTP status and {@link McpToolErrorKind} carry over too
+ * (read with {@link errorStatusOf} / {@link errorKindOf}), so wrapping an
+ * `ApiError` for its tool-name prefix does not lose the 404 a caller branches on.
  */
 export function wrapToolError(toolName: string, err: unknown): McpToolError {
   const inner = messageOf(err);
   const prefix = `[${toolName}]`;
   const message = inner.includes(prefix) ? inner : `${prefix} ${inner}`;
   const hint = err instanceof McpToolError ? err.hint : undefined;
-  return new McpToolError(truncateErrorMessage(message), { hint, cause: err });
+  const status = errorStatusOf(err);
+  const kind = errorKindOf(err);
+  return new McpToolError(truncateErrorMessage(message), {
+    hint,
+    cause: err,
+    ...(status !== undefined ? { status } : {}),
+    ...(kind !== undefined ? { kind } : {}),
+  });
 }
 
 /** Options for {@link maskSecret}. */
