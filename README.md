@@ -24,7 +24,7 @@ re-exports APIs added there — `withDeadline`, `backoffDelayMs`, `BRIDGE_CONCUR
 the bridge-error classifier). MCPs on older `@fetchproxy/server` can use the core
 barrel freely; adopt `/fetchproxy` only after bumping to 0.11+.
 
-> **Upgrading from 2.x?** 3.0 changes two defaults (`resolveOutputDir` and timed-out writes). See [docs/MIGRATION-3.md](docs/MIGRATION-3.md).
+> **Upgrading from 2.x?** 3.0 has three breaking changes: `resolveOutputDir` no longer falls back to the cwd, timed-out writes throw `WriteOutcomeUnknownError`, and `confirmationFromEnv` requires `account` and `args`. See [docs/MIGRATION-3.md](docs/MIGRATION-3.md) (also shipped in the package under `node_modules/@chrischall/mcp-utils/docs/`).
 
 ## Entry points
 
