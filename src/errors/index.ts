@@ -134,6 +134,103 @@ export class ModeMismatchError extends McpToolError {
   }
 }
 
+/**
+ * What an upstream body turned out to be, as {@link UpstreamFormatError}
+ * reports it: `'non-json'` when it did not parse at all, `'empty'` for an empty
+ * (or whitespace-only) body or a 204, otherwise the JSON kind it parsed to.
+ */
+export type UpstreamBodyKind = 'non-json' | 'empty' | 'null' | 'array' | 'object' | 'string' | 'number' | 'boolean';
+
+/** The JSON shape a caller can require of an upstream body. */
+export type ExpectedJsonShape = 'object' | 'array';
+
+/** Constructor input for {@link UpstreamFormatError}. Every field but `received` is optional. */
+export interface UpstreamFormatErrorDetails {
+  /** What the body turned out to be. */
+  received: UpstreamBodyKind;
+  /** The shape the caller required, when it required one. */
+  expected?: ExpectedJsonShape;
+  /** The upstream's display name. Defaults to "The upstream service". */
+  service?: string;
+  /** The request method, named in the message alongside `path`. */
+  method?: string;
+  /** The request path, named in the message alongside `method`. */
+  path?: string;
+  /** The response status. */
+  status?: number;
+  /** The response `Content-Type`. */
+  contentType?: string;
+  /** The parse failure, chained as `cause` (never put in the message). */
+  cause?: unknown;
+}
+
+const UPSTREAM_BODY_PHRASE: Record<UpstreamBodyKind, string> = {
+  'non-json': 'a non-JSON response',
+  empty: 'an empty body',
+  null: 'null',
+  array: 'an array',
+  object: 'an object',
+  string: 'a string',
+  number: 'a number',
+  boolean: 'a boolean',
+};
+
+/**
+ * An upstream answered with a body that is not the JSON the caller needs: an
+ * HTML sign-in page or interstitial served with a 200, an empty body, or a
+ * `null`/scalar/wrong-container where an object or array was required.
+ *
+ * Consolidates the fleet's raw `SyntaxError: Unexpected token '<'` and
+ * `TypeError: Cannot read properties of null` failures (alltrails, etix, resy,
+ * skylight, tripadvisor, accessoticketing, angi, ofw): those reach the model as
+ * parser noise carrying a fragment of the upstream page. This one names the
+ * service, request, status and content type instead, and never the body —
+ * the parser's own error is kept as `cause`. The message is redacted, so a
+ * credential in the path's query cannot leak through it.
+ *
+ * Thrown by `createApiClient`'s `fetchJson` and by `parseJsonBody` (both in
+ * `http`), which check for a CDN/WAF challenge first and throw
+ * `EdgeBlockedError` for that instead.
+ */
+export class UpstreamFormatError extends McpToolError {
+  /** What the body turned out to be. */
+  readonly received: UpstreamBodyKind;
+  /** The shape the caller required, when it required one. */
+  readonly expected?: ExpectedJsonShape;
+  /** The response status, when known. */
+  readonly status?: number;
+  /** The response `Content-Type`, when known. */
+  readonly contentType?: string;
+
+  constructor(details: UpstreamFormatErrorDetails) {
+    const service = details.service ?? 'The upstream service';
+    const request =
+      details.method !== undefined && details.path !== undefined
+        ? `${details.method.toUpperCase()} ${details.path}`
+        : undefined;
+    const meta = [
+      details.status !== undefined ? `HTTP ${details.status}` : undefined,
+      details.contentType || undefined,
+    ].filter((p): p is string => p !== undefined);
+    const what =
+      details.expected !== undefined
+        ? `${UPSTREAM_BODY_PHRASE[details.received]} where a JSON ${details.expected} was expected` +
+          (request ? ` for ${request}` : '')
+        : `${UPSTREAM_BODY_PHRASE[details.received]}` + (request ? ` to ${request}` : '');
+    const message = `${service} returned ${what}${meta.length > 0 ? ` (${meta.join(', ')})` : ''}.`;
+    const hint =
+      details.received === 'non-json'
+        ? 'The service answered with something other than JSON, usually a sign-in page or interstitial, or its API has changed. Check the session, then retry.'
+        : 'The service answered with a body of the wrong shape: the resource may be missing or its API may have changed.';
+    super(truncateErrorMessage(message), { hint, cause: details.cause });
+    this.name = 'UpstreamFormatError';
+    this.received = details.received;
+    if (details.expected !== undefined) this.expected = details.expected;
+    if (details.status !== undefined) this.status = details.status;
+    if (details.contentType) this.contentType = details.contentType;
+  }
+}
+
 /** Factory for an {@link McpToolError} with a remediation hint. */
 export function createHelpfulError(message: string, opts?: { hint?: string }): McpToolError {
   return new McpToolError(message, opts);

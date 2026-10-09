@@ -516,8 +516,8 @@ and is never touched.
 ### `errors` — helpful errors
 
 `McpToolError` and its subclasses (`SessionNotAuthenticatedError`,
-`BotWallError`, `RateLimitError`, `UnreachableError`, `ModeMismatchError`),
-plus `createHelpfulError`, `wrapToolError`, `truncateErrorMessage`,
+`BotWallError`, `RateLimitError`, `UnreachableError`, `ModeMismatchError`,
+`UpstreamFormatError`), plus `createHelpfulError`, `wrapToolError`, `truncateErrorMessage`,
 `redactSecrets`, `maskSecret`, `messageOf`, and `isTimeoutError`. `BotWallError` takes an optional
 `{ vendor }` (e.g. `'DataDome'`) woven into the message and exposed as a field;
 `maskSecret(value)` renders a `first8…last4` fingerprint for set-credential
@@ -717,7 +717,7 @@ clone of this repo: `node scripts/audit-fs-confinement.mjs ../your-mcp`.
 `fetchBounded`,
 `splitHost`, `buildUserAgent`, `parseContentDispositionFilename`, JWT helpers
 (`decodeJwtExp`, `decodeJwtSessionId`, `decodeJwtClaim`, `validateJwtExpiry`),
-`detectEdgeBlock`, and the `ApiError` / `UpstreamHttpError` /
+`detectEdgeBlock`, `parseJsonBody`, and the `ApiError` / `UpstreamHttpError` /
 `EdgeBlockedError` / `UnauthorizedError` / `RateLimitedError` /
 `RequestTimeoutError` / `ResponseTooLargeError` classes.
 
@@ -881,6 +881,31 @@ page (or that carries `cf-mitigated`) throws `EdgeBlockedError` rather than
 `UnauthorizedError`, and `onUnauthorized` is not called for it. A JSON 401 is
 the API's own answer and its body is not read; any other 401 is still an
 `UnauthorizedError` exactly as before.
+
+A 2xx body that is not JSON (an HTML sign-in page or interstitial served with a
+200) makes `fetchJson` throw `UpstreamFormatError` (an `McpToolError` with a
+hint) instead of a raw `SyntaxError: Unexpected token '<'`. The message names
+the service, request, status and content type, never the body; the parser's
+error is kept as `cause`. A Cloudflare challenge (or `cf-mitigated`) served
+with a 200 is checked for first and throws `EdgeBlockedError`. Pass
+`expect: 'object' | 'array'` per request to also reject `null`, a scalar, the
+other container, an empty body or a 204 (`err.received` says which); without
+it, any valid JSON is returned and an empty body or 204 still resolves
+`undefined`. `parseJsonBody(text, { expect, service, method, path, status,
+headers })` is the same rule for a client that reads the body itself, such as
+an OAuth token exchange:
+
+```ts
+import { UpstreamFormatError, parseJsonBody } from '@chrischall/mcp-utils';
+
+const me = await api.fetchJson<Me>('GET', '/v1/me', { expect: 'object' });
+
+const res = await fetch(tokenUrl, { method: 'POST', body: form });
+const token = parseJsonBody<TokenResponse>(await res.text(), {
+  expect: 'object', service: 'Skylight', method: 'POST', path: '/oauth/token',
+  status: res.status, headers: res.headers,
+});
+```
 
 ```ts
 import { runBoundedBatch } from '@chrischall/mcp-utils';

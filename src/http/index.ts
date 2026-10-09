@@ -19,7 +19,8 @@
 
 import { responseHeader } from '../internal/headers.js';
 import { currentCallSignal, withAmbientCancellation } from '../cancel/index.js';
-import { truncateErrorMessage } from '../errors/index.js';
+import { UpstreamFormatError, truncateErrorMessage } from '../errors/index.js';
+import type { ExpectedJsonShape, UpstreamBodyKind } from '../errors/index.js';
 import { isCloudflareChallenge } from '../scrape/index.js';
 
 export * from './throttle.js';
@@ -222,6 +223,16 @@ export interface RequestOptions {
   headers?: Record<string, string>;
   /** Query params appended via {@link buildQueryString} when present. */
   query?: Record<string, unknown>;
+  /**
+   * `fetchJson` only: the JSON shape the body must have. When set, a `null`,
+   * a scalar, the other container, an empty body or a 204 throws
+   * {@link UpstreamFormatError} instead of being returned. Omitted (the
+   * default), any valid JSON is returned and an empty body or 204 resolves
+   * `undefined`, exactly as before. Never sent upstream; `fetchHtml` and
+   * `fetchRaw` ignore it. Shape validation beyond the container kind belongs
+   * to `parseLenient`.
+   */
+  expect?: ExpectedJsonShape;
 }
 
 /** The minimal client surface returned by {@link createApiClient}. */
@@ -229,7 +240,10 @@ export interface ApiClient {
   /**
    * Authenticated JSON request. Returns the parsed body, or `undefined` for a
    * 204 / empty body. Throws on 401 (unauthorized), exhausted-429, and other
-   * non-2xx responses (with a redacted, truncated message).
+   * non-2xx responses (with a redacted, truncated message). A 2xx body is read
+   * by {@link parseJsonBody}: a non-JSON body throws {@link UpstreamFormatError}
+   * (or {@link EdgeBlockedError} for a CDN challenge), and `opts.expect`
+   * rejects a body of the wrong shape the same way.
    */
   fetchJson: <T = unknown>(method: string, path: string, opts?: RequestOptions) => Promise<T>;
   /** Authenticated request returning the raw response body as text (e.g. HTML scrapes). */
@@ -475,6 +489,89 @@ export function detectEdgeBlock(input: {
     if ((marker.anyStatus || refusal) && marker.test(body)) return { vendor: marker.vendor };
   }
   return null;
+}
+
+/** Options for {@link parseJsonBody}. All optional; the request fields only enrich the error message. */
+export interface ParseJsonBodyOptions {
+  /**
+   * The JSON shape the body must have. When set, `null`, a scalar, the other
+   * container or an empty body throws {@link UpstreamFormatError}. Omitted,
+   * any valid JSON is returned and an empty body yields `undefined`.
+   */
+  expect?: ExpectedJsonShape;
+  /** The upstream's display name, for the error message. */
+  service?: string;
+  /** The request method, for the error message. */
+  method?: string;
+  /** The request path, for the error message. */
+  path?: string;
+  /**
+   * The response status. Also passed to {@link detectEdgeBlock}, so on a 2xx
+   * only a challenge (or `cf-mitigated`) counts as an edge block.
+   */
+  status?: number;
+  /** The response headers: read for `cf-mitigated` and, absent `contentType`, the `Content-Type`. */
+  headers?: EdgeBlockHeaders;
+  /** The response `Content-Type`, for the error message. */
+  contentType?: string;
+}
+
+function jsonKind(value: unknown): Exclude<UpstreamBodyKind, 'non-json' | 'empty'> {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  return typeof value as 'object' | 'string' | 'number' | 'boolean';
+}
+
+/**
+ * Parse an upstream response body as JSON, turning every way it can fail into
+ * a typed, message-safe error instead of a raw `SyntaxError` (whose message
+ * quotes the body) or a later `TypeError` on `null`:
+ *
+ *  - a body that is not JSON is first checked with {@link detectEdgeBlock}
+ *    (a Cloudflare challenge served with a 200 becomes {@link EdgeBlockedError});
+ *    otherwise it throws {@link UpstreamFormatError} with `received: 'non-json'`,
+ *    naming the service, request, status and content type but never the body;
+ *  - with `expect`, an empty body, `null`, a scalar or the wrong container
+ *    throws {@link UpstreamFormatError} too.
+ *
+ * An empty (or whitespace-only) body without `expect` returns `undefined`, the
+ * same contract `fetchJson` has for a 204. `fetchJson` runs every 2xx body
+ * through this; export it for hand-rolled clients and OAuth token exchanges
+ * that read the body themselves (skylight, ofw).
+ */
+export function parseJsonBody<T = unknown>(text: string, opts: ParseJsonBodyOptions = {}): T {
+  const contentType = opts.contentType ?? headerOf(opts.headers, 'content-type');
+  const details = {
+    service: opts.service,
+    method: opts.method,
+    path: opts.path,
+    status: opts.status,
+    contentType,
+    expected: opts.expect,
+  };
+  if (text.trim().length === 0) {
+    if (opts.expect === undefined) return undefined as T;
+    throw new UpstreamFormatError({ ...details, received: 'empty' });
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch (cause) {
+    const edge = detectEdgeBlock({ body: text, headers: opts.headers, status: opts.status });
+    if (edge) {
+      throw new EdgeBlockedError(opts.status ?? 200, edge.vendor, {
+        service: opts.service ?? 'the upstream service',
+        method: opts.method,
+        path: opts.path,
+      });
+    }
+    throw new UpstreamFormatError({ ...details, expected: undefined, received: 'non-json', cause });
+  }
+  if (opts.expect !== undefined) {
+    const kind = jsonKind(value);
+    if (kind !== opts.expect) throw new UpstreamFormatError({ ...details, received: kind });
+  }
+  return value as T;
 }
 
 /**
@@ -811,15 +908,21 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     if (res.status === 429) throw await rateLimitedError(attempt, method, path);
     if (res.status === 204) {
       discard(attempt);
-      return undefined as T;
+      return parseJsonBody<T>('', { expect: opt.expect, service, method, path, status: 204 });
     }
 
     const text = await readBody(attempt, (r) => r.text());
     if (!res.ok) {
       throw httpError(res, text, method, path, service);
     }
-    if (text.length === 0) return undefined as T;
-    return JSON.parse(text) as T;
+    return parseJsonBody<T>(text, {
+      expect: opt.expect,
+      service,
+      method,
+      path,
+      status: res.status,
+      headers: res.headers,
+    });
   }
 
   async function fetchHtml(method: string, path: string, opt: RequestOptions = {}): Promise<string> {
