@@ -678,7 +678,11 @@ without re-reading). Pass `readFile` to inject a reader in tests.
 
 The binary-output kit (hoisted from gemini + flightaware) is the fleet
 convention for tools that generate bytes: `resolveOutputDir(perCall,
-'<SVC>_OUTPUT_DIR')` resolves arg → env → cwd (creating the dir),
+'<SVC>_OUTPUT_DIR', { name: '<svc>-mcp' })` resolves arg → env →
+`~/Downloads/<svc>-mcp` (created `0700`) and creates the dir. It **never falls
+back to the cwd** — that is `/` (unwritable) under Claude Desktop/.mcpb and the
+user's repo under Claude Code. Without `name`, the no-arg/no-env case throws a
+config error (`McpToolError`) naming the env var, so pass `name`.
 `writeBinaryOutput({ dir, baseName, base64, mimeType })` writes to a
 **non-overwriting** path (`name.png`, `name-2.png`, …) and returns it.
 Each name is claimed with an exclusive, no-follow create
