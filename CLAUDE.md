@@ -42,7 +42,7 @@ What each core module owns (see the long header docblock at the top of each `ind
 - **response** — `textResult`/`jsonResult`/`rawTextResult`/`imageResult`/`errorResult`, plus `flattenJsonApi` / `deepMapStringField`.
 - **errors** — `McpToolError` hierarchy + `redactSecrets` / `truncateErrorMessage` / `wrapToolError`. **Zero runtime deps by design.**
 - **config** — `readEnvVar` / `requireEnvVar` / `parseBoolEnv` / `readPortEnv` / `expandPath` and friends. Hardened: trims, and treats `''`, `'null'`, `'undefined'`, and unsubstituted `${...}` placeholders as **unset**.
-- **http** — `createApiClient` (bearer fetch with 429 retry, 401→`UnauthorizedError`, 204 handling, redacted errors, 30 s default timeout), `fetchBounded` (the bounded bare `fetch` for clients that cannot use it), URL safety (`apiPath`, `readOriginEnv`, `assertAllowedUrl`; the client refuses dot-segment/backslash paths and, with `redirect: 'same-origin'`, cross-origin redirect hops), `buildQueryString`, `parseLinkHeader`, cookie-jar + JWT helpers, `runBoundedBatch`.
+- **http** — `createApiClient` (bearer fetch with 429 retry, 401→`UnauthorizedError`, 204 handling, redacted errors, 30 s default timeout), `fetchBounded` (the bounded bare `fetch` for clients that cannot use it), URL safety (`apiPath`, `readOriginEnv`, `assertAllowedUrl`; the client refuses dot-segment/backslash/tab-CR-LF paths and, with `redirect: 'same-origin'`, cross-origin redirect hops), `buildQueryString`, `parseLinkHeader`, cookie-jar + JWT helpers, `runBoundedBatch`.
 - **concurrency** — `mapLimit` (zero-dep ordered bounded fan-out).
 - **dates** — pure lexical date reformatters (no `Date`/`Intl` — avoids timezone off-by-one).
 - **zod** — schema atoms + tool-annotation helpers (zod v4, raw-shape style).

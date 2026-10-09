@@ -175,7 +175,10 @@ export interface ApiClientOptions {
    * `fetch` (Node/undici) that exposes the 3xx and its `Location`.
    */
   redirect?: 'same-origin' | 'manual' | 'error' | 'follow';
-  /** With `redirect: 'same-origin'`, the most hops followed per request. Default 5. */
+  /**
+   * With `redirect: 'same-origin'`, the most hops followed per request.
+   * Default 5. Must be a non-negative integer (a `TypeError` otherwise).
+   */
   maxRedirects?: number;
 }
 
@@ -684,6 +687,10 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   const timeoutMs = opts.timeout === false ? 0 : (opts.timeout ?? DEFAULT_REQUEST_TIMEOUT_MS);
   const redirectMode = opts.redirect;
   const maxRedirects = opts.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
+  // NaN would make `hops >= maxRedirects` never true: an endless redirect loop.
+  if (!Number.isSafeInteger(maxRedirects) || maxRedirects < 0) {
+    throw new TypeError(`createApiClient: maxRedirects must be a non-negative integer, got ${String(maxRedirects)}.`);
+  }
 
   // Default: `Authorization: Bearer <token>`. With `tokenHeader`, the raw
   // token goes in that named header instead (no `Bearer ` prefix).
@@ -814,7 +821,9 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     const hazard = findPathHazard(path);
     if (hazard !== undefined) {
       throw new Error(
-        `Refusing request to ${service}: path ${JSON.stringify(path)} contains a ${hazard}, which URL ` +
+        // Quote only the path part: this fires on hostile input, and the
+        // query may carry values that do not belong in a log line.
+        `Refusing request to ${service}: path ${JSON.stringify(path.split(/[?#]/, 1)[0])} contains a ${hazard}, which URL ` +
           'normalisation would rewrite. Build paths with apiPath`...` so each value is one encoded segment.',
       );
     }

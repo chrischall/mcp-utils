@@ -41,18 +41,26 @@ function isDotSegment(segment: string): boolean {
   return s === '.' || s === '..';
 }
 
+/** `path` up to (not including) the first `?` or `#`. */
+function pathPartOf(path: string): string {
+  const end = path.search(/[?#]/);
+  return end === -1 ? path : path.slice(0, end);
+}
+
 /**
  * Why URL normalisation would rewrite the path portion of `path` (everything
  * before the first `?` or `#`), or `undefined` when it would not: a dot
- * segment (`.`, `..`, `%2e%2e` and the mixed spellings) or a backslash (which
- * special schemes treat as `/`). The query and fragment are not judged.
+ * segment (`.`, `..`, `%2e%2e` and the mixed spellings), a backslash (which
+ * special schemes treat as `/`), or an ASCII tab, LF or CR (which the WHATWG
+ * URL parser deletes before resolving dot segments, so `.\t.` becomes `..`).
+ * The query and fragment are not judged.
  *
  * `createApiClient` refuses a path for which this returns a reason; exported
  * for hand-rolled clients that build URLs themselves.
  */
-export function findPathHazard(path: string): 'dot segment' | 'backslash' | undefined {
-  const end = path.search(/[?#]/);
-  const pathPart = end === -1 ? path : path.slice(0, end);
+export function findPathHazard(path: string): 'dot segment' | 'backslash' | 'control character' | undefined {
+  const pathPart = pathPartOf(path);
+  if (/[\t\n\r]/.test(pathPart)) return 'control character';
   if (pathPart.includes('\\')) return 'backslash';
   if (pathPart.split('/').some(isDotSegment)) return 'dot segment';
   return undefined;

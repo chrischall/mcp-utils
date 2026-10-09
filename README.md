@@ -765,10 +765,11 @@ clients.
 
 #### URL safety — paths, base-URL overrides, links and redirects
 
-`createApiClient` keeps every request on `baseUrl`'s origin, and since 2.16
-it also **refuses a path that URL normalisation would rewrite**: a dot
-segment (`/trails/../admin`, `%2e%2e`, `.%2e`, …) or a backslash anywhere
-before the `?`. `encodeURIComponent('..')` is `..`, so an encoded tool argument
+`createApiClient` keeps every request on `baseUrl`'s origin, and it also
+**refuses a path that URL normalisation would rewrite**: a dot segment
+(`/trails/../admin`, `%2e%2e`, `.%2e`, …), a backslash, or an ASCII tab, LF
+or CR (the URL parser deletes those first, so `.\t.` would become `..`)
+anywhere before the `?`. `encodeURIComponent('..')` is `..`, so an encoded tool argument
 could still walk the path to another endpoint with the credential attached
 (fleet audit 2026-09, cluster 5). The query string is not judged. Build paths
 with the `apiPath` tag, which encodes each value as exactly one segment and
@@ -814,7 +815,8 @@ re-sends the bearer wherever they point. Pass `redirect: 'same-origin'` to have
 the client follow them itself: each `Location` is checked against the base
 origin before anything is re-sent, and a hop to another origin, a scheme
 downgrade or a hop that adds userinfo throws `RedirectRefusedError`.
-`maxRedirects` defaults to 5 (`DEFAULT_MAX_REDIRECTS`). A 303, or a 301/302
+`maxRedirects` defaults to 5 (`DEFAULT_MAX_REDIRECTS`) and must be a
+non-negative integer. A 303, or a 301/302
 after a POST, becomes a body-less GET, while 307/308 keep the method and body.
 `'manual'`, `'error'` and `'follow'` are passed straight to `fetch`.
 

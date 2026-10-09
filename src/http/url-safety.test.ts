@@ -6,6 +6,7 @@ import {
   assertAllowedUrl,
   UrlNotAllowedError,
   RedirectRefusedError,
+  findPathHazard,
 } from './index.js';
 
 function stubFetch(responses: Response[]) {
@@ -30,6 +31,17 @@ function redirect(location: string | undefined, status = 302): Response {
 
 // --- cluster 5: dot segments ------------------------------------------------
 
+describe('findPathHazard', () => {
+  it('names tab, LF and CR in the path as a control character', () => {
+    expect(findPathHazard('/a/.\t./b')).toBe('control character');
+    expect(findPathHazard('/a/%2e\n%2e/b')).toBe('control character');
+    expect(findPathHazard('/a\r')).toBe('control character');
+  });
+  it('does not judge control characters in the query', () => {
+    expect(findPathHazard('/a?q=x\ty')).toBeUndefined();
+  });
+});
+
 describe('createApiClient refuses a path that URL normalisation would rewrite', () => {
   const bad = [
     '/trails/../admin',
@@ -46,17 +58,30 @@ describe('createApiClient refuses a path that URL normalisation would rewrite', 
     '/a\\b',
     '/a/..?q=1',
     '/a/..#frag',
+    // WHATWG URL parsing deletes ASCII tab/LF/CR before resolving dot segments.
+    '/trails/.\t./admin',
+    '/trails/%2e\n%2e/admin',
+    '/trails/.\r./x',
+    '/a/b\tc',
   ];
   for (const path of bad) {
     it(`refuses ${JSON.stringify(path)} before any fetch`, async () => {
       const { fn, calls } = stubFetch([jsonResponse({})]);
       const client = createApiClient({ baseUrl: 'https://api.example.com/v1', getToken: () => 'SECRET', fetchImpl: fn });
-      await expect(client.fetchJson('GET', path)).rejects.toThrow(/dot segment|backslash/i);
-      await expect(client.fetchHtml('GET', path)).rejects.toThrow(/dot segment|backslash/i);
-      await expect(client.fetchRaw('GET', path)).rejects.toThrow(/dot segment|backslash/i);
+      await expect(client.fetchJson('GET', path)).rejects.toThrow(/dot segment|backslash|control character/i);
+      await expect(client.fetchHtml('GET', path)).rejects.toThrow(/dot segment|backslash|control character/i);
+      await expect(client.fetchRaw('GET', path)).rejects.toThrow(/dot segment|backslash|control character/i);
       expect(calls).toHaveLength(0);
     });
   }
+
+  it('quotes only the path part, never the query, in the refusal', async () => {
+    const { fn } = stubFetch([jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://api.example.com/v1', fetchImpl: fn });
+    const err = await client.fetchJson('GET', '/a/../b?token=SECRETQ').catch((e: unknown) => e as Error);
+    expect(err.message).toContain('"/a/../b"');
+    expect(err.message).not.toContain('SECRETQ');
+  });
 
   it('leaves dots that are not whole segments, and dots or backslashes in the query, alone', async () => {
     const { fn, calls } = stubFetch([jsonResponse({}), jsonResponse({}), jsonResponse({}), jsonResponse({})]);
@@ -291,6 +316,21 @@ describe("createApiClient redirect: 'same-origin'", () => {
     const { fn, calls } = stubFetch([redirect('http://[bad'), jsonResponse({})]);
     const client = createApiClient({ baseUrl: 'https://api.example.com', fetchImpl: fn, redirect: 'same-origin' });
     await expect(client.fetchJson('GET', '/x')).rejects.toThrow(/not a valid URL/);
+    expect(calls).toHaveLength(1);
+  });
+
+  for (const bad of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY]) {
+    it(`rejects maxRedirects ${bad} at construction`, () => {
+      expect(() =>
+        createApiClient({ baseUrl: 'https://api.example.com', redirect: 'same-origin', maxRedirects: bad }),
+      ).toThrow(TypeError);
+    });
+  }
+
+  it('accepts maxRedirects 0 (refuses the first hop)', async () => {
+    const { fn, calls } = stubFetch([redirect('/a'), jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://api.example.com', fetchImpl: fn, redirect: 'same-origin', maxRedirects: 0 });
+    await expect(client.fetchJson('GET', '/x')).rejects.toThrow(/too many redirects/i);
     expect(calls).toHaveLength(1);
   });
 
