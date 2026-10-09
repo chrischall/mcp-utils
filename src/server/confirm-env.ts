@@ -188,8 +188,13 @@ function boundArgs(args: unknown): unknown {
 export interface ConfirmationFromEnvOptions extends RequireConfirmationOptions {
   /** The tool name the token is bound to. */
   tool: string;
-  /** The account the action runs as. */
-  account?: string;
+  /**
+   * The account / principal the action runs as — bound into BOTH rails (the
+   * token's claims and the elicitation acceptance), so an approval for one
+   * account never acts as another. REQUIRED as a key since 3.0: pass
+   * `undefined` explicitly on a single-account server, as with `confirmWrite`.
+   */
+  account: string | undefined;
   /** The phase-2 token from the tool's input, or undefined on phase 1. */
   confirmToken?: string;
   /** Builds the subject from a FRESH read; see {@link ConfirmTokenFallback.subject}. */
@@ -201,17 +206,21 @@ export interface ConfirmationFromEnvOptions extends RequireConfirmationOptions {
   /** Environment to read; defaults to `process.env`. */
   env?: EnvSource;
   /**
-   * The tool's validated arguments. Pass them: both rails are then bound to
-   * them without per-tool judgement (fleet audit 2026-09-24 SEC-2).
+   * The tool's validated arguments — REQUIRED since 3.0 (`undefined`/`null`
+   * throws). Both rails are bound to them without per-tool judgement (fleet
+   * audit 2026-09-24 SEC-2; fleet-audit#979 and siblings were all a token
+   * minted without them).
    * - Elicitation: sets {@link RequireConfirmationOptions.binding} (unless one
-   *   is given) with the env key and TTL, so an acceptance minted for one call
-   *   cannot be replayed on a call with different arguments.
+   *   is given) to `{ account, args }` with the env key and TTL, so an
+   *   acceptance minted for one call cannot be replayed on a call with
+   *   different arguments or as a different account.
    * - Token: the token binds `{ payload: subject().payload, args }`, so a
    *   `subject()` whose payload covers only some arguments (say `{ id }` while
    *   the body is a separate argument) still cannot authorise a different body.
    * A `confirmToken` key is dropped first: it differs between the two phases.
+   * A tool with no arguments passes `{}`.
    */
-  args?: unknown;
+  args: object;
 }
 
 /**
@@ -221,7 +230,7 @@ export interface ConfirmationFromEnvOptions extends RequireConfirmationOptions {
  * ```ts
  * const gate = await requireConfirmationWithFallback(ctx, confirmationFromEnv({
  *   action: 'thing.delete', message: 'Review and confirm this deletion.', details: { id },
- *   tool: 'thing_delete', confirmToken, args,
+ *   tool: 'thing_delete', account: undefined, confirmToken, args,
  *   subject: () => ({ target: id, payload: { id }, preview: { id } }),
  * }));
  * if (gate) return gate;
@@ -229,16 +238,29 @@ export interface ConfirmationFromEnvOptions extends RequireConfirmationOptions {
  */
 export function confirmationFromEnv(options: ConfirmationFromEnvOptions): RequireConfirmationWithFallbackOptions {
   const { tool, account, confirmToken, subject, instruction, args, env = process.env, spent: callerSpent, ...rest } = options;
+  if (args === undefined || args === null) {
+    // A token over the subject alone authorises whatever the subject omits, and
+    // an unbound acceptance authorises anything (fleet-audit#979 and siblings).
+    throw new TypeError(
+      `confirmationFromEnv: ${tool} passed no args; pass the tool's validated arguments ({} for a tool with none).`,
+    );
+  }
   // Destructured out of `rest` so it rides the token fallback only, never the
   // returned options (#312).
   const spent = callerSpent ?? spentTokenStoreFromEnv(env);
   const mode = readConfirmMode(env);
   const ttlSeconds = readConfirmTtl(env);
   const elicitationOff = readConfirmElicitation(env) === 'off';
-  const bound = args === undefined ? undefined : boundArgs(args);
-  const bindingAdded: RequireConfirmationOptions = bound === undefined || rest.binding
+  const bound = boundArgs(args);
+  // The elicitation acceptance commits to the account as well as the
+  // arguments; the token already carries the account in its own claims.
+  const elicitationBound = account === undefined ? { args: bound } : { account, args: bound };
+  const bindingAdded: RequireConfirmationOptions = rest.binding
     ? rest
-    : { ...rest, binding: { key: confirmKeyFromEnv(env), args: bound, ttlSeconds: ttlSeconds ?? DEFAULT_TTL_SECONDS } };
+    : {
+      ...rest,
+      binding: { key: confirmKeyFromEnv(env), args: elicitationBound, ttlSeconds: ttlSeconds ?? DEFAULT_TTL_SECONDS },
+    };
   const confirmation: RequireConfirmationOptions = elicitationOff ? { ...bindingAdded, elicitation: false } : bindingAdded;
   if (mode === 'refuse' || ttlSeconds === undefined) {
     const reason = mode === 'refuse' ? REFUSE_HINT : BAD_TTL_HINT;
@@ -248,14 +270,12 @@ export function confirmationFromEnv(options: ConfirmationFromEnvOptions): Requir
       unsupportedNote: confirmation.unsupportedNote ? `${confirmation.unsupportedNote} ${hint}` : hint,
     };
   }
-  const boundSubject: ConfirmTokenFallback['subject'] = bound === undefined
-    ? subject
-    : async () => {
-      const read = await subject();
-      // A CallToolResult (a failed read) passes back unchanged.
-      if ('content' in read) return read;
-      return { ...read, payload: { payload: read.payload, args: bound } };
-    };
+  const boundSubject: ConfirmTokenFallback['subject'] = async () => {
+    const read = await subject();
+    // A CallToolResult (a failed read) passes back unchanged.
+    if ('content' in read) return read;
+    return { ...read, payload: { payload: read.payload, args: bound } };
+  };
   return {
     ...confirmation,
     tokenFallback: {

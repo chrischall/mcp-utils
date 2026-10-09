@@ -227,7 +227,7 @@ export async function confirmWrite(
       ...(options.unsupportedNote === undefined ? {} : { unsupportedNote: options.unsupportedNote }),
       ...(options.confirmationLabel === undefined ? {} : { confirmationLabel: options.confirmationLabel }),
       tool,
-      ...(account === undefined ? {} : { account }),
+      account,
       confirmToken,
       args: bound,
       subject: () => ({ target, ...(revision === undefined ? {} : { revision }), payload: bound, preview }),

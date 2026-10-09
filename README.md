@@ -244,14 +244,25 @@ A refused token returns `isError: true` and acts on nothing:
 | `TOKEN_INVALID` | tampered, issued for another tool, account or target, or signed with another key |
 
 **Fleet env layer.** `confirmationFromEnv({ ...requireConfirmationOptions, tool,
-account?, confirmToken, subject, args?, instruction?, spent? })` turns three standard
+account, args, confirmToken, subject, instruction?, spent? })` turns three standard
 variables into those options, so every server reads and documents them the same
-way. Pass `args` (optional but recommended: the tool's validated arguments): it binds BOTH rails to them —
-the elicitation acceptance (`binding`, keyed from `MCP_CONFIRM_SECRET`) and the
-token (which then commits to `{ payload, args }`, so a `subject()` whose payload
-covers only some arguments cannot authorise different ones). `confirmToken` is
-dropped from `args` before hashing. A `subject()` that returns no `payload`
-throws rather than binding only the target.
+way. Since 3.0, `account` and `args` are **required keys** (see
+[`docs/MIGRATION-3.md`](docs/MIGRATION-3.md)):
+
+- `account: string | undefined` — the principal the action runs as, exactly as
+  `confirmWrite` requires it. Pass `undefined` explicitly on a single-account
+  server; the point is that forgetting it no longer compiles.
+- `args` — the tool's validated arguments (`{}` for a tool with none);
+  `undefined` or `null` throws. They bind BOTH rails: the elicitation
+  acceptance (`binding` over `{ account, args }`, keyed from
+  `MCP_CONFIRM_SECRET`) and the token (which carries the account in its claims
+  and commits to `{ payload, args }`, so a `subject()` whose payload covers only
+  some arguments cannot authorise different ones).
+
+So a token or an acceptance minted for one account or one set of arguments is
+refused for any other. `confirmToken` is dropped from `args` before hashing. A
+`subject()` that returns no `payload` throws rather than binding only the
+target.
 
 | variable | default | |
 |---|---|---|
@@ -273,7 +284,7 @@ in-memory store.
 ```ts
 const gate = await requireConfirmationWithFallback(ctx, confirmationFromEnv({
   action: 'thing.delete', message: 'Review and confirm this deletion.', details: { id },
-  tool: 'thing_delete', confirmToken, args,
+  tool: 'thing_delete', account: undefined, args, confirmToken,
   subject: () => ({ target: id, payload: { id }, preview: { id } }),
 }));
 if (gate) return gate;
@@ -1754,6 +1765,33 @@ exactly as before, and no credential reaches a disk because a dependency was
 upgraded. The interface is two methods (`load` / `save`, plus an optional
 `clear`), each allowed to be async, so a backend other than the local filesystem
 can be dropped in.
+
+#### Credentials at rest — the fleet standard
+
+`SessionStore`, `createFileStatePersistence`, `createKeyedFileStatePersistence`
+and every cookie jar a server persists through them are **plaintext credential
+files**: bearer and refresh tokens, session cookies, whatever the record holds.
+They are written mode `0600` in a `0700` directory, and that is the whole of
+their protection. This is accepted on purpose, not an oversight:
+
+- **Encrypting them would add little.** The key would have to be readable by the
+  same OS user who can already read the file, so anyone who can open the store
+  can also open the key.
+- **An OS keychain is not portable.** It is macOS-only in practice, and hosted
+  servers (mcp-host) run on Linux, where the data dir under `MCP_DATA_DIR` is the
+  durable home.
+
+What a caller must never do with a store's contents:
+
+- **Log them** — not to stderr, not in a debug line, not in a thrown error's
+  message. Route anything that might contain one through `redactSecrets` /
+  `errorResult`.
+- **Return them in a tool result** — no "session status" tool echoes a token,
+  cookie or raw record back to the model. Report presence, expiry or the
+  account label; never the credential.
+
+The permissions are the boundary, so keep them: never widen the file or
+directory mode, and never copy a store somewhere that does not apply them.
 
 ### `fetchproxy` — transport adapter *(subpath, optional peer)*
 
