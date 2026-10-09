@@ -1239,7 +1239,8 @@ through `reportProgress` before each re-read. Lifted from kiaaccess-mcp's
 ### `dates` — date-format converters
 
 `isoToDmy`, `dmyToIso`, `isoToCompactTimestamp`, `todayIso`, `toIsoDateUtc`,
-`shiftIsoDate`, `ensureSeconds`. For upstreams that don't speak
+`shiftIsoDate`, `ensureSeconds`, `resolveUserTimeZone`, `isValidTimeZone`,
+`USER_TIME_ZONE_ENV`. For upstreams that don't speak
 ISO 8601, so a server can keep its surface ISO (`yyyy-MM-dd`) and translate at
 the API boundary. Pair with `deepMapStringField` to normalize a date field
 across a whole response.
@@ -1249,6 +1250,25 @@ import { dmyToIso, isoToDmy, deepMapStringField } from '@chrischall/mcp-utils';
 
 const apiDate = isoToDmy('2025-08-28');                 // '28-08-2025' (request)
 deepMapStringField(payload, 'eventDate', dmyToIso);     // '28-08-2025' → '2025-08-28' (response)
+```
+
+**"Today" is the user's date, and hosted servers run in UTC.** `todayIso()`
+reads the calendar date in `opts.timeZone` → the fleet-wide **`MCP_USER_TZ`**
+env var (an IANA zone such as `America/New_York`) → the host's local zone. On
+a laptop the host zone is the user's own; on mcp-host every child runs in
+**UTC**, so without `MCP_USER_TZ` "today" rolls over at UTC midnight (7–8 pm
+US Eastern). Set `MCP_USER_TZ` per registration there, or pass `timeZone`
+when the zone comes from the account or venue. An invalid `MCP_USER_TZ` is
+ignored (host zone); an invalid explicit `timeZone` throws a `RangeError`.
+`resolveUserTimeZone({ timeZone?, env? })` returns the same choice (or
+`undefined` for "host zone") for your own `Intl` formatting.
+
+```ts
+import { todayIso } from '@chrischall/mcp-utils';
+
+todayIso();                                     // MCP_USER_TZ, else host-local
+todayIso({ timeZone: 'America/Los_Angeles' });  // the venue's date
+todayIso(new Date(2026, 0, 5));                 // legacy form: pinned clock (tests)
 ```
 
 ### `scrape` — SSR JSON-store & page extraction (zero-dep)

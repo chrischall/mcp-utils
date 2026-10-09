@@ -1,6 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ensureSeconds, shiftIsoDate, toIsoDateUtc, todayIso } from './index.js';
+import {
+  ensureSeconds,
+  isValidTimeZone,
+  resolveUserTimeZone,
+  shiftIsoDate,
+  toIsoDateUtc,
+  todayIso,
+  USER_TIME_ZONE_ENV,
+} from './index.js';
 
 describe('todayIso', () => {
   it('formats the LOCAL calendar date as yyyy-MM-dd', () => {
@@ -11,6 +19,77 @@ describe('todayIso', () => {
 
   it('zero-pads month and day', () => {
     expect(todayIso(new Date(2026, 8, 7))).toBe('2026-09-07');
+  });
+});
+
+describe('todayIso — time zones', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  // 2026-01-05T12:00Z is already Jan 6 in Auckland (UTC+13) and still Jan 5 in LA.
+  const noonUtc = new Date(Date.UTC(2026, 0, 5, 12, 0));
+  // 2026-01-05T03:00Z is still Jan 4 in LA (UTC-8) — the hosted-UTC off-by-one.
+  const earlyUtc = new Date(Date.UTC(2026, 0, 5, 3, 0));
+
+  it('reads the calendar date in an explicit IANA zone', () => {
+    expect(todayIso({ now: noonUtc, timeZone: 'Pacific/Auckland', env: {} })).toBe('2026-01-06');
+    expect(todayIso({ now: earlyUtc, timeZone: 'America/Los_Angeles', env: {} })).toBe('2026-01-04');
+    expect(todayIso({ now: earlyUtc, timeZone: 'UTC', env: {} })).toBe('2026-01-05');
+  });
+
+  it(`honours ${'MCP_USER_TZ'} when no zone is passed`, () => {
+    expect(USER_TIME_ZONE_ENV).toBe('MCP_USER_TZ');
+    expect(todayIso({ now: earlyUtc, env: { MCP_USER_TZ: 'America/Los_Angeles' } })).toBe('2026-01-04');
+  });
+
+  it('an explicit timeZone beats MCP_USER_TZ', () => {
+    expect(
+      todayIso({ now: earlyUtc, timeZone: 'UTC', env: { MCP_USER_TZ: 'America/Los_Angeles' } }),
+    ).toBe('2026-01-05');
+  });
+
+  it('the legacy todayIso(date) form also honours MCP_USER_TZ from process.env', () => {
+    vi.stubEnv('MCP_USER_TZ', 'America/Los_Angeles');
+    expect(todayIso(earlyUtc)).toBe('2026-01-04');
+    vi.stubEnv('MCP_USER_TZ', 'Pacific/Auckland');
+    expect(todayIso({ now: noonUtc })).toBe('2026-01-06');
+  });
+
+  it('falls back to the host zone when MCP_USER_TZ is unset, blank, a placeholder or not a zone', () => {
+    const local = new Date(2026, 0, 5, 23, 30);
+    for (const v of [undefined, '', '${MCP_USER_TZ}', 'Not/AZone']) {
+      expect(todayIso({ now: local, env: { MCP_USER_TZ: v } })).toBe('2026-01-05');
+    }
+  });
+
+  it('throws a RangeError naming an invalid explicit zone', () => {
+    expect(() => todayIso({ now: noonUtc, timeZone: 'Mars/Olympus' })).toThrow(RangeError);
+    expect(() => todayIso({ now: noonUtc, timeZone: 'Mars/Olympus' })).toThrow(/Mars\/Olympus/);
+  });
+
+  it('defaults now to the current time', () => {
+    expect(todayIso({ timeZone: 'UTC', env: {} })).toBe(toIsoDateUtc(new Date()));
+    expect(todayIso({})).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(todayIso()).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+});
+
+describe('resolveUserTimeZone / isValidTimeZone', () => {
+  it('prefers the explicit zone, then MCP_USER_TZ, else undefined (host zone)', () => {
+    expect(resolveUserTimeZone({ timeZone: 'Europe/London', env: { MCP_USER_TZ: 'UTC' } })).toBe(
+      'Europe/London',
+    );
+    expect(resolveUserTimeZone({ env: { MCP_USER_TZ: ' America/New_York ' } })).toBe('America/New_York');
+    expect(resolveUserTimeZone({ env: { MCP_USER_TZ: 'bogus' } })).toBeUndefined();
+    expect(resolveUserTimeZone({ env: {} })).toBeUndefined();
+  });
+
+  it('validates IANA zone names', () => {
+    expect(isValidTimeZone('America/Chicago')).toBe(true);
+    expect(isValidTimeZone('UTC')).toBe(true);
+    expect(isValidTimeZone('Mars/Olympus')).toBe(false);
+    expect(isValidTimeZone('')).toBe(false);
   });
 });
 
