@@ -2364,12 +2364,16 @@ following an earlier version of this lint). `.claude-plugin/plugin.json`
 | absent | the root `.mcp.json` (Claude Code's default) | plugin config | a cwd-relative path in it |
 | another path, e.g. `"./.claude-plugin/mcp.json"` | that file | project-scoped | a cwd-relative path in that file; `${CLAUDE_PLUGIN_ROOT}` in the root file; a path that does not exist |
 | inline object (or an array mixing shapes) | the inline servers (and any named files) | project-scoped unless the array names it | a cwd-relative path inline; `${CLAUDE_PLUGIN_ROOT}` in the root file |
+| `mcp` instead (any value) | ignored by Claude Code, so the root `.mcp.json` | resolved as if `mcpServers` held the same value | always `plugin-json-mcp-ignored`: softer for `"./.mcp.json"`, stronger for any other path |
 
 `mcp` is not a key Claude Code reads (`claude plugin validate`: "Unknown field
-'mcp'"). `"mcp": "./.mcp.json"` names the default anyway and is not reported;
-any other `mcp` value is resolved as the author meant (so the root file is
-not told to use the variable) and reported, because a plugin install really
-loads the root `.mcp.json`. `.mcpb`/`.dxt` bundles and URLs are skipped. One
+'mcp'"), so every `mcp` key is reported as `plugin-json-mcp-ignored` (a
+warning; an error only under `--strict`). `"mcp": "./.mcp.json"` names the
+default anyway, so its message says it is harmless today but should be
+renamed to `mcpServers` — copies of the key with other paths broke plugin
+installs. Any other `mcp` value is resolved as the author meant (so the root
+file is not told to use the variable) and reported more strongly, because a
+plugin install really loads the root `.mcp.json`. `.mcpb`/`.dxt` bundles and URLs are skipped. One
 case is not checked: Claude Code loads the root `.mcp.json` first and merges
 the declared config over it, so a project-scoped root server whose name the
 plugin config does not replace also starts in a plugin install whose source

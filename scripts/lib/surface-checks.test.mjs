@@ -514,11 +514,44 @@ describe('plugin MCP config layouts', () => {
 });
 
 describe('an ignored "mcp" key that names the default', () => {
-  it('is not reported: Claude Code loads the root .mcp.json anyway, which is what it names', () => {
+  // 57 fleet repos carry `"mcp": "./.mcp.json"`. It is harmless today, but it
+  // is the key that, copied with another path, broke plugin installs — so it
+  // is reported too, with a softer message, and stays a warning.
+  it('is reported: harmless today, but the key is ignored and should be renamed to mcpServers', () => {
     const fs = mcpConfigPathFindings({
       mcpJson: { file: '.mcp.json', json: { mcpServers: { svc: { command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/dist/index.js'] } } } },
       pluginMcp: resolvePluginMcp({ file: '.claude-plugin/plugin.json', json: { mcp: './.mcp.json' } }, () => null, (rel) => rel === './.mcp.json'),
     });
-    expect(fs).toEqual([]);
+    expect(fs.map((f) => `${f.code}:${f.subject}@${f.file}`)).toEqual(['plugin-json-mcp-ignored:mcp@.claude-plugin/plugin.json']);
+    expect(fs[0].message).toMatch(/harmless today/);
+    expect(fs[0].message).toMatch(/default/);
+    expect(fs[0].message).toMatch(/ignore/);
+    expect(fs[0].message).toContain('"mcpServers"');
+    expect(fs[0].message).toMatch(/other paths broke plugin installs/);
+    expect(fs[0].message).not.toMatch(/loads the root .mcp.json instead/);
+  });
+
+  it('is reported in a real layout, and the root file stays the plugin config (no CLAUDE_PLUGIN_ROOT complaint)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'surface-'));
+    try {
+      const w = (rel, body) => { mkdirSync(dirname(join(root, rel)), { recursive: true }); writeFileSync(join(root, rel), JSON.stringify(body)); };
+      w('package.json', {});
+      mkdirSync(join(root, 'dist'), { recursive: true });
+      writeFileSync(join(root, 'dist/index.js'), '');
+      w('.claude-plugin/plugin.json', { name: 'svc', mcp: './.mcp.json' });
+      w('.mcp.json', { mcpServers: { svc: { command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/dist/index.js'] } } });
+      const ws = collectSurfaceWarnings(join(root, 'dist/index.js'), [], { load: (e) => loadSurface(e, root) });
+      expect(ws.filter((x) => x.code.startsWith('plugin-') || x.code.startsWith('mcp-json-')).map((x) => x.code))
+        .toEqual(['plugin-json-mcp-ignored']);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('keeps the stronger message for a non-default path', () => {
+    const fs = mcpConfigPathFindings({
+      pluginMcp: resolvePluginMcp({ file: '.claude-plugin/plugin.json', json: { mcp: './mcp.json' } }, () => null, (rel) => rel === './.mcp.json'),
+    });
+    expect(fs[0].code).toBe('plugin-json-mcp-ignored');
+    expect(fs[0].message).toMatch(/loads the root .mcp.json instead/);
+    expect(fs[0].message).not.toMatch(/harmless today/);
   });
 });

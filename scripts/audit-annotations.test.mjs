@@ -63,6 +63,17 @@ describe('audit-annotations.mjs', () => {
     expect(r.stdout).toMatch(/surface checks {3}annotations 2 {3}manifest-tools 0 {3}env 0/);
   });
 
+  it('warns on a plugin.json "mcp": "./.mcp.json" key but still exits 0 without --strict', () => {
+    pkg({
+      '.claude-plugin/plugin.json': { name: 'svc', mcp: './.mcp.json' },
+      '.mcp.json': { mcpServers: { svc: { command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/dist/index.js'] } } },
+    });
+    const r = run([{ name: 'svc_list', annotations: READ }]);
+    expect(r.status).toBe(0);
+    expect(warnings(r)).toEqual([expect.stringMatching(/"mcp".*harmless today/)]);
+    expect(run([{ name: 'svc_list', annotations: READ }], '--strict').status).toBe(1);
+  });
+
   it('--strict turns any warning into exit 1', () => {
     pkg();
     const r = run([{ name: 'svc_send', annotations: { readOnlyHint: false } }], '--strict');
