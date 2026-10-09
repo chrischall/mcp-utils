@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.0.1](https://github.com/chrischall/mcp-utils/compare/v3.0.0...v3.0.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* **lint:** stop counting bundled dependencies' env reads as server config ([#369](https://github.com/chrischall/mcp-utils/issues/369)) ([3491e12](https://github.com/chrischall/mcp-utils/commit/3491e12224c3d01dd26fda32e8a29661b9f866b8))
+* ship the migration and confirm-token docs in the npm package ([#367](https://github.com/chrischall/mcp-utils/issues/367)) ([bad97ec](https://github.com/chrischall/mcp-utils/commit/bad97ec906758dad23042791dd3815f0a6749c8a))
+
 ## [3.0.0](https://github.com/chrischall/mcp-utils/compare/v2.15.1...v3.0.0) (2026-10-09)
 
 
