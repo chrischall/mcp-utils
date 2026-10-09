@@ -25,6 +25,7 @@ import { isCloudflareChallenge } from '../scrape/index.js';
 export * from './throttle.js';
 export * from './response-cache.js';
 export * from './net-atoms.js';
+export * from './fetch-bounded.js';
 
 import { parseRetryAfterMs } from './net-atoms.js';
 import { retryAfterToMs } from '../internal/retry-after.js';

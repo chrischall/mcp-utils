@@ -714,11 +714,12 @@ clone of this repo: `node scripts/audit-fs-confinement.mjs ../your-mcp`.
 `createApiClient` plus building blocks: `buildQueryString`, `buildOptionalBody`,
 `formatApiError`, `parseLinkHeader`, `parseCookieJar`, `parseCookieHeader`,
 `runBoundedBatch`, `createThrottle`, `createResponseCache`, `parseRetryAfterMs`,
+`fetchBounded`,
 `splitHost`, `buildUserAgent`, `parseContentDispositionFilename`, JWT helpers
 (`decodeJwtExp`, `decodeJwtSessionId`, `decodeJwtClaim`, `validateJwtExpiry`),
 `detectEdgeBlock`, and the `ApiError` / `UpstreamHttpError` /
 `EdgeBlockedError` / `UnauthorizedError` / `RateLimitedError` /
-`RequestTimeoutError` classes.
+`RequestTimeoutError` / `ResponseTooLargeError` classes.
 
 `parseContentDispositionFilename(header)` returns the download's filename or
 `undefined`. It prefers RFC 8187 `filename*=` (charset prefix optional; UTF-8
@@ -759,6 +760,47 @@ applies either way.
 `maxRetryAfterMs`, default 30 s — hoisted from getyourguide / musicbrainz /
 viator / tripadvisor), and the standalone `parseRetryAfterMs(header)` for custom
 clients.
+
+#### `fetchBounded` — for clients that cannot use `createApiClient`
+
+Cookie scrapers, multi-host clients, HTML readers and downloads don't fit a
+single-base bearer client, and a bare `fetch` gets none of its protections.
+`fetchBounded` is one call that does:
+
+```ts
+import { fetchBounded } from '@chrischall/mcp-utils';
+
+const { status, ok, headers, body } = await fetchBounded(
+  'https://files.example.com/report.pdf',
+  { headers: { Cookie: jar.header() } },       // any RequestInit, incl. its own signal
+  { read: 'bytes', maxBytes: 20 * 1024 * 1024, service: 'Example' },
+);
+```
+
+- **Timeout** `timeoutMs` (default 30 s, `DEFAULT_REQUEST_TIMEOUT_MS`; `0` /
+  `false` disables) runs from the request until the body has been read, raced
+  rather than trusted to the stream, and throws `RequestTimeoutError`.
+- **Cancellation**: `init.signal` and the ambient tool-call signal are both
+  honoured; a cancel rejects with the caller's own reason, never as a timeout.
+- **Size cap** `maxBytes`: a `Content-Length` over it is refused before
+  reading, and a body that grows past it is cancelled mid-stream —
+  `ResponseTooLargeError`.
+- **Body** `read`: `'text'` (default), `'json'` (empty → `undefined`;
+  unparseable → an `McpToolError` naming the status and content type, never
+  echoing the body), `'bytes'` (`Uint8Array`), or `'none'` (cancelled unread,
+  for a status check).
+
+It does not judge the status — a 404 comes back like a 200, body read — since
+these clients each decide what a non-2xx means. Every failure path cancels
+the body stream so the connection is released.
+
+`createThrottle({ minIntervalMs })` serializes calls and spaces their starts
+(a proactive rate limit, e.g. MusicBrainz's 1 req/s). A call that has not
+started yet is **cancellable**: when the ambient tool-call signal (or a
+per-call `throttle(fn, { signal })`) fires while it is queued or sleeping its
+interval, it rejects at once with the signal's reason, `fn` never runs, and
+the slot does not consume the interval. Once `fn` has started, the task owns
+its own cancellation.
 
 Request bodies: `body` is JSON (`application/json`, the default); `form`
 (a `URLSearchParams` or a plain record) is sent form-encoded as
@@ -885,6 +927,10 @@ await fetch(url, { signal: currentCallSignal() });
 // For a spawned child, which passing a signal to fetch does nothing about:
 const done = killOnCancel(child);
 try { /* … */ } finally { done(); }   // the disposer is required
+
+// `createThrottle` slots and `createOAuth2Refresher` waits honour it too.
+// For a fetch that cannot go through createApiClient, `fetchBounded` adds a
+// timeout, a body-read deadline and a byte cap (see the `http` section).
 
 // For a long loop with no fetch to hang the signal on:
 for (const page of pages) { throwIfCancelled(); /* … */ }
@@ -1141,6 +1187,12 @@ discard its only live copy.
 If `onRotate` throws, the exchange is not retried; the refresher keeps the new
 token and throws `OAuth2RotationPersistError` (carrying the `result`), which
 `TokenManager` surfaces without wiping its store.
+Each exchange is bounded by `timeout` (default 30 s, body read included; `0` /
+`false` disables) and throws `RequestTimeoutError` on expiry. A cancelled tool
+call is released at once — and one already cancelled never starts an exchange
+— but an exchange already in flight is never aborted for it: the POST may have
+rotated the refresh token upstream, and it is shared with every coalesced
+caller, so it finishes (or times out) and `onRotate` still runs.
 
 `createCachedTokenSource({ mint, bufferMs })` caches any minted token until
 shortly before expiry with a single-flight mint and an `invalidate()` hook for
