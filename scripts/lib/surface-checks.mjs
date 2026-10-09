@@ -27,8 +27,20 @@
  *   `user_config` entry nothing passes to the server, and a cwd-relative
  *   script path in `.mcp.json` (ioffice).
  *
- * Why the built code and not src/: it is what ships, and a bundle carries
- * every literal key a src/ grep would find. Only LITERAL keys are visible —
+ * Why the built code and not src/: it is what ships. Which built code: the
+ * SERVER's own. Reads are attributed to the tsc output (every built file
+ * except an esbuild `bundle.js`) whenever it exists, because a bundle also
+ * inlines every dependency, and their env reads are not server config — the
+ * 2026-10 fleet run reported `ws`'s WS_NO_BUFFER_UTIL (×21) and
+ * WS_NO_UTF_8_VALIDATE (×18), @fetchproxy/server's FETCHPROXY_WS_PORT /
+ * _WS_HOST / _IDENTITY_DIR (×16/×9/×9) and debug/mime/depd/readable-stream/
+ * thread-stream keys as undeclared, and two repos hid them with esbuild
+ * `--define`. Only when a bundle is ALL there is does the check fall back to
+ * it, minus a list of those well-known dependency keys (DEPENDENCY_KEYS). A
+ * server that reads one of them in its own code is still checked, because
+ * the tsc output wins whenever it is present. The dead-declaration check
+ * still searches the bundle too: a declared knob that only a dependency reads
+ * is live. Only LITERAL keys are visible —
  * `readEnvVar(\`${PREFIX}_TOKEN\`)` is not — and a var documented only in a
  * README is invisible too (SKILL.md), which is why every check here WARNS and
  * only `--strict` turns them into a failure.
@@ -151,8 +163,24 @@ const isIgnoredKey = (k) => k.startsWith('MCP_') || RUNTIME_KEYS.has(k);
 const RUNTIME_KEYS = new Set([
   'NODE_ENV', 'NODE_OPTIONS', 'NODE_EXTRA_CA_CERTS', 'NODE_TLS_REJECT_UNAUTHORIZED', 'DEBUG',
   'HOME', 'PATH', 'TZ', 'TMPDIR', 'USER', 'LANG', 'CI', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME',
-  'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'CLAUDE_PLUGIN_ROOT',
+  'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'CLAUDE_PLUGIN_ROOT', 'NODE_V8_COVERAGE',
 ]);
+
+/**
+ * Keys that bundled third-party dependencies read, dropped from reads ONLY
+ * when the bundle is the sole built source (`code.bundled`). With tsc output
+ * present the bundle is not scanned for reads at all, so a server that reads
+ * one of these itself must still declare it. Measured across 67 fleet repos
+ * (2026-10): `ws` (WS_NO_BUFFER_UTIL, WS_NO_UTF_8_VALIDATE → the `WS_NO_`
+ * prefix), @fetchproxy/server's hosting knobs (inert when the server passes
+ * an explicit port → the `FETCHPROXY_` prefix), debug (DEBUG_FD), mime
+ * (DEBUG_MIME), depd (NO_DEPRECATION, TRACE_DEPRECATION) and readable-stream
+ * (READABLE_STREAM). thread-stream's NODE_V8_COVERAGE is a Node runtime var,
+ * so it lives in RUNTIME_KEYS.
+ */
+const DEPENDENCY_KEYS = new Set(['DEBUG_FD', 'DEBUG_MIME', 'NO_DEPRECATION', 'TRACE_DEPRECATION', 'READABLE_STREAM']);
+const DEPENDENCY_PREFIXES = ['WS_NO_', 'FETCHPROXY_'];
+const isDependencyKey = (k) => DEPENDENCY_KEYS.has(k) || DEPENDENCY_PREFIXES.some((p) => k.startsWith(p));
 
 const USER_CONFIG_REF = /\$\{user_config\.([^}]+)\}/g;
 const userConfigRefs = (value) => [...String(value ?? '').matchAll(USER_CONFIG_REF)].map((m) => m[1]);
@@ -196,8 +224,11 @@ const mentions = (text, key) => {
  * Per surface: undeclared reads (manifest.json and server.json only — a
  * dev-only `.mcp.json` legitimately leans on `.env`), dead declarations,
  * then required-but-optional; `user_config` entries nothing wires last.
+ * `code.reads` are the server's own reads; `code.text` is everything shipped
+ * (bundle included) and only answers "is this declared key mentioned at all".
+ * `code.bundled` says the reads came from a bundle, so DEPENDENCY_KEYS drop.
  * @param {{
- *   code: { text: string, reads: Map<string, { required: boolean, optional: boolean }> },
+ *   code: { text: string, reads: Map<string, { required: boolean, optional: boolean }>, bundled?: boolean },
  *   manifest?: { file: string, json: any },
  *   serverJson?: { file: string, json: any },
  *   mcpJson?: { file: string, json: any },
@@ -206,7 +237,9 @@ const mentions = (text, key) => {
  */
 export function envDriftFindings({ code, manifest, serverJson, mcpJson }) {
   const out = [];
-  const read = [...code.reads.keys()].filter((k) => !isIgnoredKey(k)).sort();
+  const read = [...code.reads.keys()]
+    .filter((k) => !isIgnoredKey(k) && !(code.bundled && isDependencyKey(k)))
+    .sort();
   const surfaces = [
     manifest && { ...manifest, decls: manifestDecls(manifest.json), where: 'server.mcp_config.env', checkUndeclared: true },
     serverJson && Array.isArray(serverJson.json?.packages)
@@ -310,9 +343,13 @@ const SOURCE_EXT = /\.(?:c|m)?js$/;
 // (`"bin": "index.js"`), where the walk would otherwise cover the whole repo.
 const SKIP_DIRS = new Set(['node_modules', 'coverage', 'test', 'tests', '__tests__']);
 const TEST_FILE = /\.(?:test|spec)\.(?:c|m)?js$/;
+// The fleet's esbuild output (`dist/bundle.js`): the server plus every
+// dependency inlined, so its env reads are not all the server's.
+const BUNDLE_FILE = /^bundle\.(?:c|m)?js$/;
 
 /**
- * Concatenated built source under `dir`. Never throws: a directory or file
+ * Built source under `dir`, split into the tsc output (`own`) and esbuild
+ * bundles (`bundle`), each concatenated. Never throws: a directory or file
  * that cannot be read (a dangling symlink, a symlink to a directory, EACCES)
  * is skipped and reported through `onError`. Symlinked directories are not
  * followed, so a link cycle cannot loop.
@@ -320,7 +357,8 @@ const TEST_FILE = /\.(?:test|spec)\.(?:c|m)?js$/;
  * @param {(path: string, e: Error) => void} onError
  */
 function readBuiltSource(dir, onError) {
-  const parts = [];
+  const own = [];
+  const bundle = [];
   const walk = (d) => {
     let entries;
     try {
@@ -337,22 +375,24 @@ function readBuiltSource(dir, onError) {
       }
       if (!SOURCE_EXT.test(e.name) || TEST_FILE.test(e.name)) continue;
       try {
-        parts.push(readFileSync(p, 'utf8'));
+        (BUNDLE_FILE.test(e.name) ? bundle : own).push(readFileSync(p, 'utf8'));
       } catch (err) {
         onError(p, err);
       }
     }
   };
   walk(dir);
-  return parts.join('\n');
+  return { own: own.join('\n'), bundle: bundle.join('\n'), hasOwn: own.length > 0 };
 }
 
 /**
  * Everything the surface checks read: the built source (every .js/.mjs/.cjs
  * under the entry's directory; node_modules, dot-dirs, test trees, coverage
  * and *.test/*.spec files skipped) and each config file
- * present beside the entry's package.json. File paths are reported relative
- * to `cwd`, which is the repo root in CI.
+ * present beside the entry's package.json. Env reads come from the tsc output
+ * alone when any exists, else from `bundle.js` (`code.bundled`); `code.text`
+ * holds both. File paths are reported relative to `cwd`, which is the repo
+ * root in CI.
  * @param {string} entry
  * @param {string} [cwd]
  */
@@ -367,7 +407,12 @@ export function loadSurface(entry, cwd = process.cwd()) {
       message: `${file} could not be read (${e.code ?? e.message}), so the env checks skipped it.`,
     });
   };
-  const text = statSync(entryDir).isDirectory() ? readBuiltSource(entryDir, unreadable) : '';
+  const src = statSync(entryDir).isDirectory()
+    ? readBuiltSource(entryDir, unreadable)
+    : { own: '', bundle: '', hasOwn: false };
+  // tsc output wins whenever there is any; the bundle is the fallback.
+  const bundled = !src.hasOwn && src.bundle !== '';
+  const text = [src.own, src.bundle].filter(Boolean).join('\n');
   const load = (name) => {
     const p = join(pkgDir, name);
     if (!existsSync(p)) return undefined;
@@ -380,7 +425,7 @@ export function loadSurface(entry, cwd = process.cwd()) {
     }
   };
   return {
-    code: { text, reads: collectEnvReads(text) },
+    code: { text, reads: collectEnvReads(bundled ? src.bundle : src.own), bundled },
     manifest: load('manifest.json'),
     serverJson: load('server.json'),
     mcpJson: load('.mcp.json'),

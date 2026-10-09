@@ -2352,7 +2352,19 @@ exit code unless you pass `--strict`**:
 
 The env check reads every `.js`/`.mjs`/`.cjs` under the entry's directory,
 skipping `node_modules`, dot-directories, `test`/`tests`/`__tests__`,
-`coverage` and `*.test.*`/`*.spec.*` files. A file or directory it cannot read
+`coverage` and `*.test.*`/`*.spec.*` files. It attributes env reads to the
+**server's own code**: when the tsc output is there (`dist/index.js` and its
+imports — any built file other than an esbuild `bundle.js`), reads come from
+that alone, because a bundle also inlines every dependency and their env reads
+are not server config (`ws`'s `WS_NO_BUFFER_UTIL`, @fetchproxy/server's
+`FETCHPROXY_WS_PORT`, debug/mime/depd/readable-stream knobs). Only a
+bundle-only build is scanned through the bundle, minus a fixed list of those
+dependency keys (`WS_NO_*`, `FETCHPROXY_*`, `DEBUG_FD`, `DEBUG_MIME`,
+`NO_DEPRECATION`, `TRACE_DEPRECATION`, `READABLE_STREAM`; `NODE_V8_COVERAGE`
+is ignored everywhere as a runtime var). A server that reads one of those keys
+in its own code still has to declare it. The dead-declaration check searches
+the bundle as well, so a declared knob that only a dependency reads is not
+called dead. No esbuild `--define` is needed to quieten dependency reads. A file or directory it cannot read
 (a dangling symlink, `EACCES`) becomes a warning, not a crash, and so does any
 other failure inside the surface checks: they can never change the exit code
 without `--strict`.

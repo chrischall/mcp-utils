@@ -300,6 +300,82 @@ describe('findPackageDir / loadSurface', () => {
   });
 });
 
+describe('env reads from bundled dependencies', () => {
+  let root;
+  const write = (rel, body) => {
+    mkdirSync(dirname(join(root, rel)), { recursive: true });
+    writeFileSync(join(root, rel), typeof body === 'string' ? body : JSON.stringify(body));
+  };
+  afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); root = undefined; });
+  const manifest = (env) => ({ server: { mcp_config: { env } } });
+  // What esbuild inlines from ws, @fetchproxy/server, debug, mime, depd,
+  // readable-stream and thread-stream: the fleet-wide false positives.
+  const DEP_READS = [
+    'process.env.WS_NO_BUFFER_UTIL', 'process.env.WS_NO_UTF_8_VALIDATE',
+    "readPortEnv('FETCHPROXY_WS_PORT')", "process.env['FETCHPROXY_WS_HOST']", 'process.env.FETCHPROXY_IDENTITY_DIR',
+    'process.env.NODE_V8_COVERAGE', 'process.env.DEBUG_FD', 'process.env.DEBUG_MIME',
+    'process.env.NO_DEPRECATION', 'process.env.TRACE_DEPRECATION', 'process.env.READABLE_STREAM',
+  ].join(';\n');
+
+  it('attributes reads to the tsc output and ignores the bundle beside it', () => {
+    root = mkdtempSync(join(tmpdir(), 'surface-'));
+    write('package.json', {});
+    write('manifest.json', manifest({ SVC_TOKEN: 'x' }));
+    write('dist/index.js', "import './config.js';");
+    write('dist/config.js', "requireEnvVar('SVC_TOKEN');");
+    write('dist/bundle.js', `requireEnvVar('SVC_TOKEN');\n${DEP_READS};\nreadEnvVar('SVC_BUNDLE_ONLY');`);
+    const s = loadSurface(join(root, 'dist/index.js'), root);
+    expect([...s.code.reads.keys()]).toEqual(['SVC_TOKEN']);
+    expect(envDriftFindings(s)).toEqual([]);
+  });
+
+  it('still uses the tsc output when the entry handed to it is the bundle', () => {
+    root = mkdtempSync(join(tmpdir(), 'surface-'));
+    write('package.json', {});
+    write('dist/index.js', "readEnvVar('SVC_A');");
+    write('dist/bundle.js', DEP_READS);
+    expect([...loadSurface(join(root, 'dist/bundle.js'), root).code.reads.keys()]).toEqual(['SVC_A']);
+  });
+
+  it("still warns on an undeclared key the server's own code reads, a dependency's key included", () => {
+    root = mkdtempSync(join(tmpdir(), 'surface-'));
+    write('package.json', {});
+    write('manifest.json', manifest({ SVC_TOKEN: 'x' }));
+    write('dist/index.js', "requireEnvVar('SVC_TOKEN'); readEnvVar('SVC_OUTPUT_DIR'); readPortEnv('FETCHPROXY_WS_PORT');");
+    write('dist/bundle.js', DEP_READS);
+    expect(codes(envDriftFindings(loadSurface(join(root, 'dist/index.js'), root))))
+      .toEqual(['env-undeclared:FETCHPROXY_WS_PORT', 'env-undeclared:SVC_OUTPUT_DIR']);
+  });
+
+  it('does not call a declared key dead when only a bundled dependency reads it', () => {
+    root = mkdtempSync(join(tmpdir(), 'surface-'));
+    write('package.json', {});
+    write('manifest.json', manifest({ SVC_TOKEN: 'x', FETCHPROXY_WS_PORT: 'x', SVC_OLD: 'x' }));
+    write('dist/index.js', "requireEnvVar('SVC_TOKEN');");
+    write('dist/bundle.js', DEP_READS);
+    expect(codes(envDriftFindings(loadSurface(join(root, 'dist/index.js'), root)))).toEqual(['env-dead:SVC_OLD']);
+  });
+
+  it('falls back to the bundle with the dependency ignore list when there is no tsc output', () => {
+    root = mkdtempSync(join(tmpdir(), 'surface-'));
+    write('package.json', {});
+    write('manifest.json', manifest({ SVC_TOKEN: 'x' }));
+    write('dist/bundle.js', `requireEnvVar('SVC_TOKEN');\n${DEP_READS};\nreadEnvVar('SVC_OUTPUT_DIR');\nprocess.env.WS_NO_SOMETHING_NEW;\nprocess.env.FETCHPROXY_NEW_KNOB;`);
+    const s = loadSurface(join(root, 'dist/bundle.js'), root);
+    expect(s.code.bundled).toBe(true);
+    // The server's own undeclared read is still caught in the bundle.
+    expect(codes(envDriftFindings(s))).toEqual(['env-undeclared:SVC_OUTPUT_DIR']);
+  });
+
+  it('reports dependency keys from own (unbundled) code but drops them from a bundle', () => {
+    const src = 'process.env.WS_NO_BUFFER_UTIL; process.env.FETCHPROXY_WS_HOST; process.env.DEBUG_FD; process.env.NODE_V8_COVERAGE;';
+    const m = { file: 'manifest.json', json: manifest({}) };
+    expect(codes(envDriftFindings({ code: { text: src, reads: collectEnvReads(src) }, manifest: m })))
+      .toEqual(['env-undeclared:DEBUG_FD', 'env-undeclared:FETCHPROXY_WS_HOST', 'env-undeclared:WS_NO_BUFFER_UTIL']);
+    expect(envDriftFindings({ code: { text: src, reads: collectEnvReads(src), bundled: true }, manifest: m })).toEqual([]);
+  });
+});
+
 describe('collectSurfaceWarnings', () => {
   it('turns a surface-check crash into one surface warning instead of throwing', () => {
     const boom = () => { throw new Error('EACCES: permission denied'); };
