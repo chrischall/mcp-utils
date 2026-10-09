@@ -30,7 +30,10 @@
  *   `mcpServers`; the root `.mcp.json` when absent): a root `.mcp.json` that
  *   is NOT the plugin config is project-scoped, where CLAUDE_PLUGIN_ROOT is
  *   undefined, so there it warns on `${CLAUDE_PLUGIN_ROOT}` instead
- *   (office-outlook-mcp; tempo-api-mcp). See `mcpConfigPathFindings`.
+ *   (office-outlook-mcp; tempo-api-mcp). Any plugin.json `mcp` key, a key
+ *   Claude Code ignores, is reported too — `"mcp": "./.mcp.json"` (57 repos)
+ *   with a softer message, since it names the default. See
+ *   `mcpConfigPathFindings`.
  *
  * Why the built code and not src/: it is what ships. Which built code: the
  * SERVER's own. Reads are attributed to the tsc output (every built file
@@ -346,9 +349,12 @@ const BUNDLE_OR_URL = /^https?:\/\/|\.(?:mcpb|dxt)$/i;
  * microsoft-teams-mcp) declare `"mcp": "./mcp.json"` meaning
  * `.claude-plugin/mcp.json`; it is resolved here as the author intended so the
  * root file is not wrongly told to use `${CLAUDE_PLUGIN_ROOT}`, and reported
- * (`ignoredMcpKey`) so it gets renamed. The other 60 declare
- * `"mcp": "./.mcp.json"`, the default Claude Code loads anyway, which is
- * harmless and not reported.
+ * (`ignoredMcpKey`) so it gets renamed. The other 57 declare
+ * `"mcp": "./.mcp.json"`, the default Claude Code loads anyway: harmless
+ * today, but still an ignored key, and the one that, copied with another
+ * path, broke those two plugin installs. It is reported too
+ * (`ignoredMcpKeyIsDefault` picks the softer message) so the fleet renames it
+ * to `mcpServers`.
  *
  * Caveat: Claude Code loads the plugin root's `.mcp.json` FIRST and merges the
  * declared configs over it (a later server name replaces an earlier one), so a
@@ -364,14 +370,14 @@ const BUNDLE_OR_URL = /^https?:\/\/|\.(?:mcpb|dxt)$/i;
  * @param {(rel: string) => boolean} isRootMcpJson whether a path names the root `.mcp.json`
  */
 export function resolvePluginMcp(plugin, readConfig, isRootMcpJson) {
-  const none = { rootIsPluginConfig: true, configs: [], missing: [], ignoredMcpKey: false };
+  const none = { rootIsPluginConfig: true, configs: [], missing: [], ignoredMcpKey: false, ignoredMcpKeyIsDefault: false };
   if (!plugin || typeof plugin.json !== 'object' || plugin.json === null) return none;
   const hasServers = plugin.json.mcpServers !== undefined;
   const ignoredMcpKey = !hasServers && plugin.json.mcp !== undefined;
   const value = hasServers ? plugin.json.mcpServers : plugin.json.mcp;
   if (value === undefined) return none;
   const field = hasServers ? 'mcpServers' : 'mcp';
-  const out = { rootIsPluginConfig: false, configs: [], missing: [], ignoredMcpKey, field, pluginFile: plugin.file };
+  const out = { rootIsPluginConfig: false, configs: [], missing: [], ignoredMcpKey, ignoredMcpKeyIsDefault: false, field, pluginFile: plugin.file };
   for (const entry of Array.isArray(value) ? value : [value]) {
     if (typeof entry === 'string') {
       if (BUNDLE_OR_URL.test(entry)) continue;
@@ -383,9 +389,10 @@ export function resolvePluginMcp(plugin, readConfig, isRootMcpJson) {
       out.configs.push({ file: plugin.file, json: { mcpServers: entry } });
     }
   }
-  // An ignored `"mcp": "./.mcp.json"` (60 fleet repos) names the default
-  // Claude Code uses anyway, so it changes nothing and is not reported.
-  out.ignoredMcpKey = ignoredMcpKey && (!out.rootIsPluginConfig || out.configs.length > 0 || out.missing.length > 0);
+  // An ignored `"mcp": "./.mcp.json"` names the default Claude Code uses
+  // anyway, so it changes nothing today; it is still reported, with a softer
+  // message, because the key itself is ignored.
+  out.ignoredMcpKeyIsDefault = ignoredMcpKey && out.rootIsPluginConfig && out.configs.length === 0 && out.missing.length === 0;
   return out;
 }
 
@@ -400,16 +407,24 @@ export function resolvePluginMcp(plugin, readConfig, isRootMcpJson) {
  *   or inline plugin.json servers) must not run a cwd-relative path;
  * - a root `.mcp.json` that is NOT the plugin config must not use
  *   `${CLAUDE_PLUGIN_ROOT}`;
- * - a declared config that does not exist, and an `mcp` key, are reported.
+ * - a declared config that does not exist, and any `mcp` key (even one naming
+ *   the default), are reported.
  * Without a plugin.json the root `.mcp.json` is treated as the plugin config,
  * as before.
  * @param {{ mcpJson?: { file: string, json: any }, pluginMcp?: ReturnType<typeof resolvePluginMcp> }} s
  * @returns {SurfaceFinding[]}
  */
 export function mcpConfigPathFindings({ mcpJson, pluginMcp }) {
-  const p = pluginMcp ?? { rootIsPluginConfig: true, configs: [], missing: [], ignoredMcpKey: false };
+  const p = pluginMcp ?? { rootIsPluginConfig: true, configs: [], missing: [], ignoredMcpKey: false, ignoredMcpKeyIsDefault: false };
   const out = [];
-  if (p.ignoredMcpKey) {
+  if (p.ignoredMcpKey && p.ignoredMcpKeyIsDefault) {
+    out.push({
+      check: 'env', code: 'plugin-json-mcp-ignored', subject: 'mcp', file: p.pluginFile,
+      message: `${p.pluginFile} declares "mcp", a key Claude Code ignores (claude plugin validate: "Unknown field 'mcp'"). `
+        + 'It is harmless today, because the path it names, ./.mcp.json, is the default a plugin install loads anyway — but copies of this key with other paths broke plugin installs. '
+        + 'Rename it to "mcpServers" (e.g. "mcpServers": "./.mcp.json"), or drop it to rely on the default.',
+    });
+  } else if (p.ignoredMcpKey) {
     out.push({
       check: 'env', code: 'plugin-json-mcp-ignored', subject: 'mcp', file: p.pluginFile,
       message: `${p.pluginFile} declares "mcp", a key Claude Code ignores (claude plugin validate: "Unknown field 'mcp'"), so a plugin install loads the root .mcp.json instead. `

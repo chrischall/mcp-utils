@@ -46,7 +46,9 @@
  *     `mcpServers` — a file, inline, or the root `.mcp.json` when absent),
  *     and `${CLAUDE_PLUGIN_ROOT}` in a root `.mcp.json` that is NOT the
  *     plugin config (project-scoped launches do not define it, so the server
- *     dies at startup). Reads are taken from
+ *     dies at startup); and ANY `mcp` key in plugin.json, a key Claude Code
+ *     ignores — even `"mcp": "./.mcp.json"`, harmless today because it names
+ *     the default, but to be renamed to `mcpServers`. Reads are taken from
  *     the server's own tsc output, not an esbuild `bundle.js` beside it (a
  *     bundle inlines dependencies such as `ws` and @fetchproxy/server, whose
  *     env reads are not server config); a bundle-only build falls back to the
