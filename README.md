@@ -714,12 +714,14 @@ clone of this repo: `node scripts/audit-fs-confinement.mjs ../your-mcp`.
 `createApiClient` plus building blocks: `buildQueryString`, `buildOptionalBody`,
 `formatApiError`, `parseLinkHeader`, `parseCookieJar`, `parseCookieHeader`,
 `runBoundedBatch`, `createThrottle`, `createResponseCache`, `parseRetryAfterMs`,
-`fetchBounded`,
+`fetchBounded`, the URL-safety atoms `apiPath`, `readOriginEnv`,
+`assertAllowedUrl` and `findPathHazard`,
 `splitHost`, `buildUserAgent`, `parseContentDispositionFilename`, JWT helpers
 (`decodeJwtExp`, `decodeJwtSessionId`, `decodeJwtClaim`, `validateJwtExpiry`),
 `detectEdgeBlock`, `parseJsonBody`, and the `ApiError` / `UpstreamHttpError` /
 `EdgeBlockedError` / `UnauthorizedError` / `RateLimitedError` /
-`RequestTimeoutError` / `ResponseTooLargeError` classes.
+`RequestTimeoutError` / `ResponseTooLargeError` / `UrlNotAllowedError` /
+`RedirectRefusedError` classes.
 
 `parseContentDispositionFilename(header)` returns the download's filename or
 `undefined`. It prefers RFC 8187 `filename*=` (charset prefix optional; UTF-8
@@ -760,6 +762,65 @@ applies either way.
 `maxRetryAfterMs`, default 30 s — hoisted from getyourguide / musicbrainz /
 viator / tripadvisor), and the standalone `parseRetryAfterMs(header)` for custom
 clients.
+
+#### URL safety — paths, base-URL overrides, links and redirects
+
+`createApiClient` keeps every request on `baseUrl`'s origin, and since 2.16
+it also **refuses a path that URL normalisation would rewrite**: a dot
+segment (`/trails/../admin`, `%2e%2e`, `.%2e`, …) or a backslash anywhere
+before the `?`. `encodeURIComponent('..')` is `..`, so an encoded tool argument
+could still walk the path to another endpoint with the credential attached
+(fleet audit 2026-09, cluster 5). The query string is not judged. Build paths
+with the `apiPath` tag, which encodes each value as exactly one segment and
+throws a `TypeError` on an empty, `.` or `..` value:
+
+```ts
+import { apiPath } from '@chrischall/mcp-utils';
+
+await api.fetchJson('GET', apiPath`/trails/${args.id}/reviews`);
+// args.id = '../admin'  → '/trails/..%2Fadmin/reviews' (one segment)
+// args.id = '..'        → TypeError before any request
+```
+
+`findPathHazard(path)` is the check itself, for clients that build URLs by
+hand.
+
+A base-URL override read from the environment goes through `readOriginEnv`,
+which accepts a bare `host[:port]` or an origin URL and returns
+`https://host[:port]`. It refuses, with a `UrlNotAllowedError` that names the
+variable but never its value: a non-http(s) scheme, `http:` (unless
+`requireHttps: false`, or `allowHttpLoopback: true` for localhost), userinfo,
+any path/query/fragment (so `https://https://host` is caught), and a host
+outside `allowHosts`. `default` is checked by the same rules.
+
+```ts
+import { readOriginEnv, assertAllowedUrl } from '@chrischall/mcp-utils';
+
+const baseUrl = readOriginEnv('GROUPON_API_URL', {
+  default: 'https://api.groupon.com',
+  allowHosts: ['api.groupon.com', '*.groupon.com'], // exact, *.suffix, or an anchored RegExp
+});
+
+// A link from a tool argument or an upstream response, before sending a cookie to it:
+const url = assertAllowedUrl(args.url, { allowHosts: ['www.thumbtack.com'] });
+```
+
+`assertAllowedUrl(url, { allowHosts, requireHttps?, allowHttpLoopback? })`
+returns the parsed `URL`, or throws a `UrlNotAllowedError` (with a `reason`
+code) that names only the host, never the path or query.
+
+Redirects: by default `createApiClient` leaves `fetch` to follow them, which
+re-sends the bearer wherever they point. Pass `redirect: 'same-origin'` to have
+the client follow them itself: each `Location` is checked against the base
+origin before anything is re-sent, and a hop to another origin, a scheme
+downgrade or a hop that adds userinfo throws `RedirectRefusedError`.
+`maxRedirects` defaults to 5 (`DEFAULT_MAX_REDIRECTS`). A 303, or a 301/302
+after a POST, becomes a body-less GET, while 307/308 keep the method and body.
+`'manual'`, `'error'` and `'follow'` are passed straight to `fetch`.
+
+```ts
+const api = createApiClient({ baseUrl, getToken, redirect: 'same-origin' });
+```
 
 #### `fetchBounded` — for clients that cannot use `createApiClient`
 

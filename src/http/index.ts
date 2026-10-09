@@ -27,8 +27,10 @@ export * from './throttle.js';
 export * from './response-cache.js';
 export * from './net-atoms.js';
 export * from './fetch-bounded.js';
+export * from './url-safety.js';
 
 import { parseRetryAfterMs } from './net-atoms.js';
+import { RedirectRefusedError, findPathHazard } from './url-safety.js';
 import { retryAfterToMs } from '../internal/retry-after.js';
 
 // ---------------------------------------------------------------------------
@@ -157,6 +159,24 @@ export interface ApiClientOptions {
    * legitimately takes longer passes a larger value.
    */
   timeout?: number | false;
+  /**
+   * How redirects are handled. Omitted (the default) leaves `fetch`'s own
+   * behaviour unchanged: it follows them, re-sending the credential to
+   * wherever they point. `'manual'` and `'error'` are passed straight to
+   * `fetch`.
+   *
+   * `'same-origin'` follows redirects itself (`fetch` is called with
+   * `redirect: 'manual'`) and re-checks every `Location` against the base
+   * origin BEFORE re-sending: a hop to another origin, a scheme downgrade or
+   * a hop that adds userinfo throws {@link RedirectRefusedError} and nothing
+   * is sent to it (fleet audit 2026-09, cluster 6: accessoticketing #322,
+   * thumbtack #768). A 303, or a 301/302 answering a POST, becomes a
+   * body-less GET; 307/308 keep the method and body. Needs a server-side
+   * `fetch` (Node/undici) that exposes the 3xx and its `Location`.
+   */
+  redirect?: 'same-origin' | 'manual' | 'error' | 'follow';
+  /** With `redirect: 'same-origin'`, the most hops followed per request. Default 5. */
+  maxRedirects?: number;
 }
 
 /**
@@ -282,6 +302,22 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
  * hung upstream the same way.
  */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+/** Default hop limit for `createApiClient({ redirect: 'same-origin' })`. */
+export const DEFAULT_MAX_REDIRECTS = 5;
+
+/** The statuses `redirect: 'same-origin'` follows (when they carry a `Location`). */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/** Cancel a response body we will not read. Never throws (a custom fetchImpl's body may be odd). */
+function cancelBody(res: Response): void {
+  try {
+    const body = res.body as { cancel?: () => Promise<void> } | null | undefined;
+    body?.cancel?.()?.catch(() => {});
+  } catch {
+    // nothing left to release
+  }
+}
 
 /** Thrown for an upstream 401. Carries the status so callers can trigger a re-auth. */
 export class UnauthorizedError extends Error {
@@ -646,6 +682,8 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   const unauthorized = (): Error => (opts.onUnauthorized ? opts.onUnauthorized() : new UnauthorizedError(service));
   const retryStatuses = retry.statuses ?? [429];
   const timeoutMs = opts.timeout === false ? 0 : (opts.timeout ?? DEFAULT_REQUEST_TIMEOUT_MS);
+  const redirectMode = opts.redirect;
+  const maxRedirects = opts.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
 
   // Default: `Authorization: Bearer <token>`. With `tokenHeader`, the raw
   // token goes in that named header instead (no `Bearer ` prefix).
@@ -723,12 +761,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
    */
   function discard(attempt: Attempt): void {
     attempt.done();
-    try {
-      const body = attempt.res.body as { cancel?: () => Promise<void> } | null | undefined;
-      body?.cancel?.()?.catch(() => {});
-    } catch {
-      // A body that refuses cancellation has nothing left to release.
-    }
+    cancelBody(attempt.res);
   }
 
   /**
@@ -773,6 +806,18 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
    * can neither introduce nor change it. Checked before any token is minted.
    */
   function resolveUrl(path: string, query: string): string {
+    // Dot segments and backslashes first: they stay on the base ORIGIN, so the
+    // origin check below never saw them, but normalisation rewrites them —
+    // `/trails/../admin` is sent as `/admin` with the credential attached
+    // (fleet audit 2026-09, cluster 5). `encodeURIComponent('..')` is `..`,
+    // so encoding the value was never enough; see `apiPath`.
+    const hazard = findPathHazard(path);
+    if (hazard !== undefined) {
+      throw new Error(
+        `Refusing request to ${service}: path ${JSON.stringify(path)} contains a ${hazard}, which URL ` +
+          'normalisation would rewrite. Build paths with apiPath`...` so each value is one encoded segment.',
+      );
+    }
     const url = `${base}${path}${query}`;
     if (baseOrigin === undefined) return url; // unparseable base: nothing to compare against
     let parsed: URL;
@@ -794,6 +839,33 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     return url;
   }
 
+  /**
+   * Resolve a redirect's `Location` against the URL that returned it and
+   * refuse it unless it stays on the base origin with the base's own
+   * userinfo — the same rule {@link resolveUrl} applies to a path. The message
+   * names only the target origin: the rest may carry a token.
+   */
+  function sameOriginHop(location: string, from: string): string {
+    let next: URL;
+    try {
+      next = new URL(location, from);
+    } catch {
+      throw new RedirectRefusedError(`Refusing redirect from ${service}: the Location header is not a valid URL.`);
+    }
+    if (
+      baseOrigin === undefined ||
+      next.origin !== baseOrigin ||
+      next.username !== baseParts?.username ||
+      next.password !== baseParts?.password
+    ) {
+      throw new RedirectRefusedError(
+        `Refusing redirect from ${service} to ${next.origin}: it leaves the base origin ${baseOrigin ?? '(unparseable)'}, ` +
+          'and following it would re-send the credential there.',
+      );
+    }
+    return next.href;
+  }
+
   async function send(method: string, path: string, opt: RequestOptions): Promise<Attempt> {
     const { body: reqBody, contentType } = encodeBody(opt);
     const query = opt.query ? buildQueryString(opt.query) : '';
@@ -802,19 +874,47 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
 
     // One fetch with the given token; Authorization comes last from the auth
     // mechanism, then per-request headers can still override it if needed.
-    const fetchWith = (token: string | undefined, signal?: AbortSignal): Promise<Response> =>
-      doFetch(url, {
-        method,
+    const fetchHop = (
+      hopUrl: string,
+      hopMethod: string,
+      withBody: boolean,
+      token: string | undefined,
+      signal?: AbortSignal,
+    ): Promise<Response> =>
+      doFetch(hopUrl, {
+        method: hopMethod,
         headers: {
           Accept: 'application/json',
-          ...(contentType !== undefined ? { 'Content-Type': contentType } : {}),
+          ...(withBody && contentType !== undefined ? { 'Content-Type': contentType } : {}),
           ...opts.baseHeaders,
           ...authHeader(token || undefined),
           ...opt.headers,
         },
         ...(signal ? { signal } : {}),
-        ...bodyInit,
+        ...(redirectMode !== undefined ? { redirect: redirectMode === 'same-origin' ? 'manual' : redirectMode } : {}),
+        ...(withBody ? bodyInit : {}),
       });
+
+    const fetchWith = async (token: string | undefined, signal?: AbortSignal): Promise<Response> => {
+      if (redirectMode !== 'same-origin') return fetchHop(url, method, true, token, signal);
+      let hopUrl = url;
+      let hopMethod = method;
+      let withBody = true;
+      for (let hops = 0; ; hops += 1) {
+        const res = await fetchHop(hopUrl, hopMethod, withBody, token, signal);
+        const location = REDIRECT_STATUSES.has(res.status) ? responseHeader(res, 'location') : undefined;
+        if (location === undefined || location === null) return res;
+        cancelBody(res);
+        if (hops >= maxRedirects) {
+          throw new RedirectRefusedError(`Refusing request to ${service}: too many redirects (more than ${maxRedirects}).`);
+        }
+        hopUrl = sameOriginHop(location, hopUrl);
+        if (res.status === 303 || ((res.status === 301 || res.status === 302) && hopMethod === 'POST')) {
+          if (hopMethod !== 'HEAD') hopMethod = 'GET';
+          withBody = false;
+        }
+      }
+    };
 
     // tokenManager (reactive refresh + 401-replay) takes precedence over getToken.
     // Each attempt is wrapped by withTimeout, so the abort signal reaches fetch
