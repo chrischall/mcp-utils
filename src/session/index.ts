@@ -461,6 +461,12 @@ export interface SessionStoreOptions<T> {
  * order). The file is written with mode `0600` and its directory `0700` so other
  * users on the machine cannot read captured credentials.
  *
+ * Fleet standard: the file is a PLAINTEXT credential file, and the 0600/0700
+ * permissions are its whole protection — on purpose. A key the same OS user can
+ * read adds little, and an OS keychain is macOS-only while hosted servers run on
+ * Linux. Never log a record's contents or return them in a tool result; report
+ * presence or expiry instead. See the README's "Credentials at rest".
+ *
  * `add` marks the record most-recently-used; {@link SessionStore.getActiveSession}
  * (and `get()` with no argument) returns it, so a tool call that omits an explicit
  * key picks up the latest session automatically. Re-adding an existing key moves

@@ -84,7 +84,7 @@ describe('an unparseable MCP_CONFIRM_TTL_SECONDS', () => {
   it('turns the token fallback off (refuse), and the refusal names the variable', async () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const opts = confirmationFromEnv({
-      action: 'thing.pay', message: 'Pay?', tool: 'thing_pay',
+      action: 'thing.pay', message: 'Pay?', tool: 'thing_pay', account: undefined, args: { id: 't1' },
       subject: () => ({ target: 't1', payload: { id: 't1' }, preview: { id: 't1' } }),
       env: { MCP_CONFIRM_TTL_SECONDS: '60s' },
     });
@@ -125,6 +125,8 @@ describe('confirmationFromEnv', () => {
     details: { id: 't1' },
     unsupportedNote: 'Delete it in the app instead.',
     tool: 'thing_delete',
+    account: undefined,
+    args: { id: 't1' },
     subject: () => ({ target: 't1', payload: { id: 't1' }, preview: { id: 't1' } }),
   };
 
@@ -238,6 +240,8 @@ describe('confirmationFromEnv with MCP_CONFIRM_ELICITATION=off', () => {
     message: 'Review and confirm this deletion.',
     details: { id: 't1' },
     tool: 'thing_delete',
+    account: undefined,
+    args: { id: 't1' },
     subject: () => ({ target: 't1', payload: { id: 't1' }, preview: { id: 't1' } }),
   };
   const OFF = { MCP_CONFIRM_ELICITATION: 'off' };
@@ -283,14 +287,14 @@ describe('confirmationFromEnv with MCP_CONFIRM_ELICITATION=off', () => {
 describe('confirmationFromEnv with args', () => {
   const subjectIdOnly = () => ({ target: 'm1', payload: { id: 'm1' }, preview: { id: 'm1' } });
   const opts = (args: Record<string, unknown>, extra: Record<string, unknown> = {}) => confirmationFromEnv({
-    action: 'message.send', message: 'Send?', tool: 'message_send',
+    action: 'message.send', message: 'Send?', tool: 'message_send', account: undefined,
     subject: subjectIdOnly, args, spent: createSpentTokenStore(), env: {}, ...extra,
   });
 
   it('elicitation rail: binds the acceptance to the action and the arguments (minus confirmToken)', async () => {
     const o = opts({ id: 'm1', body: 'hello', confirmToken: 'ignored' });
     expect(o.binding?.key).toHaveLength(32);
-    expect(o.binding?.args).toEqual({ id: 'm1', body: 'hello' });
+    expect(o.binding?.args).toEqual({ args: { id: 'm1', body: 'hello' } });
     expect(o.binding?.ttlSeconds).toBe(600);
     const r = await requireConfirmationWithFallback(CAN_BE_ASKED, o);
     expect(r).toMatchObject({ resultType: 'input_required' });
@@ -298,7 +302,7 @@ describe('confirmationFromEnv with args', () => {
   });
 
   it('elicitation rail is bound in refuse mode too, and an explicit binding wins', () => {
-    expect(opts({ id: 'm1' }, { env: { MCP_CONFIRM_MODE: 'refuse' } }).binding?.args).toEqual({ id: 'm1' });
+    expect(opts({ id: 'm1' }, { env: { MCP_CONFIRM_MODE: 'refuse' } }).binding?.args).toEqual({ args: { id: 'm1' } });
     const own = { key: 'k'.repeat(32), args: { mine: true } };
     expect(opts({ id: 'm1' }, { binding: own }).binding).toBe(own);
   });
@@ -325,13 +329,95 @@ describe('confirmationFromEnv with args', () => {
 
   it('token rail: passes a subject read failure back unchanged', async () => {
     const failure: CallToolResult = { content: [{ type: 'text', text: 'Error: gone' }], isError: true };
-    const o = confirmationFromEnv({ action: 'a', message: 'm', tool: 't', subject: async () => failure, args: { id: 1 }, env: {} });
+    const o = confirmationFromEnv({
+      action: 'a', message: 'm', tool: 't', account: undefined, subject: async () => failure, args: { id: 1 }, env: {},
+    });
     expect(await requireConfirmationWithFallback(CANNOT_BE_ASKED, o)).toBe(failure);
   });
 
-  it('without args, nothing new is bound (back-compatible)', () => {
-    const o = confirmationFromEnv({ action: 'a', message: 'm', tool: 't', subject: subjectIdOnly, env: {} });
-    expect(o.binding).toBeUndefined();
+  // 3.0: `args` is required (fleet-audit#979 and siblings). A caller that
+  // slips past the type (plain JS, a cast) is refused at runtime rather than
+  // minting a token over nothing but the subject.
+  it.each([['undefined', undefined], ['null', null]])('throws when args is %s', (_, args) => {
+    expect(() => confirmationFromEnv({
+      action: 'a', message: 'm', tool: 't_send', account: undefined, subject: subjectIdOnly, env: {},
+      args: args as unknown as object,
+    })).toThrow(/confirmationFromEnv: t_send passed no args/);
+  });
+});
+
+// 3.0 (fleet-audit#979, #986, #1066, #1072, #1086, #1089, #1098): `account`
+// and `args` are required keys, and both rails bind both.
+describe('confirmationFromEnv binds account and args on both rails', () => {
+  const subject = () => ({ target: 'm1', payload: { id: 'm1' }, preview: { id: 'm1' } });
+  const opts = (account: string | undefined, args: object, extra: Record<string, unknown> = {}) => confirmationFromEnv({
+    action: 'message.send', message: 'Send?', tool: 'message_send', account, args, subject,
+    env: { MCP_CONFIRM_SECRET: 'bind-test' }, ...extra,
+  });
+
+  it('token rail: a token minted for one account is refused for another', async () => {
+    const spent = createSpentTokenStore();
+    const p1 = text(await requireConfirmationWithFallback(CANNOT_BE_ASKED, opts('alice', { id: 'm1' }, { spent })));
+    expect(p1.status).toBe('confirmation-required');
+    const other = text(await requireConfirmationWithFallback(
+      CANNOT_BE_ASKED, opts('bob', { id: 'm1' }, { spent, confirmToken: p1.confirmToken }),
+    ));
+    expect(other).toMatchObject({ status: 'confirmation-rejected', error: 'TOKEN_INVALID', dispatched: false });
+    const none = text(await requireConfirmationWithFallback(
+      CANNOT_BE_ASKED, opts(undefined, { id: 'm1' }, { spent, confirmToken: p1.confirmToken }),
+    ));
+    expect(none).toMatchObject({ error: 'TOKEN_INVALID', dispatched: false });
+    // Not spent by the refusals: the right account still proceeds.
+    expect(await requireConfirmationWithFallback(
+      CANNOT_BE_ASKED, opts('alice', { id: 'm1' }, { spent, confirmToken: p1.confirmToken }),
+    )).toBeUndefined();
+  });
+
+  it('token rail: a token minted for one args set is refused for another', async () => {
+    const spent = createSpentTokenStore();
+    const p1 = text(await requireConfirmationWithFallback(CANNOT_BE_ASKED, opts('alice', { id: 'm1', to: 'x' }, { spent })));
+    const swapped = text(await requireConfirmationWithFallback(
+      CANNOT_BE_ASKED, opts('alice', { id: 'm1', to: 'y' }, { spent, confirmToken: p1.confirmToken }),
+    ));
+    expect(swapped).toMatchObject({ error: 'DRAFT_CHANGED', reason: 'payload-changed', dispatched: false });
+  });
+
+  // An accepted elicitation, echoing the requestState minted on the first call.
+  const acceptedWith = (state: unknown): ServerContext => ({
+    mcpReq: {
+      envelope: {
+        'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+        'io.modelcontextprotocol/clientCapabilities': { elicitation: { form: {} } },
+      },
+      inputResponses: { confirmation: { action: 'accept', content: { confirmed: true } } },
+      requestState: () => state,
+    },
+  }) as unknown as ServerContext;
+
+  async function mint(account: string | undefined, args: object): Promise<string> {
+    const r = await requireConfirmationWithFallback(CAN_BE_ASKED, opts(account, args)) as { requestState?: string };
+    expect(typeof r.requestState).toBe('string');
+    return r.requestState!;
+  }
+
+  it('elicitation rail: the binding commits to the account as well as the args', () => {
+    expect(opts('alice', { id: 'm1' }).binding?.args).toEqual({ account: 'alice', args: { id: 'm1' } });
+    expect(opts(undefined, { id: 'm1' }).binding?.args).toEqual({ args: { id: 'm1' } });
+  });
+
+  it('elicitation rail: an acceptance minted for one account is asked again for another', async () => {
+    const state = await mint('alice', { id: 'm1' });
+    expect(await requireConfirmationWithFallback(acceptedWith(state), opts('alice', { id: 'm1' }))).toBeUndefined();
+    expect(await requireConfirmationWithFallback(acceptedWith(state), opts('bob', { id: 'm1' })))
+      .toMatchObject({ resultType: 'input_required' });
+    expect(await requireConfirmationWithFallback(acceptedWith(state), opts(undefined, { id: 'm1' })))
+      .toMatchObject({ resultType: 'input_required' });
+  });
+
+  it('elicitation rail: an acceptance minted for one args set is asked again for another', async () => {
+    const state = await mint('alice', { id: 'm1', to: 'x' });
+    expect(await requireConfirmationWithFallback(acceptedWith(state), opts('alice', { id: 'm1', to: 'y' })))
+      .toMatchObject({ resultType: 'input_required' });
   });
 });
 
@@ -345,6 +431,8 @@ describe('a host-provided stable key, and where spends are recorded (fleet audit
     action: 'thing.delete',
     message: 'Review and confirm this deletion.',
     tool: 'thing_delete',
+    account: undefined,
+    args: { id: 't1' },
     subject: () => ({ target: 't1', payload: { id: 't1' }, preview: { id: 't1' } }),
   };
 
@@ -388,7 +476,7 @@ describe('a host-provided stable key, and where spends are recorded (fleet audit
     const verdict = verifyConfirmToken(
       confirmKeyFromEnv(env),
       confirmToken,
-      { tool: 'thing_delete', target: 't1', payloadHash: hashConfirmPayload({ id: 't1' }) },
+      { tool: 'thing_delete', target: 't1', payloadHash: hashConfirmPayload({ payload: { id: 't1' }, args: { id: 't1' } }) },
       { spent: createFileSpentTokenStore(spentDir()) },
     );
     expect(verdict).toEqual({ ok: false, error: 'TOKEN_REUSED' });

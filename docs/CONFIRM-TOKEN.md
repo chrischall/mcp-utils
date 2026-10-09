@@ -35,7 +35,10 @@ closes the "stable key + in-memory store = replay after restart" window.
 displayed preview on **both** rails — resolving the audit's SEC-2 concern
 (a token bound to a tool-chosen `payload` rather than to what the call does)
 for every adopter. A `subject()` that returns no payload now throws instead of
-binding only the target.
+binding only the target. **3.0** made `account` and `args` required keys of
+`confirmationFromEnv` (fleet-audit#979, #986, #1066, #1072, #1086, #1089,
+#1098: every one a token minted without one of them), and folded `account`
+into the elicitation binding; see [`MIGRATION-3.md`](MIGRATION-3.md).
 
 ## 1. Rail selection
 
@@ -152,10 +155,13 @@ cross-implementation tokens.
 payload must be what the call will **do** — the arguments or the request body —
 not a convenient subset. The fleet layers enforce this:
 
-- `confirmationFromEnv({ args, … })` hashes `{ payload: subject.payload, args }`
-  (with any `confirmToken` key removed from `args`, since it differs between
-  the phases), so a `subject()` that names only `{ id }` still cannot
-  authorise a different body.
+- `confirmationFromEnv({ account, args, … })` hashes
+  `{ payload: subject.payload, args }` (with any `confirmToken` key removed
+  from `args`, since it differs between the phases), so a `subject()` that
+  names only `{ id }` still cannot authorise a different body. Both keys are
+  **required** since 3.0: `account: string | undefined` (written out even on a
+  single-account server; it becomes the `a` claim) and `args` (`undefined` or
+  `null` throws; a tool with no arguments passes `{}`).
 - `confirmWrite` hashes the whole binding object of [§10](#10-confirmwrite).
 - A `subject()` returning no `payload` throws (`hash(undefined)` is a constant
   and would authorise anything at the target).
@@ -393,9 +399,9 @@ bound = { account?, target, revision?,
 - **Token rail:** claims `t` = tool, `a` = account, `g` = target, `r` =
   revision, and `h = hash({ payload: bound, args: bound })` (the env layer's
   `{ payload, args }` wrapper over the same object).
-- **Elicitation rail:** the acceptance is HMAC-bound to `action` and `bound`
-  ([§11](#11-elicitation-binding)), so a replayed or pre-filled acceptance for
-  a different write is asked again.
+- **Elicitation rail:** the acceptance is HMAC-bound to `action` and
+  `{ account?, args: bound }` ([§11](#11-elicitation-binding)), so a replayed
+  or pre-filled acceptance for a different write is asked again.
 
 So the arguments, the account, the target/revision and **what the user was
 shown** are bound on both rails; a preview that changes between the phases is
@@ -403,9 +409,12 @@ shown** are bound on both rails; a preview that changes between the phases is
 
 ## 11. Elicitation binding
 
-When a binding is in force (always under `confirmWrite`, and under
-`confirmationFromEnv` whenever `args` is passed), the elicitation prompt
-returns a `requestState` the client must echo on its retry:
+A binding is always in force under `confirmationFromEnv` (and so under
+`confirmWrite`) unless the caller passes its own `binding`. Its `args` are
+`{ account, args }` — `account` omitted when `undefined`, `args` with any
+`confirmToken` key removed — so an acceptance minted for one account or one set
+of arguments is asked again for any other. The elicitation prompt returns a
+`requestState` the client must echo on its retry:
 
 ```
 state = "mcpu.confirm.v1." body "." base64url(HMAC-SHA256(key, "mcpu.confirm.v1." body))
