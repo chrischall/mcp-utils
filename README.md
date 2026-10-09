@@ -767,9 +767,10 @@ clients.
 
 `createApiClient` keeps every request on `baseUrl`'s origin, and it also
 **refuses a path that URL normalisation would rewrite**: a dot segment
-(`/trails/../admin`, `%2e%2e`, `.%2e`, …), a backslash, or an ASCII tab, LF
-or CR (the URL parser deletes those first, so `.\t.` would become `..`)
-anywhere before the `?`. `encodeURIComponent('..')` is `..`, so an encoded tool argument
+(`/trails/../admin`, `%2e%2e`, `.%2e`, …), a backslash, a control character
+(U+0000–U+001F or DEL), or a trailing space, anywhere before the `?`. The URL
+parser deletes tab, LF and CR and strips trailing controls and spaces before
+it resolves dot segments, so `.\t.` and a final `.. ` would both become `..`. `encodeURIComponent('..')` is `..`, so an encoded tool argument
 could still walk the path to another endpoint with the credential attached
 (fleet audit 2026-09, cluster 5). The query string is not judged. Build paths
 with the `apiPath` tag, which encodes each value as exactly one segment and

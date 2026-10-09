@@ -40,6 +40,20 @@ describe('findPathHazard', () => {
   it('does not judge control characters in the query', () => {
     expect(findPathHazard('/a?q=x\ty')).toBeUndefined();
   });
+  it('names any C0 control character or DEL in the path as a control character', () => {
+    expect(findPathHazard('/a/..\x00')).toBe('control character');
+    expect(findPathHazard('/a/.\x1f')).toBe('control character');
+    expect(findPathHazard('/a/b\x7fc')).toBe('control character');
+  });
+  it('names a path part ending in a space as a trailing space', () => {
+    expect(findPathHazard('/a/.. ')).toBe('trailing space');
+    expect(findPathHazard('/a/%2e%2e ')).toBe('trailing space');
+    expect(findPathHazard('/a/.. ?q=1')).toBe('trailing space');
+  });
+  it('leaves an interior space and a space in the query alone', () => {
+    expect(findPathHazard('/a/b c/d')).toBeUndefined();
+    expect(findPathHazard('/a?q=x ')).toBeUndefined();
+  });
 });
 
 describe('createApiClient refuses a path that URL normalisation would rewrite', () => {
@@ -63,14 +77,23 @@ describe('createApiClient refuses a path that URL normalisation would rewrite', 
     '/trails/%2e\n%2e/admin',
     '/trails/.\r./x',
     '/a/b\tc',
+    // ...and strips trailing C0 controls and spaces from the whole URL first.
+    '/trails/x/.. ',
+    '/trails/x/..\x00',
+    '/trails/x/..\x1f',
+    '/trails/x/%2e%2e ',
+    '/trails/x/%2e%2e\x00',
+    '/trails/x/%2e%2e\x1f',
+    '/trails/x/.\x1f',
+    '/trails/x/.. \x00 ',
   ];
   for (const path of bad) {
     it(`refuses ${JSON.stringify(path)} before any fetch`, async () => {
       const { fn, calls } = stubFetch([jsonResponse({})]);
       const client = createApiClient({ baseUrl: 'https://api.example.com/v1', getToken: () => 'SECRET', fetchImpl: fn });
-      await expect(client.fetchJson('GET', path)).rejects.toThrow(/dot segment|backslash|control character/i);
-      await expect(client.fetchHtml('GET', path)).rejects.toThrow(/dot segment|backslash|control character/i);
-      await expect(client.fetchRaw('GET', path)).rejects.toThrow(/dot segment|backslash|control character/i);
+      await expect(client.fetchJson('GET', path)).rejects.toThrow(/dot segment|backslash|control character|trailing space/i);
+      await expect(client.fetchHtml('GET', path)).rejects.toThrow(/dot segment|backslash|control character|trailing space/i);
+      await expect(client.fetchRaw('GET', path)).rejects.toThrow(/dot segment|backslash|control character|trailing space/i);
       expect(calls).toHaveLength(0);
     });
   }
