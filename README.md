@@ -24,6 +24,8 @@ re-exports APIs added there — `withDeadline`, `backoffDelayMs`, `BRIDGE_CONCUR
 the bridge-error classifier). MCPs on older `@fetchproxy/server` can use the core
 barrel freely; adopt `/fetchproxy` only after bumping to 0.11+.
 
+> **Upgrading from 2.x?** 3.0 changes two defaults (`resolveOutputDir` and timed-out writes). See [docs/MIGRATION-3.md](docs/MIGRATION-3.md).
+
 ## Entry points
 
 The core building blocks are re-exported from the package root. Heavier or
