@@ -541,6 +541,17 @@ things to drift. What follows is only what it means for building one.
   that. `resy_remove_favorite` looks alarming and is correctly additive;
   `send_message` looks ordinary and was not.
 
+- **Read the `::warning::` lines too.** `audit-annotations.mjs` also warns
+  (exit code unchanged; `--strict` makes them fail) on a write without an
+  explicit boolean `destructiveHint`, a tool without `openWorldHint`,
+  `manifest.json` `tools[]` drifting from the served list in either
+  direction, and env drift between the built code and `manifest.json` /
+  `server.json` / `.mcp.json` — undeclared or dead vars, a var marked
+  required that the code reads with `readEnvVar`, an unwired `user_config`,
+  and a cwd-relative `.mcp.json` path. CI prints them on every PR. The env
+  check sees literal keys only, so a var documented solely in the README
+  still needs the roster rule above.
+
 - **Give the repo a meta-test so the next tool cannot forget.** Asserting
   `readOnlyHint` alone does not do it: `destructiveHint` defaults to true, so
   a write that omits it and a write that considered it leave identical

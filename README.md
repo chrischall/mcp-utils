@@ -2168,6 +2168,39 @@ This repo also hosts composite GitHub Actions the MCP fleet reuses, under
   - uses: chrischall/workflows/.github/actions/install-mcp-publisher@main
   ```
 
+## Fleet lint scripts
+
+`scripts/` holds the lints chrischall/workflows' `reusable-mcp-ci.yml` runs
+against every fleet repo (read from a pinned release tag of this repo; the
+scripts are not in the npm package, so run them from a clone).
+
+`node scripts/audit-annotations.mjs <repo>/dist/index.js` serves the built
+server over stdio, prints each tool's effective class, and **fails** on a
+boolean `confirm` input or an `--expect <n>` count mismatch. It also prints
+GitHub `::warning::` lines for three surface checks, which **do not change the
+exit code unless you pass `--strict`**:
+
+- **annotations** — a tool that is not `readOnlyHint: true` without an
+  explicit boolean `destructiveHint` (the spec default is `true`, so silence
+  publishes it as destructive), and any tool without an explicit
+  `openWorldHint` (local-only tools declare `openWorld: false`).
+- **manifest-tools** — when a `manifest.json` sits beside the server's
+  `package.json`: its `tools[]` names vs the served `tools/list`, both
+  directions (`tools_generated: true` limits it to stale entries).
+- **env** — literal env keys the built code reads (`readEnvVar`,
+  `requireEnvVar`, `parseBoolEnv`, `readPortEnv`, `readIntEnv`,
+  `readTtlMsEnv`, `process.env.X`) vs `manifest.json`
+  (`server.mcp_config.env` + `user_config`), `server.json`
+  (`packages[].environmentVariables`) and `.mcp.json`: undeclared reads, dead
+  declarations, a var marked required that the code only reads optionally, a
+  `user_config` entry nothing passes to the server, and a cwd-relative script
+  path in `.mcp.json` (anchor it with `${CLAUDE_PLUGIN_ROOT}`). `MCP_*` keys
+  (this library's own knobs) and runtime vars (`NODE_ENV`, `HOME`, …) are
+  ignored. A key built at runtime (`` readEnvVar(`${P}_TOKEN`) ``) is invisible.
+
+`node scripts/audit-fs-confinement.mjs <repo>` is the source lint described
+under [`fs`](#fs--streaming-file-helpers-uploads--binary-output).
+
 ## Development
 
 ```sh
