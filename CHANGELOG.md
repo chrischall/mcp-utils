@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.0.0](https://github.com/chrischall/mcp-utils/compare/v2.15.1...v3.0.0) (2026-10-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* confirmationFromEnv requires the account (string | undefined) and args keys; see docs/MIGRATION-3.md.
+* resolveOutputDir no longer returns process.cwd() when no directory or env var is set. It uses ~/Downloads/<name> when `{ name }` is passed and throws a config error otherwise. createApiClient now throws WriteOutcomeUnknownError (an McpToolError) instead of RequestTimeoutError for a timed-out or failed non-safe request, unless the request is marked
+
+### Features
+
+* harden HTTP, URL and error defaults and add audit lint checks ([#361](https://github.com/chrischall/mcp-utils/issues/361)) ([ca98371](https://github.com/chrischall/mcp-utils/commit/ca9837152b62e976a6e4661cd9ef359670817282))
+* require account and args bindings in confirmationFromEnv ([#366](https://github.com/chrischall/mcp-utils/issues/366)) ([eec6f4e](https://github.com/chrischall/mcp-utils/commit/eec6f4e78b716404236a33ecd1cc1a066cd76883))
+* shared response-cache single-flight, body size caps, SSRF-safe fetch and Set-Cookie merging ([#365](https://github.com/chrischall/mcp-utils/issues/365)) ([94166ba](https://github.com/chrischall/mcp-utils/commit/94166ba61184d083b8fff7bb8245c9761b4829d9))
+* stop resolveOutputDir falling back to cwd and report unknown write outcomes ([#364](https://github.com/chrischall/mcp-utils/issues/364)) ([b0bfc8d](https://github.com/chrischall/mcp-utils/commit/b0bfc8d7e07f107852b16c885981bf81084220b8)), closes [#362](https://github.com/chrischall/mcp-utils/issues/362)
+
 ## [2.15.1](https://github.com/chrischall/mcp-utils/compare/v2.15.0...v2.15.1) (2026-10-07)
 
 
