@@ -305,14 +305,42 @@ export function findPackageDir(entry) {
 }
 
 const SOURCE_EXT = /\.(?:c|m)?js$/;
-function readBuiltSource(dir) {
+// Never part of the built server: vendored deps, VCS/tool dot-dirs, test
+// trees and coverage reports. Matters when `bin` sits at the package root
+// (`"bin": "index.js"`), where the walk would otherwise cover the whole repo.
+const SKIP_DIRS = new Set(['node_modules', 'coverage', 'test', 'tests', '__tests__']);
+const TEST_FILE = /\.(?:test|spec)\.(?:c|m)?js$/;
+
+/**
+ * Concatenated built source under `dir`. Never throws: a directory or file
+ * that cannot be read (a dangling symlink, a symlink to a directory, EACCES)
+ * is skipped and reported through `onError`. Symlinked directories are not
+ * followed, so a link cycle cannot loop.
+ * @param {string} dir
+ * @param {(path: string, e: Error) => void} onError
+ */
+function readBuiltSource(dir, onError) {
   const parts = [];
   const walk = (d) => {
-    for (const e of readdirSync(d, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-      if (e.name === 'node_modules') continue;
+    let entries;
+    try {
+      entries = readdirSync(d, { withFileTypes: true });
+    } catch (e) {
+      onError(d, e);
+      return;
+    }
+    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
       const p = join(d, e.name);
-      if (e.isDirectory()) walk(p);
-      else if (SOURCE_EXT.test(e.name)) parts.push(readFileSync(p, 'utf8'));
+      if (e.isDirectory()) {
+        if (!SKIP_DIRS.has(e.name) && !e.name.startsWith('.')) walk(p);
+        continue;
+      }
+      if (!SOURCE_EXT.test(e.name) || TEST_FILE.test(e.name)) continue;
+      try {
+        parts.push(readFileSync(p, 'utf8'));
+      } catch (err) {
+        onError(p, err);
+      }
     }
   };
   walk(dir);
@@ -321,7 +349,8 @@ function readBuiltSource(dir) {
 
 /**
  * Everything the surface checks read: the built source (every .js/.mjs/.cjs
- * under the entry's directory, node_modules skipped) and each config file
+ * under the entry's directory; node_modules, dot-dirs, test trees, coverage
+ * and *.test/*.spec files skipped) and each config file
  * present beside the entry's package.json. File paths are reported relative
  * to `cwd`, which is the repo root in CI.
  * @param {string} entry
@@ -330,8 +359,15 @@ function readBuiltSource(dir) {
 export function loadSurface(entry, cwd = process.cwd()) {
   const pkgDir = findPackageDir(entry);
   const entryDir = dirname(resolve(entry));
-  const text = statSync(entryDir).isDirectory() ? readBuiltSource(entryDir) : '';
   const errors = [];
+  const unreadable = (p, e) => {
+    const file = relative(cwd, p) || p;
+    errors.push({
+      check: 'surface', code: 'unreadable-source', subject: file, file,
+      message: `${file} could not be read (${e.code ?? e.message}), so the env checks skipped it.`,
+    });
+  };
+  const text = statSync(entryDir).isDirectory() ? readBuiltSource(entryDir, unreadable) : '';
   const load = (name) => {
     const p = join(pkgDir, name);
     if (!existsSync(p)) return undefined;
@@ -350,4 +386,31 @@ export function loadSurface(entry, cwd = process.cwd()) {
     mcpJson: load('.mcp.json'),
     errors,
   };
+}
+
+/**
+ * Every surface warning for a served tool list. Never throws: the checks are
+ * advisory, so a crash in them (an unreadable tree, a filesystem race) must
+ * not change the lint's exit code. It becomes one `surface` warning instead,
+ * which fails the run only under `--strict`.
+ * @param {string} entry
+ * @param {Array<{ name: string, annotations?: Record<string, unknown> }>} tools
+ * @param {{ load?: typeof loadSurface }} [opts] `load` is a test seam.
+ */
+export function collectSurfaceWarnings(entry, tools, { load = loadSurface } = {}) {
+  try {
+    const surface = load(entry);
+    return [
+      ...annotationHintFindings(tools),
+      ...(surface.manifest ? manifestToolDriftFindings(surface.manifest.json, tools.map((t) => t.name), surface.manifest.file) : []),
+      ...envDriftFindings(surface),
+      ...(surface.mcpJson ? mcpJsonPathFindings(surface.mcpJson) : []),
+      ...surface.errors,
+    ];
+  } catch (e) {
+    return [{
+      check: 'surface', code: 'surface-check-failed', subject: entry,
+      message: `The surface checks crashed (${e instanceof Error ? e.message : String(e)}), so annotations, manifest tools[] and env drift were not checked.`,
+    }];
+  }
 }

@@ -548,7 +548,10 @@ things to drift. What follows is only what it means for building one.
   direction, and env drift between the built code and `manifest.json` /
   `server.json` / `.mcp.json` — undeclared or dead vars, a var marked
   required that the code reads with `readEnvVar`, an unwired `user_config`,
-  and a cwd-relative `.mcp.json` path. CI prints them on every PR. The env
+  and a cwd-relative `.mcp.json` path. Fleet CI prints them only once a
+  release carrying them ships and `MCP_UTILS_LINT_TAG` in chrischall/workflows'
+  `reusable-mcp-ci.yml` is bumped past `v2.7.0`; until then run the script
+  from a clone of this repo to see them. The env
   check sees literal keys only, so a var documented solely in the README
   still needs the roster rule above.
 

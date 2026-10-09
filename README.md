@@ -2198,6 +2198,18 @@ exit code unless you pass `--strict`**:
   (this library's own knobs) and runtime vars (`NODE_ENV`, `HOME`, …) are
   ignored. A key built at runtime (`` readEnvVar(`${P}_TOKEN`) ``) is invisible.
 
+The env check reads every `.js`/`.mjs`/`.cjs` under the entry's directory,
+skipping `node_modules`, dot-directories, `test`/`tests`/`__tests__`,
+`coverage` and `*.test.*`/`*.spec.*` files. A file or directory it cannot read
+(a dangling symlink, `EACCES`) becomes a warning, not a crash, and so does any
+other failure inside the surface checks: they can never change the exit code
+without `--strict`.
+
+These warnings reach fleet PRs only after a release of this repo that carries
+them ships **and** `MCP_UTILS_LINT_TAG` in chrischall/workflows'
+`reusable-mcp-ci.yml` is bumped past `v2.7.0`, which is the tag it pins today.
+Until then, run the script from a clone to see them.
+
 `node scripts/audit-fs-confinement.mjs <repo>` is the source lint described
 under [`fs`](#fs--streaming-file-helpers-uploads--binary-output).
 

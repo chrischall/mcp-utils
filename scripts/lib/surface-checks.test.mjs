@@ -2,7 +2,7 @@
 // warn-only surface checks audit-annotations.mjs runs beside the confirm-gate
 // lint. Pure, so tested here without starting a server; the CLI wiring is in
 // ../audit-annotations.test.mjs.
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -11,6 +11,7 @@ import {
   annotationHintFindings,
   collectEnvReads,
   envDriftFindings,
+  collectSurfaceWarnings,
   findPackageDir,
   formatWarning,
   loadSurface,
@@ -265,5 +266,51 @@ describe('findPackageDir / loadSurface', () => {
     const s = loadSurface(join(root, 'dist/index.js'), root);
     expect(s.manifest).toBeUndefined();
     expect(s.errors).toEqual([expect.objectContaining({ code: 'unreadable-json', file: 'manifest.json' })]);
+  });
+
+  it('skips a dangling symlink and a symlink to a directory with a warning instead of throwing', () => {
+    root = mkdtempSync(join(tmpdir(), 'surface-'));
+    write('package.json', {});
+    write('dist/index.js', "readEnvVar('SVC_A');");
+    mkdirSync(join(root, 'elsewhere'));
+    symlinkSync(join(root, 'missing.js'), join(root, 'dist/dangling.js'));
+    symlinkSync(join(root, 'elsewhere'), join(root, 'dist/dir-link.js'));
+    const s = loadSurface(join(root, 'dist/index.js'), root);
+    expect([...s.code.reads.keys()]).toEqual(['SVC_A']);
+    expect(s.errors.map((e) => `${e.check}:${e.code}:${e.file}`)).toEqual([
+      'surface:unreadable-source:dist/dangling.js',
+      'surface:unreadable-source:dist/dir-link.js',
+    ]);
+  });
+
+  it('does not scan dot-dirs, tests or coverage when the entry sits at the package root', () => {
+    root = mkdtempSync(join(tmpdir(), 'surface-'));
+    write('package.json', {});
+    write('index.js', "readEnvVar('SVC_A');");
+    write('lib/config.js', "readEnvVar('SVC_B');");
+    write('.git/hooks/x.js', "readEnvVar('SVC_GIT');");
+    write('test/setup.js', "readEnvVar('SVC_TEST');");
+    write('tests/a.js', "readEnvVar('SVC_TESTS');");
+    write('__tests__/a.js', "readEnvVar('SVC_JEST');");
+    write('coverage/lcov-report/x.js', "readEnvVar('SVC_COV');");
+    write('lib/config.test.js', "readEnvVar('SVC_UNIT');");
+    write('lib/config.spec.mjs', "readEnvVar('SVC_SPEC');");
+    const s = loadSurface(join(root, 'index.js'), root);
+    expect([...s.code.reads.keys()].sort()).toEqual(['SVC_A', 'SVC_B']);
+  });
+});
+
+describe('collectSurfaceWarnings', () => {
+  it('turns a surface-check crash into one surface warning instead of throwing', () => {
+    const boom = () => { throw new Error('EACCES: permission denied'); };
+    const ws = collectSurfaceWarnings('dist/index.js', [], { load: boom });
+    expect(ws).toEqual([expect.objectContaining({ check: 'surface', code: 'surface-check-failed' })]);
+    expect(ws[0].message).toMatch(/EACCES: permission denied/);
+  });
+
+  it('collects every check for a loaded surface', () => {
+    const load = () => ({ code: { text: '', reads: new Map() }, manifest: undefined, serverJson: undefined, mcpJson: undefined, errors: [] });
+    const ws = collectSurfaceWarnings('dist/index.js', [{ name: 'svc_send', annotations: { readOnlyHint: false } }], { load });
+    expect(ws.map((w) => w.code).sort()).toEqual(['destructive-implicit', 'open-world-missing']);
   });
 });

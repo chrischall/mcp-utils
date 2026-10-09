@@ -50,14 +50,7 @@
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { confirmGateFinding, summariseConfirmGates } from './lib/confirm-gates.mjs';
-import {
-  annotationHintFindings,
-  envDriftFindings,
-  formatWarning,
-  loadSurface,
-  manifestToolDriftFindings,
-  mcpJsonPathFindings,
-} from './lib/surface-checks.mjs';
+import { collectSurfaceWarnings, formatWarning } from './lib/surface-checks.mjs';
 
 const entry = process.argv[2];
 if (!entry) {
@@ -121,14 +114,8 @@ console.log(`confirm gates   confirm-boolean ${gates.errors.length}   ungated wr
 
 // Warn-only unless --strict. Printed after the summary lines so nothing CI
 // parses moves; `::warning` lines never match its per-tool `^  <class>` sed.
-const surface = loadSurface(entry);
-const warnings = [
-  ...annotationHintFindings(tools),
-  ...(surface.manifest ? manifestToolDriftFindings(surface.manifest.json, tools.map((t) => t.name), surface.manifest.file) : []),
-  ...envDriftFindings(surface),
-  ...(surface.mcpJson ? mcpJsonPathFindings(surface.mcpJson) : []),
-  ...surface.errors,
-];
+// collectSurfaceWarnings never throws, so a crash here cannot change the exit code.
+const warnings = collectSurfaceWarnings(entry, tools);
 const byCheck = (c) => warnings.filter((w) => w.check === c).length;
 console.log(`surface checks   annotations ${byCheck('annotations')}   manifest-tools ${byCheck('manifest-tools')}   env ${byCheck('env') + byCheck('surface')}`);
 for (const w of warnings) console.log(formatWarning(w));

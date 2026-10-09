@@ -4,7 +4,7 @@
 // the 2026-10 low-severity sweep) only WARN unless --strict, so a fleet repo
 // that passed before still passes.
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -109,6 +109,16 @@ describe('audit-annotations.mjs', () => {
     const expectBad = run([{ name: 'svc_list', annotations: READ }], '--expect', '2');
     expect(expectBad.status).toBe(1);
     expect(expectBad.stderr).toMatch(/MISMATCH: served 1, expected 2/);
+  });
+
+  it('a dangling .js symlink in dist/ is a warning, not a crash, and still exits 0', () => {
+    pkg();
+    symlinkSync(join(root, 'nowhere.js'), join(root, 'dist/dangling.js'));
+    const r = run([{ name: 'svc_list', annotations: READ }]);
+    expect(r.stderr).not.toMatch(/ENOENT/);
+    expect(r.status).toBe(0);
+    expect(warnings(r)).toEqual([expect.stringMatching(/^::warning file=dist\/dangling\.js::.*could not be read/)]);
+    expect(run([{ name: 'svc_list', annotations: READ }], '--strict').status).toBe(1);
   });
 
   it('--summary still prints the warnings, without the per-tool list', () => {
