@@ -19,7 +19,7 @@
 
 import { responseHeader } from '../internal/headers.js';
 import { currentCallSignal, withAmbientCancellation } from '../cancel/index.js';
-import { UpstreamFormatError, truncateErrorMessage } from '../errors/index.js';
+import { McpToolError, UpstreamFormatError, messageOf, truncateErrorMessage } from '../errors/index.js';
 import type { ExpectedJsonShape, UpstreamBodyKind } from '../errors/index.js';
 import { isCloudflareChallenge } from '../scrape/index.js';
 
@@ -148,7 +148,8 @@ export interface ApiClientOptions {
    * bounded by an {@link AbortController} — from the request until its body
    * has been read, so a body that stalls after the headers is bounded too; on
    * expiry it throws a {@link RequestTimeoutError} instead of hanging until the
-   * host kills the tool call. A 429 retry gets a fresh timeout.
+   * host kills the tool call (a {@link WriteOutcomeUnknownError} for a sent
+   * write — see {@link writeOutcomeUnknown}). A 429 retry gets a fresh timeout.
    *
    * Defaults to {@link DEFAULT_REQUEST_TIMEOUT_MS} (30 s), matching
    * `createGraphqlClient`. Before 2.16 the default was unbounded, and the
@@ -180,6 +181,25 @@ export interface ApiClientOptions {
    * Default 5. Must be a non-negative integer (a `TypeError` otherwise).
    */
   maxRedirects?: number;
+  /**
+   * Report a write whose outcome is unknown as such. On (the default), a
+   * request whose method is not safe (anything but GET / HEAD / OPTIONS /
+   * TRACE) that was SENT but timed out, lost its connection, or broke off
+   * while its response body was read throws {@link WriteOutcomeUnknownError}
+   * instead of a plain {@link RequestTimeoutError} or `fetch`'s raw
+   * `TypeError` — both of which read as "safe to retry", and the model
+   * re-sent the email or booking (fleet audit 2026-09, cluster 7). Mirrors
+   * `createGraphqlClient`'s `outcomeUnknown`. Pass `false` to keep the plain
+   * errors for every request; {@link RequestOptions.idempotent} does it for
+   * one (a search sent as POST).
+   */
+  writeOutcomeUnknown?: boolean;
+  /**
+   * The `hint` on a {@link WriteOutcomeUnknownError}, e.g. to name the read
+   * tool that checks whether the write landed. Defaults to
+   * {@link DEFAULT_WRITE_OUTCOME_HINT}.
+   */
+  writeOutcomeHint?: string;
 }
 
 /**
@@ -256,6 +276,13 @@ export interface RequestOptions {
    * to `parseLenient`.
    */
   expect?: ExpectedJsonShape;
+  /**
+   * This request is safe to repeat even though its method is not (a search or
+   * lookup sent as POST): a timeout or dropped connection then throws the
+   * plain {@link RequestTimeoutError} / `fetch` error, as a read does, never
+   * {@link WriteOutcomeUnknownError}. Never sent upstream.
+   */
+  idempotent?: boolean;
 }
 
 /** The minimal client surface returned by {@link createApiClient}. */
@@ -358,6 +385,61 @@ export class RequestTimeoutError extends Error {
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
+
+/** The default `hint` on a {@link WriteOutcomeUnknownError}. */
+export const DEFAULT_WRITE_OUTCOME_HINT =
+  'The write may have happened — check before retrying; do not resend blindly.';
+
+/**
+ * A write (a request whose method is not safe) was SENT, but no usable
+ * response came back: it timed out, the connection dropped, or the response
+ * body broke off. The server may already have committed it, so the outcome is
+ * UNKNOWN, and re-sending it blindly can duplicate an email, a booking or a
+ * payment (fleet audit 2026-09, cluster 7: opentable #632, honeybook #1023,
+ * office-outlook #1073, vibo #1135, untappd #1132).
+ *
+ * An {@link McpToolError}, so its {@link McpToolError.hint} ("check before
+ * retrying") reaches the model through `wrapToolError` / `errorResult`. It
+ * still DECLARES a timeout when one caused it (`timedOut: true`, the marker
+ * `isTimeoutError` reads), but carries `retrySafe: false`, so
+ * `retryOnceOnTimeout` never replays it. Mirrors `GraphqlTransportError`'s
+ * `outcomeUnknown` and fetchproxy's `FetchproxyTimeoutError.retrySafe`.
+ *
+ * Thrown by {@link createApiClient} (see
+ * {@link ApiClientOptions.writeOutcomeUnknown}); exported so a hand-rolled
+ * client can throw the same thing.
+ */
+export class WriteOutcomeUnknownError extends McpToolError {
+  /** Always `true`: whether the write happened is not known. */
+  readonly outcomeUnknown = true as const;
+  /** Always `false`: never replay this request without checking first. */
+  readonly retrySafe = false as const;
+  /** `true` when the request's timeout expired; `false` for a dropped connection or broken body. */
+  readonly timedOut: boolean;
+  /** The timeout that expired, when {@link timedOut}. */
+  readonly timeoutMs: number | undefined;
+  /** The request method, upper-cased. */
+  readonly method: string;
+
+  constructor(service: string, method: string, opts: { timeoutMs?: number; cause?: unknown; hint?: string } = {}) {
+    const verb = method.toUpperCase();
+    const what =
+      opts.timeoutMs !== undefined
+        ? `${verb} to ${service} timed out after ${opts.timeoutMs}ms`
+        : `${verb} to ${service} failed: ${truncateErrorMessage(messageOf(opts.cause), 200)}`;
+    super(`${what} — the write may already have been applied (outcome is unknown).`, {
+      hint: opts.hint ?? DEFAULT_WRITE_OUTCOME_HINT,
+      cause: opts.cause,
+    });
+    this.name = 'WriteOutcomeUnknownError';
+    this.timedOut = opts.timeoutMs !== undefined;
+    this.timeoutMs = opts.timeoutMs;
+    this.method = verb;
+  }
+}
+
+/** RFC 9110 safe methods: a request with one of these never writes. */
+const SAFE_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE']);
 
 /**
  * Thrown by {@link ApiClient.fetchJson} / {@link ApiClient.fetchHtml} for a
@@ -687,6 +769,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   const timeoutMs = opts.timeout === false ? 0 : (opts.timeout ?? DEFAULT_REQUEST_TIMEOUT_MS);
   const redirectMode = opts.redirect;
   const maxRedirects = opts.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
+  const reportWriteOutcome = opts.writeOutcomeUnknown !== false;
   // NaN would make `hops >= maxRedirects` never true: an endless redirect loop.
   if (!Number.isSafeInteger(maxRedirects) || maxRedirects < 0) {
     throw new TypeError(`createApiClient: maxRedirects must be a non-negative integer, got ${String(maxRedirects)}.`);
@@ -710,7 +793,34 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     done: () => void;
     /** Rejects with RequestTimeoutError if the timer fires; never resolves. */
     expired: Promise<never> | undefined;
+    /** Whether this attempt's own timer has fired. */
+    timedOut: () => boolean;
   }
+
+  /**
+   * Per-call record of whether a request actually left: set just before
+   * `fetch` is called with a live signal. A failure before that (a token
+   * that would not mint, a refused path, a timer that fired while the token
+   * was still minting) sent nothing, so it can never be outcome-unknown.
+   */
+  interface Dispatch {
+    sent: boolean;
+  }
+
+  /**
+   * Errors that came out of the TRANSPORT — `fetch` itself, or reading a
+   * response body — as opposed to whatever else runs in between (a
+   * `tokenManager` refresh, a redirect refusal, JSON parsing). Only these,
+   * and this client's own {@link RequestTimeoutError}, make a write's
+   * outcome unknown.
+   */
+  const transportFailures = new WeakSet<object>();
+  const markTransportFailure = (err: unknown): void => {
+    // A cancellation is not a failure: the caller's abort is rethrown untouched.
+    if (typeof err === 'object' && err !== null && (err as { name?: unknown }).name !== 'AbortError') {
+      transportFailures.add(err);
+    }
+  };
 
   // Bound `run` with an AbortController when a timeout is configured, mapping the
   // abort to a RequestTimeoutError. No timeout → no timer (the caller's
@@ -728,7 +838,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     // since nothing else was ever going to stop that request.
     if (timeoutMs <= 0) {
       const res = await run(withAmbientCancellation(undefined));
-      return { res, done: () => {}, expired: undefined };
+      return { res, done: () => {}, expired: undefined, timedOut: () => false };
     }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -754,7 +864,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     });
     // Only observed if a body read is racing it; never an unhandled rejection.
     expired.catch(() => {});
-    return { res, done: () => clearTimeout(timer), expired };
+    return { res, done: () => clearTimeout(timer), expired, timedOut: () => controller.signal.aborted };
   }
 
   /**
@@ -782,9 +892,17 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
       if (!attempt.expired) return await read(attempt.res);
       return await Promise.race([read(attempt.res), attempt.expired]);
     } catch (err) {
-      if (err instanceof RequestTimeoutError) {
-        attempt.res.body?.cancel().catch(() => {});
+      // The body's own abort listener was registered (at fetch time) before
+      // the timer's, so when OUR timer fires its `AbortError` can win the
+      // race: that is still this timeout, not a caller cancellation.
+      const timeout =
+        err instanceof RequestTimeoutError ||
+        (err instanceof Error && err.name === 'AbortError' && attempt.timedOut());
+      if (timeout) {
+        cancelBody(attempt.res);
+        throw err instanceof RequestTimeoutError ? err : new RequestTimeoutError(service, timeoutMs);
       }
+      markTransportFailure(err);
       throw err;
     } finally {
       attempt.done();
@@ -875,7 +993,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     return next.href;
   }
 
-  async function send(method: string, path: string, opt: RequestOptions): Promise<Attempt> {
+  async function send(method: string, path: string, opt: RequestOptions, dispatch: Dispatch): Promise<Attempt> {
     const { body: reqBody, contentType } = encodeBody(opt);
     const query = opt.query ? buildQueryString(opt.query) : '';
     const url = resolveUrl(path, query);
@@ -889,8 +1007,10 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
       withBody: boolean,
       token: string | undefined,
       signal?: AbortSignal,
-    ): Promise<Response> =>
-      doFetch(hopUrl, {
+    ): Promise<Response> => {
+      // A fetch handed an already-aborted signal rejects without sending.
+      if (!signal?.aborted) dispatch.sent = true;
+      return doFetch(hopUrl, {
         method: hopMethod,
         headers: {
           Accept: 'application/json',
@@ -902,7 +1022,11 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
         ...(signal ? { signal } : {}),
         ...(redirectMode !== undefined ? { redirect: redirectMode === 'same-origin' ? 'manual' : redirectMode } : {}),
         ...(withBody ? bodyInit : {}),
+      }).catch((err: unknown) => {
+        markTransportFailure(err);
+        throw err;
       });
+    };
 
     const fetchWith = async (token: string | undefined, signal?: AbortSignal): Promise<Response> => {
       if (redirectMode !== 'same-origin') return fetchHop(url, method, true, token, signal);
@@ -1009,8 +1133,46 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     return opts.onRateLimited({ status: res.status, retryAfter, retryAfterMs, edgeBlock, method, path });
   }
 
-  async function fetchJson<T>(method: string, path: string, opt: RequestOptions = {}): Promise<T> {
-    const attempt = await send(method, path, opt);
+  /**
+   * Run one client call, turning a SENT write's transport failure into
+   * {@link WriteOutcomeUnknownError}. Everything else — a read, an
+   * `idempotent` request, a failure before anything was sent, any HTTP
+   * response, a caller's cancellation — propagates exactly as before.
+   */
+  async function guardWrite<T>(
+    method: string,
+    opt: RequestOptions,
+    call: (dispatch: Dispatch) => Promise<T>,
+  ): Promise<T> {
+    const dispatch: Dispatch = { sent: false };
+    try {
+      return await call(dispatch);
+    } catch (err) {
+      const write = reportWriteOutcome && opt.idempotent !== true && !SAFE_METHODS.has(method.toUpperCase());
+      if (!write || !dispatch.sent) throw err;
+      if (err instanceof RequestTimeoutError) {
+        throw new WriteOutcomeUnknownError(service, method, {
+          timeoutMs: err.timeoutMs,
+          cause: err,
+          hint: opts.writeOutcomeHint,
+        });
+      }
+      if (typeof err === 'object' && err !== null && transportFailures.has(err)) {
+        throw new WriteOutcomeUnknownError(service, method, { cause: err, hint: opts.writeOutcomeHint });
+      }
+      throw err;
+    }
+  }
+
+  const fetchJson = <T>(method: string, path: string, opt: RequestOptions = {}): Promise<T> =>
+    guardWrite(method, opt, (dispatch) => fetchJsonOnce<T>(method, path, opt, dispatch));
+  const fetchHtml = (method: string, path: string, opt: RequestOptions = {}): Promise<string> =>
+    guardWrite(method, opt, (dispatch) => fetchHtmlOnce(method, path, opt, dispatch));
+  const fetchRaw = (method: string, path: string, opt: RequestOptions = {}): Promise<RawApiResponse> =>
+    guardWrite(method, opt, (dispatch) => fetchRawOnce(method, path, opt, dispatch));
+
+  async function fetchJsonOnce<T>(method: string, path: string, opt: RequestOptions, dispatch: Dispatch): Promise<T> {
+    const attempt = await send(method, path, opt, dispatch);
     const res = attempt.res;
 
     if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);
@@ -1034,9 +1196,9 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     });
   }
 
-  async function fetchHtml(method: string, path: string, opt: RequestOptions = {}): Promise<string> {
+  async function fetchHtmlOnce(method: string, path: string, opt: RequestOptions, dispatch: Dispatch): Promise<string> {
     const headers = { Accept: 'text/html,*/*', ...opt.headers };
-    const attempt = await send(method, path, { ...opt, headers });
+    const attempt = await send(method, path, { ...opt, headers }, dispatch);
     const res = attempt.res;
 
     if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);
@@ -1049,9 +1211,14 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     return text;
   }
 
-  async function fetchRaw(method: string, path: string, opt: RequestOptions = {}): Promise<RawApiResponse> {
+  async function fetchRawOnce(
+    method: string,
+    path: string,
+    opt: RequestOptions,
+    dispatch: Dispatch,
+  ): Promise<RawApiResponse> {
     const headers = { Accept: '*/*', ...opt.headers };
-    const attempt = await send(method, path, { ...opt, headers });
+    const attempt = await send(method, path, { ...opt, headers }, dispatch);
     const res = attempt.res;
 
     if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);

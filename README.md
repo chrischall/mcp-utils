@@ -720,8 +720,8 @@ clone of this repo: `node scripts/audit-fs-confinement.mjs ../your-mcp`.
 (`decodeJwtExp`, `decodeJwtSessionId`, `decodeJwtClaim`, `validateJwtExpiry`),
 `detectEdgeBlock`, `parseJsonBody`, and the `ApiError` / `UpstreamHttpError` /
 `EdgeBlockedError` / `UnauthorizedError` / `RateLimitedError` /
-`RequestTimeoutError` / `ResponseTooLargeError` / `UrlNotAllowedError` /
-`RedirectRefusedError` classes.
+`RequestTimeoutError` / `WriteOutcomeUnknownError` / `ResponseTooLargeError` /
+`UrlNotAllowedError` / `RedirectRefusedError` classes.
 
 `parseContentDispositionFilename(header)` returns the download's filename or
 `undefined`. It prefers RFC 8187 `filename*=` (charset prefix optional; UTF-8
@@ -756,6 +756,34 @@ of hanging the tool call. A 429 retry gets a fresh timeout. It **defaults to
 uses); before 2.16 an omitted `timeout` meant unbounded. Pass a larger value for
 a slow download, or `0` / `false` to disable it. The caller's cancellation
 applies either way.
+
+**A write whose outcome is unknown says so.** When a request whose method is
+not safe (anything but `GET` / `HEAD` / `OPTIONS` / `TRACE`) was sent but timed
+out, lost its connection, or broke off while its response body was read, the
+client throws `WriteOutcomeUnknownError` instead of a plain
+`RequestTimeoutError` or `fetch`'s raw `TypeError` — those read as "safe to
+retry", and the model re-sent the email or booking (fleet audit 2026-09,
+cluster 7). It is an `McpToolError` with `outcomeUnknown: true`,
+`retrySafe: false` (so `retryOnceOnTimeout` never replays it), `timedOut` /
+`timeoutMs`, `method`, the original error as `cause`, and the hint *"The write
+may have happened — check before retrying; do not resend blindly."* Name the
+tool that checks with `writeOutcomeHint`. Reads, failures before anything was
+sent (a token that would not mint, a refused path), any HTTP response, and a
+caller's cancellation are unchanged. A request that is safe to repeat although
+it is a POST (a search) passes `idempotent: true`; `writeOutcomeUnknown: false`
+turns the behaviour off for a whole client. `createGraphqlClient` has the same
+rule (`GraphqlTransportError.outcomeUnknown`).
+
+```ts
+try {
+  await api.fetchJson('POST', '/messages', { body });
+} catch (err) {
+  if (err instanceof WriteOutcomeUnknownError) {
+    // Do NOT resend: tell the model to check the sent folder first.
+  }
+  throw err;
+}
+```
 
 `retry` also accepts `statuses` (e.g. `[429, 503]`), `honorRetryAfter: true`
 (sleep the response's `Retry-After` instead of the fixed `delayMs`, bounded by
