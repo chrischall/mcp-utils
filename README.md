@@ -583,7 +583,7 @@ tool surface can show the user.
 optional `status` (the upstream HTTP status) and `kind` — an `McpToolErrorKind`,
 the credential healthcheck's failure arms: `no_credential`,
 `credential_rejected`, `edge_blocked`, `session_expired`,
-`verification_pending`, `timeout`, `http`, `transport`, `unknown`. Seven fleet
+`verification_pending`, `timeout`, `http`, `transport`, `too_large`, `unknown`. Seven fleet
 repos used to regex the message instead (`/401|403|forbidden/`,
 `/\b429\b|\b503\b/`, a `/auth|sign/` that matched "assign"), because a
 hint-adding `McpToolError` dropped the status of the `ApiError` it wrapped. The
@@ -598,6 +598,7 @@ library's own throwers set them:
 | `UnauthorizedError` | 401 | `credential_rejected` |
 | `RequestTimeoutError` | — | `timeout` |
 | `EdgeBlockedError` | the edge's | `edge_blocked` |
+| `ResponseTooLargeError` | — | `too_large` |
 | `WriteOutcomeUnknownError`, `GraphqlTransportError` | — | `timeout` or `transport` (by `timedOut`) |
 | `OAuth2RefreshError` | the endpoint's | `credential_rejected` for a 4xx other than 408/429, else `http` |
 | `TokenManager`'s "no refresh token is available" | — | `no_credential` |
@@ -906,6 +907,23 @@ const url = assertAllowedUrl(args.url, { allowHosts: ['www.thumbtack.com'] });
 returns the parsed `URL`, or throws a `UrlNotAllowedError` (with a `reason`
 code) that names only the host, never the path or query.
 
+Response size: by default `createApiClient` reads a body of any size. Pass
+`maxResponseBytes` for a client-wide cap, or `maxBytes` on one call (it
+overrides the default, larger or smaller) — e.g. a receipt download. A
+`Content-Length` over the cap is refused before reading; otherwise the body is
+streamed with a running count and cancelled the moment it passes the cap.
+Either way `fetchJson` / `fetchHtml` / `fetchRaw` throw `ResponseTooLargeError`
+(an `McpToolError`, `kind: 'too_large'`, carrying `maxBytes`; it never echoes
+the body). The request timeout still covers the whole read; a write that hits
+the cap is not reported as outcome-unknown (the response arrived); and a non-2xx
+whose error body is over the cap still throws its `ApiError`, body dropped. It
+is the same implementation as `fetchBounded`'s `maxBytes`.
+
+```ts
+const api = createApiClient({ baseUrl, getToken, maxResponseBytes: 5 * 1024 * 1024 });
+const receipt = await api.fetchRaw('GET', apiPath`/receipts/${id}`, { maxBytes: 25 * 1024 * 1024 });
+```
+
 Redirects: by default `createApiClient` leaves `fetch` to follow them, which
 re-sends the bearer wherever they point. Pass `redirect: 'same-origin'` to have
 the client follow them itself: each `Location` is checked against the base
@@ -943,7 +961,8 @@ const { status, ok, headers, body } = await fetchBounded(
   honoured; a cancel rejects with the caller's own reason, never as a timeout.
 - **Size cap** `maxBytes`: a `Content-Length` over it is refused before
   reading, and a body that grows past it is cancelled mid-stream —
-  `ResponseTooLargeError`.
+  `ResponseTooLargeError` (`kind: 'too_large'`, the same error
+  `createApiClient`'s `maxBytes` throws).
 - **Body** `read`: `'text'` (default), `'json'` (empty → `undefined`;
   unparseable → an `McpToolError` naming the status and content type, never
   echoing the body), `'bytes'` (`Uint8Array`), or `'none'` (cancelled unread,
@@ -1956,7 +1975,7 @@ registerCredentialHealthcheckTool({
 
 Arms: `ok`, `no_credential`, `credential_rejected` (401/403),
 `edge_blocked`, `session_expired`, `verification_pending`, `timeout`, `http`,
-`transport`, `unknown` — with the same `classifyThrown` / `hints` hooks as the
+`transport`, `too_large`, `unknown` — with the same `classifyThrown` / `hints` hooks as the
 bridge factory. Every failure arm is an `McpToolErrorKind`, so a thrown error
 that DECLARES a `kind` (see [`errors`](#errors--helpful-errors)) names its arm
 directly: the order is `classifyThrown`, then `edge_blocked`, then the declared

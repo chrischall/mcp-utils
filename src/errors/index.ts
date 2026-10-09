@@ -36,6 +36,8 @@ export const DEFAULT_ERROR_MESSAGE_MAX = 500;
  *  - `'http'` — the far side answered with an error status that is not an
  *    auth rejection (see `status` for which);
  *  - `'transport'` — the far side could not be reached at all;
+ *  - `'too_large'` — the far side answered, but with a body larger than the
+ *    caller's byte cap (`ResponseTooLargeError`);
  *  - `'unknown'` — none of the above is known.
  *
  * Fleet audit 2026-09, cluster 8: without this, repos classified failures by
@@ -52,6 +54,7 @@ export type McpToolErrorKind =
   | 'timeout'
   | 'http'
   | 'transport'
+  | 'too_large'
   | 'unknown';
 
 /** Every {@link McpToolErrorKind}, for validating a `kind` read off an unknown error. */
@@ -64,6 +67,7 @@ export const MCP_TOOL_ERROR_KINDS: ReadonlySet<McpToolErrorKind> = new Set<McpTo
   'timeout',
   'http',
   'transport',
+  'too_large',
   'unknown',
 ]);
 

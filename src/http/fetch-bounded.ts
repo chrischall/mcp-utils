@@ -31,6 +31,7 @@
 
 import { withAmbientCancellation } from '../cancel/index.js';
 import { McpToolError } from '../errors/index.js';
+import { cancelStream, readBytesCapped, ResponseTooLargeError } from './body-limit.js';
 import { DEFAULT_REQUEST_TIMEOUT_MS, RequestTimeoutError } from './index.js';
 
 /** How {@link fetchBounded} reads the body. */
@@ -90,16 +91,8 @@ export interface BoundedResponse<B> {
   body: B;
 }
 
-/** Thrown by {@link fetchBounded} when a body is larger than `maxBytes`. */
-export class ResponseTooLargeError extends Error {
-  readonly maxBytes: number;
-  constructor(service: string, maxBytes: number) {
-    super(`Response from ${service} is larger than the ${maxBytes}-byte limit.`);
-    this.name = 'ResponseTooLargeError';
-    this.maxBytes = maxBytes;
-    Object.setPrototypeOf(this, new.target.prototype);
-  }
-}
+// The cap and its error are shared with `createApiClient` (`body-limit.ts`).
+export { ResponseTooLargeError };
 
 /**
  * `fetch` with a timeout that covers the body read, the caller's
@@ -156,11 +149,11 @@ export async function fetchBounded<R extends BoundedRead = 'text'>(
     }
 
     if (read === 'none') {
-      cancelBody(res.body);
+      cancelStream(res.body);
       return done(res, undefined);
     }
 
-    const bytes = await readBytes(res, opts.maxBytes, service, bounded);
+    const bytes = await readBytesCapped(res, opts.maxBytes, service, bounded);
     if (read === 'bytes') return done(res, bytes);
     const text = new TextDecoder().decode(bytes);
     if (read === 'text') return done(res, text);
@@ -182,58 +175,6 @@ export async function fetchBounded<R extends BoundedRead = 'text'>(
 
   function done(res: Response, body: unknown): BoundedResponse<BoundedBody<R>> {
     return { res, status: res.status, ok: res.ok, headers: res.headers, body: body as BoundedBody<R> };
-  }
-}
-
-/**
- * Read `res`'s body under `bounded`, refusing more than `maxBytes`. On any
- * failure — the cap, the timer, the caller — the stream is cancelled so its
- * connection is released rather than held until GC.
- */
-async function readBytes(
-  res: Response,
-  maxBytes: number | undefined,
-  service: string,
-  bounded: <T>(p: Promise<T>) => Promise<T>,
-): Promise<Uint8Array> {
-  if (maxBytes !== undefined) {
-    const declared = Number(res.headers.get('content-length') ?? NaN);
-    if (Number.isFinite(declared) && declared > maxBytes) {
-      cancelBody(res.body);
-      throw new ResponseTooLargeError(service, maxBytes);
-    }
-  }
-  if (!res.body) return new Uint8Array(0);
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await bounded(reader.read());
-      if (done) break;
-      total += value.byteLength;
-      if (maxBytes !== undefined && total > maxBytes) throw new ResponseTooLargeError(service, maxBytes);
-      chunks.push(value);
-    }
-  } catch (err) {
-    reader.cancel().catch(() => {});
-    throw err;
-  }
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const c of chunks) {
-    out.set(c, offset);
-    offset += c.byteLength;
-  }
-  return out;
-}
-
-/** Release a body unread. Never throws: a custom body may be odd. */
-function cancelBody(body: ReadableStream<Uint8Array> | null): void {
-  try {
-    body?.cancel().catch(() => {});
-  } catch {
-    // Nothing left to release.
   }
 }
 

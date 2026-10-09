@@ -31,7 +31,7 @@ export type CredentialHealthcheckArm =
    * status ladder, since the edge answers 403 just as a rejecting API does,
    * chrischall/mcp-host#1015), `session_expired` (credentials fine, no session
    * live; see {@link sessionProbe}), `verification_pending` (a second factor
-   * is outstanding), `timeout`, `http`, `transport`, `unknown`.
+   * is outstanding), `timeout`, `http`, `transport`, `too_large`, `unknown`.
    */
   | McpToolErrorKind;
 

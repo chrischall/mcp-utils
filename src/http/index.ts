@@ -29,6 +29,7 @@ export * from './net-atoms.js';
 export * from './fetch-bounded.js';
 export * from './url-safety.js';
 
+import { readBytesCapped, ResponseTooLargeError } from './body-limit.js';
 import { parseRetryAfterMs } from './net-atoms.js';
 import { RedirectRefusedError, findPathHazard } from './url-safety.js';
 import { retryAfterToMs } from '../internal/retry-after.js';
@@ -200,6 +201,20 @@ export interface ApiClientOptions {
    * {@link DEFAULT_WRITE_OUTCOME_HINT}.
    */
   writeOutcomeHint?: string;
+  /**
+   * Default byte cap on every response body this client reads, overridden per
+   * call by {@link RequestOptions.maxBytes}. A `Content-Length` over it is
+   * refused before reading; a body that grows past it is cancelled mid-stream.
+   * Either way {@link ResponseTooLargeError} (`kind: 'too_large'`), which never
+   * echoes the body. Omitted (the default), bodies are unlimited, as before.
+   * Must be a non-negative number (a `TypeError` otherwise); `Infinity` is
+   * the same as omitting it.
+   *
+   * Fleet audit 2026-09 (#733): `fetchRaw` buffered whole downloads — a
+   * splitwise receipt, then base64-encoded — with no cap. Same implementation
+   * as {@link fetchBounded}'s `maxBytes`.
+   */
+  maxResponseBytes?: number;
 }
 
 /**
@@ -283,6 +298,16 @@ export interface RequestOptions {
    * {@link WriteOutcomeUnknownError}. Never sent upstream.
    */
   idempotent?: boolean;
+  /**
+   * Largest response body, in bytes, this call will read; overrides the
+   * client's {@link ApiClientOptions.maxResponseBytes} (larger or smaller).
+   * Over it: {@link ResponseTooLargeError}, refused on `Content-Length`
+   * before reading or cancelled mid-stream. The timeout still covers the
+   * whole read. A non-2xx whose error body is over the cap still throws its
+   * {@link ApiError}, with the body dropped. Must be a non-negative number (a
+   * `TypeError` otherwise). Never sent upstream.
+   */
+  maxBytes?: number;
 }
 
 /** The minimal client surface returned by {@link createApiClient}. */
@@ -783,6 +808,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   const redirectMode = opts.redirect;
   const maxRedirects = opts.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
   const reportWriteOutcome = opts.writeOutcomeUnknown !== false;
+  const defaultMaxBytes = checkMaxBytes('maxResponseBytes', opts.maxResponseBytes);
   // NaN would make `hops >= maxRedirects` never true: an endless redirect loop.
   if (!Number.isSafeInteger(maxRedirects) || maxRedirects < 0) {
     throw new TypeError(`createApiClient: maxRedirects must be a non-negative integer, got ${String(maxRedirects)}.`);
@@ -915,12 +941,48 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
         cancelBody(attempt.res);
         throw err instanceof RequestTimeoutError ? err : new RequestTimeoutError(service, timeoutMs);
       }
-      markTransportFailure(err);
+      // The response arrived; only its size was refused. Not a transport
+      // failure, so a write that hit the cap is not outcome-unknown.
+      if (!(err instanceof ResponseTooLargeError)) markTransportFailure(err);
       throw err;
     } finally {
       attempt.done();
     }
   }
+
+  /**
+   * The body of `attempt` as bytes under `maxBytes` (`undefined` = no cap),
+   * through {@link readBody} so the timer, the timeout mapping and the
+   * transport-failure bookkeeping are the same as an uncapped read. Uncapped,
+   * it is exactly the historical `arrayBuffer()` read.
+   */
+  function readBytes(attempt: Attempt, maxBytes: number | undefined): Promise<Uint8Array> {
+    if (maxBytes === undefined) return readBody(attempt, async (r) => new Uint8Array(await r.arrayBuffer()));
+    const race = <T>(p: Promise<T>): Promise<T> => (attempt.expired ? Promise.race([p, attempt.expired]) : p);
+    return readBody(attempt, (r) => readBytesCapped(r, maxBytes, service, race));
+  }
+
+  /** The body as text under `maxBytes`; uncapped, exactly `res.text()`. */
+  async function readText(attempt: Attempt, maxBytes: number | undefined): Promise<string> {
+    if (maxBytes === undefined) return readBody(attempt, (r) => r.text());
+    return new TextDecoder().decode(await readBytes(attempt, maxBytes));
+  }
+
+  /**
+   * A non-2xx's error body under the cap. Over it, the body is dropped ('')
+   * so the caller still throws the status-carrying {@link ApiError} rather
+   * than a size error that hides the status.
+   */
+  function readErrorText(attempt: Attempt, maxBytes: number | undefined): Promise<string> {
+    return readText(attempt, maxBytes).catch((err: unknown) => {
+      if (err instanceof ResponseTooLargeError) return '';
+      throw err;
+    });
+  }
+
+  /** This call's cap: its own `maxBytes`, else the client default. */
+  const capOf = (opt: RequestOptions): number | undefined =>
+    opt.maxBytes !== undefined ? checkMaxBytes('maxBytes', opt.maxBytes) : defaultMaxBytes;
 
   // The base's own origin and userinfo. A baseUrl may legitimately carry
   // userinfo (`https://u:pw@host`); a resolved URL must then carry exactly
@@ -1185,6 +1247,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     guardWrite(method, opt, (dispatch) => fetchRawOnce(method, path, opt, dispatch));
 
   async function fetchJsonOnce<T>(method: string, path: string, opt: RequestOptions, dispatch: Dispatch): Promise<T> {
+    const maxBytes = capOf(opt);
     const attempt = await send(method, path, opt, dispatch);
     const res = attempt.res;
 
@@ -1195,10 +1258,10 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
       return parseJsonBody<T>('', { expect: opt.expect, service, method, path, status: 204 });
     }
 
-    const text = await readBody(attempt, (r) => r.text());
     if (!res.ok) {
-      throw httpError(res, text, method, path, service);
+      throw httpError(res, await readErrorText(attempt, maxBytes), method, path, service);
     }
+    const text = await readText(attempt, maxBytes);
     return parseJsonBody<T>(text, {
       expect: opt.expect,
       service,
@@ -1210,6 +1273,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   }
 
   async function fetchHtmlOnce(method: string, path: string, opt: RequestOptions, dispatch: Dispatch): Promise<string> {
+    const maxBytes = capOf(opt);
     const headers = { Accept: 'text/html,*/*', ...opt.headers };
     const attempt = await send(method, path, { ...opt, headers }, dispatch);
     const res = attempt.res;
@@ -1217,11 +1281,10 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path);
     if (res.status === 429) throw await rateLimitedError(attempt, method, path);
 
-    const text = await readBody(attempt, (r) => r.text());
     if (!res.ok) {
-      throw httpError(res, text, method, path, service);
+      throw httpError(res, await readErrorText(attempt, maxBytes), method, path, service);
     }
-    return text;
+    return readText(attempt, maxBytes);
   }
 
   async function fetchRawOnce(
@@ -1230,6 +1293,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     opt: RequestOptions,
     dispatch: Dispatch,
   ): Promise<RawApiResponse> {
+    const maxBytes = capOf(opt);
     const headers = { Accept: '*/*', ...opt.headers };
     const attempt = await send(method, path, { ...opt, headers }, dispatch);
     const res = attempt.res;
@@ -1238,13 +1302,13 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     if (res.status === 429) throw await rateLimitedError(attempt, method, path);
 
     if (!res.ok) {
-      const text = await readBody(attempt, (r) => r.text()).catch((err: unknown) => {
+      const text = await readText(attempt, maxBytes).catch((err: unknown) => {
         if (err instanceof RequestTimeoutError) throw err;
         return '';
       });
       throw httpError(res, text, method, path, service);
     }
-    const bytes = new Uint8Array(await readBody(attempt, (r) => r.arrayBuffer()));
+    const bytes = await readBytes(attempt, maxBytes);
     return {
       status: res.status,
       contentType: responseHeader(res, 'content-type'),
@@ -1254,6 +1318,18 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   }
 
   return { fetchJson, fetchHtml, fetchRaw };
+}
+
+/**
+ * Validate a byte cap: `undefined` passes through; anything but a
+ * non-negative number throws, since `NaN` would silently mean "no cap".
+ */
+function checkMaxBytes(name: string, value: number | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || Number.isNaN(value) || value < 0) {
+    throw new TypeError(`createApiClient: ${name} must be a non-negative number, got ${String(value)}.`);
+  }
+  return value === Infinity ? undefined : value;
 }
 
 // ---------------------------------------------------------------------------

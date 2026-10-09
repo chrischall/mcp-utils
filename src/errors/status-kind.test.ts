@@ -54,6 +54,7 @@ describe('McpToolError status / kind', () => {
         'no_credential',
         'session_expired',
         'timeout',
+        'too_large',
         'transport',
         'unknown',
         'verification_pending',
