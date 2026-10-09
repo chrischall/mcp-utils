@@ -425,8 +425,11 @@ const GOOGLE_OAUTH_TOKEN_RE = /(?<![A-Za-z0-9+/])(?:ya29\.|1\/\/)[A-Za-z0-9._-]{
 // used as params (`?x-api-key=…`), which the colon-anchored HEADER_SECRET_RE
 // never sees (fleet audit 2026-09-24 PRIV-1). The `x-` branch reuses the
 // bounded HEADER_NAME_RUN so it stays linear.
+// A PKCE `code_verifier` (and Canvas's bare `?verifier=` file capability) is a
+// bearer secret: whoever holds it can complete the exchange or fetch the file
+// (fleet audit library-candidates §16 — canvas-parent #380 quoted one in a 404).
 const QUERY_SECRET_RE = new RegExp(
-  `([?&](?:(?:access|refresh|id|auth|session|csrf|xsrf)[_-]?token|client[_-]?secret|api[_-]?secret|api[_-]?key|password|passwd|signature|token|key|sig|(?:php|j)?sess(?:ion)?[_-]?id|sid|x[-_]${HEADER_NAME_RUN}?(?:api[-_]?key|token|secret|auth)${HEADER_NAME_RUN})=)[^&#\\s"'<>\`]+`,
+  `([?&](?:(?:access|refresh|id|auth|session|csrf|xsrf)[_-]?token|client[_-]?secret|api[_-]?secret|api[_-]?key|password|passwd|signature|token|key|sig|(?:code[_-]?)?verifier|(?:php|j)?sess(?:ion)?[_-]?id|sid|x[-_]${HEADER_NAME_RUN}?(?:api[-_]?key|token|secret|auth)${HEADER_NAME_RUN})=)[^&#\\s"'<>\`]+`,
   'gi',
 );
 // An OAuth authorization code (`?code=…` on a redirect). Only values of 16+
@@ -484,6 +487,7 @@ const JSON_SECRET_KEYS = [
   'api[_-]?secret',
   '(?:x[_-])?api[_-]?key',
   'private[_-]?key',
+  'code[_-]?verifier', // PKCE; a bare `verifier` key is too generic for JSON
   `x[_-]${HEADER_NAME_RUN}?(?:api[_-]?key|token|secret|auth)${HEADER_NAME_RUN}`, // bounded like HEADER_SECRET_RE
   '(?:proxy-)?authorization',
   'password',

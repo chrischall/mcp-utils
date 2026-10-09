@@ -76,3 +76,39 @@ describe('redactSecrets — non-string JSON secret values', () => {
     expect(redactSecrets(body)).toBe(body);
   });
 });
+
+// Fleet audit library-candidates §16 (cluster 15): a PKCE `code_verifier` and
+// Canvas's `?verifier=` file capability are bearer secrets carried in a URL or
+// a form-encoded token exchange, and both reached tool errors verbatim
+// (canvas-parent #380 quoted the file URL in a 404 message).
+describe('redactSecrets — verifier query params', () => {
+  it.each(['verifier', 'code_verifier', 'code-verifier', 'codeVerifier', 'VERIFIER'])('redacts ?%s=…', (name) => {
+    const out = redactSecrets(`GET https://h.example/files/1/download?${name}=FAKEverif0123456789&wrap=1 → 404`);
+    expect(out).not.toContain('FAKEverif0123456789');
+    expect(out).toContain(`${name}=[REDACTED]`);
+    expect(out).toContain('&wrap=1');
+  });
+
+  it('redacts a code_verifier in a form-encoded token-exchange body', () => {
+    const out = redactSecrets(
+      'token exchange failed: grant_type=authorization_code&code_verifier=FAKEpkce0123456789abcdef&client_id=app',
+    );
+    expect(out).not.toContain('FAKEpkce0123456789abcdef');
+    expect(out).toContain('&client_id=app');
+  });
+
+  it('leaves look-alike params alone', () => {
+    expect(redactSecrets('https://h.example/x?verified=true&unverifiable=1')).toBe(
+      'https://h.example/x?verified=true&unverifiable=1',
+    );
+  });
+});
+
+describe('redactSecrets — code_verifier JSON values', () => {
+  it.each(['code_verifier', 'codeVerifier', 'code-verifier'])('redacts "%s": "…"', (key) => {
+    const out = redactSecrets(`{"grant_type":"authorization_code","${key}":"FAKEpkce0123456789abcdef"}`);
+    expect(out).not.toContain('FAKEpkce0123456789abcdef');
+    expect(out).toContain(`"${key}":"[REDACTED]"`);
+    expect(out).toContain('"grant_type":"authorization_code"');
+  });
+});
