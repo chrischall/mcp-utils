@@ -647,3 +647,20 @@ describe('subpath isolation', () => {
     expect(root).not.toMatch(/netguard|undici/);
   });
 });
+
+// fleet-audit#1298: a leading-zero octet is the remaining non-canonical IPv4
+// form. inet_aton reads `012` as octal 10, so `012.0.0.1` can mean 10.0.0.1;
+// a fail-closed guard must refuse it rather than read it as decimal 12.
+describe('isPublicAddress — leading-zero octets fail closed (fleet-audit#1298)', () => {
+  it.each(['012.0.0.1', '01.2.3.4', '1.2.3.04', '8.8.8.08', '00.0.0.0', '::ffff:08.8.8.8'])('refuses %s', (ip) => {
+    expect(isPublicAddress(ip)).toBe(false);
+  });
+
+  it('still accepts canonical quads, zeros included', () => {
+    expect(isPublicAddress('8.8.8.8')).toBe(true);
+    expect(isPublicAddress('1.0.0.1')).toBe(true);
+    expect(isPublicAddress('100.0.10.200')).toBe(true);
+    expect(isPublicAddress('::ffff:8.8.8.8')).toBe(true);
+    expect(isPublicAddress('0.0.0.0')).toBe(false); // this-network, by range
+  });
+});
