@@ -101,7 +101,8 @@ export interface ApiClientOptions {
    * `'x-auth-token'` / `'x-api-key'`). Unset keeps the default
    * `Authorization: Bearer` behavior. Applies to both
    * {@link ApiClientOptions.getToken} and
-   * {@link ApiClientOptions.tokenManager} tokens.
+   * {@link ApiClientOptions.tokenManager} tokens. Never re-sent to another
+   * origin on a redirect (see {@link ApiClientOptions.redirect}).
    */
   tokenHeader?: string;
   /**
@@ -163,8 +164,14 @@ export interface ApiClientOptions {
   timeout?: number | false;
   /**
    * How redirects are handled. Omitted (the default) leaves `fetch`'s own
-   * behaviour unchanged: it follows them, re-sending the credential to
-   * wherever they point. `'manual'` and `'error'` are passed straight to
+   * behaviour unchanged: it follows them, re-sending every request header
+   * except `Authorization` to wherever they point — so a credential in a
+   * custom header would follow a cross-origin `Location`. For that reason, a
+   * client with {@link ApiClientOptions.tokenHeader} and no `redirect` follows
+   * redirects itself (as fetch would, up to 20 hops) and drops the
+   * `tokenHeader`, `Authorization`, `Cookie` and `Proxy-Authorization`
+   * headers from the first hop that leaves the base origin onward
+   * (fleet-audit#1302). `'manual'` and `'error'` are passed straight to
    * `fetch`.
    *
    * `'same-origin'` follows redirects itself (`fetch` is called with
@@ -366,6 +373,46 @@ export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 /** Default hop limit for `createApiClient({ redirect: 'same-origin' })`. */
 export const DEFAULT_MAX_REDIRECTS = 5;
+
+/**
+ * Hop limit when `createApiClient` follows redirects itself for a
+ * `tokenHeader` client with no explicit `redirect` mode: fetch's own limit, so
+ * nothing that used to be followed is refused.
+ */
+const FETCH_MAX_REDIRECTS = 20;
+
+/**
+ * The request headers fetch drops on a cross-origin redirect (and then some):
+ * `Authorization`, plus `Cookie` and `Proxy-Authorization`. A `tokenHeader`
+ * is added per client.
+ */
+const CROSS_ORIGIN_DROPPED_HEADERS = ['authorization', 'cookie', 'proxy-authorization'];
+
+/** `headers` minus every credential-bearing one (case-insensitive). */
+function withoutCredentials(headers: Record<string, string>, tokenHeader: string | undefined): Record<string, string> {
+  const drop = new Set(CROSS_ORIGIN_DROPPED_HEADERS);
+  if (tokenHeader !== undefined) drop.add(tokenHeader.toLowerCase());
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) if (!drop.has(k.toLowerCase())) out[k] = v;
+  return out;
+}
+
+/**
+ * Append `query` (a {@link buildQueryString} result: `''` or `?…`) to `path`.
+ * A path that already carries a query is joined with `&` (or nothing after a
+ * trailing `?`/`&`) rather than a second `?`, which would fold the new
+ * parameters into the last existing value (fleet-audit#1294); a fragment stays
+ * last.
+ */
+function joinQuery(path: string, query: string): string {
+  if (!query) return path;
+  const hashAt = path.indexOf('#');
+  const head = hashAt < 0 ? path : path.slice(0, hashAt);
+  const fragment = hashAt < 0 ? '' : path.slice(hashAt);
+  if (!head.includes('?')) return `${head}${query}${fragment}`;
+  const sep = head.endsWith('?') || head.endsWith('&') ? '' : '&';
+  return `${head}${sep}${query.slice(1)}${fragment}`;
+}
 
 /** The statuses `redirect: 'same-origin'` follows (when they carry a `Location`). */
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -812,7 +859,13 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   const retryStatuses = retry.statuses ?? [429];
   const timeoutMs = opts.timeout === false ? 0 : (opts.timeout ?? DEFAULT_REQUEST_TIMEOUT_MS);
   const redirectMode = opts.redirect;
-  const maxRedirects = opts.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
+  // fleet-audit#1302: fetch strips only `Authorization` on a cross-origin
+  // redirect, so a `tokenHeader` credential would follow the Location to any
+  // host. With `tokenHeader` and no explicit mode, follow redirects here and
+  // drop the credential once a hop leaves the base origin.
+  const stripCrossOrigin = redirectMode === undefined && opts.tokenHeader !== undefined;
+  const manualRedirects = redirectMode === 'same-origin' || stripCrossOrigin;
+  const maxRedirects = opts.maxRedirects ?? (stripCrossOrigin ? FETCH_MAX_REDIRECTS : DEFAULT_MAX_REDIRECTS);
   const reportWriteOutcome = opts.writeOutcomeUnknown !== false;
   const defaultMaxBytes = checkMaxBytes('maxResponseBytes', opts.maxResponseBytes);
   // NaN would make `hops >= maxRedirects` never true: an endless redirect loop.
@@ -1040,7 +1093,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
           'normalisation would rewrite. Build paths with apiPath`...` so each value is one encoded segment.',
       );
     }
-    const url = `${base}${path}${query}`;
+    const url = `${base}${joinQuery(path, query)}`;
     if (baseOrigin === undefined) return url; // unparseable base: nothing to compare against
     let parsed: URL;
     try {
@@ -1067,19 +1120,29 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
    * userinfo — the same rule {@link resolveUrl} applies to a path. The message
    * names only the target origin: the rest may carry a token.
    */
-  function sameOriginHop(location: string, from: string): string {
-    let next: URL;
+  function resolveLocation(location: string, from: string): string {
     try {
-      next = new URL(location, from);
+      return new URL(location, from).href;
     } catch {
       throw new RedirectRefusedError(`Refusing redirect from ${service}: the Location header is not a valid URL.`);
     }
-    if (
-      baseOrigin === undefined ||
-      next.origin !== baseOrigin ||
-      next.username !== baseParts?.username ||
-      next.password !== baseParts?.password
-    ) {
+  }
+
+  /** Whether `href` is on the base origin with the base's own userinfo. */
+  function onBaseOrigin(href: string): boolean {
+    const next = new URL(href);
+    return (
+      baseOrigin !== undefined &&
+      next.origin === baseOrigin &&
+      next.username === baseParts?.username &&
+      next.password === baseParts?.password
+    );
+  }
+
+  function sameOriginHop(location: string, from: string): string {
+    const href = resolveLocation(location, from);
+    const next = new URL(href);
+    if (!onBaseOrigin(href)) {
       throw new RedirectRefusedError(
         `Refusing redirect from ${service} to ${next.origin}: it leaves the base origin ${baseOrigin ?? '(unparseable)'}, ` +
           'and following it would re-send the credential there.',
@@ -1102,20 +1165,22 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
       withBody: boolean,
       token: string | undefined,
       signal?: AbortSignal,
+      credentialed = true,
     ): Promise<Response> => {
       // A fetch handed an already-aborted signal rejects without sending.
       if (!signal?.aborted) dispatch.sent = true;
+      const headers: Record<string, string> = {
+        Accept: 'application/json',
+        ...(withBody && contentType !== undefined ? { 'Content-Type': contentType } : {}),
+        ...opts.baseHeaders,
+        ...authHeader(token || undefined),
+        ...opt.headers,
+      };
       return doFetch(hopUrl, {
         method: hopMethod,
-        headers: {
-          Accept: 'application/json',
-          ...(withBody && contentType !== undefined ? { 'Content-Type': contentType } : {}),
-          ...opts.baseHeaders,
-          ...authHeader(token || undefined),
-          ...opt.headers,
-        },
+        headers: credentialed ? headers : withoutCredentials(headers, opts.tokenHeader),
         ...(signal ? { signal } : {}),
-        ...(redirectMode !== undefined ? { redirect: redirectMode === 'same-origin' ? 'manual' : redirectMode } : {}),
+        ...(manualRedirects ? { redirect: 'manual' } : redirectMode !== undefined ? { redirect: redirectMode } : {}),
         ...(withBody ? bodyInit : {}),
       }).catch((err: unknown) => {
         markTransportFailure(err);
@@ -1124,19 +1189,27 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     };
 
     const fetchWith = async (token: string | undefined, signal?: AbortSignal): Promise<Response> => {
-      if (redirectMode !== 'same-origin') return fetchHop(url, method, true, token, signal);
+      if (!manualRedirects) return fetchHop(url, method, true, token, signal);
       let hopUrl = url;
       let hopMethod = method;
       let withBody = true;
+      let credentialed = true;
       for (let hops = 0; ; hops += 1) {
-        const res = await fetchHop(hopUrl, hopMethod, withBody, token, signal);
+        const res = await fetchHop(hopUrl, hopMethod, withBody, token, signal, credentialed);
         const location = REDIRECT_STATUSES.has(res.status) ? responseHeader(res, 'location') : undefined;
         if (location === undefined || location === null) return res;
         cancelBody(res);
         if (hops >= maxRedirects) {
           throw new RedirectRefusedError(`Refusing request to ${service}: too many redirects (more than ${maxRedirects}).`);
         }
-        hopUrl = sameOriginHop(location, hopUrl);
+        if (stripCrossOrigin) {
+          hopUrl = resolveLocation(location, hopUrl);
+          // Sticky: once the request has left the base origin, nothing it is
+          // redirected to later is trusted with the credential.
+          if (credentialed && !onBaseOrigin(hopUrl)) credentialed = false;
+        } else {
+          hopUrl = sameOriginHop(location, hopUrl);
+        }
         if (res.status === 303 || ((res.status === 301 || res.status === 302) && hopMethod === 'POST')) {
           if (hopMethod !== 'HEAD') hopMethod = 'GET';
           withBody = false;
