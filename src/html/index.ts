@@ -24,7 +24,8 @@
 
 import { parse, NodeType, type HTMLElement, type Node, type TextNode } from 'node-html-parser';
 import { asciiLower } from '../internal/ascii.js';
-import { codePointOr } from '../internal/code-point.js';
+import { replaceTags } from '../internal/tags.js';
+import { decodeHtmlEntities } from '../scrape/index.js';
 
 export type { HTMLElement };
 
@@ -43,9 +44,103 @@ function cellText(el: HTMLElement): string {
 
 /** Coerce a raw HTML string or an already-parsed root into an `HTMLElement`. */
 function toRoot(input: string | HTMLElement): HTMLElement {
-  return typeof input === 'string'
-    ? parse(input, { lowerCaseTagName: false, comment: false })
-    : input;
+  return typeof input === 'string' ? boundedParse(input, { lowerCaseTagName: false, comment: false }) : input;
+}
+
+/**
+ * Past this many never-closed elements, {@link boundedParse} repairs the markup
+ * itself before parsing (see there). Real pages leave a handful open; at 500
+ * node-html-parser's own repair still finishes in ~25 ms on the worst
+ * interleaving measured.
+ */
+export const HTML_UNCLOSED_REPAIR_MAX = 500;
+
+/**
+ * Void elements and elements whose end tag the parser implies (`<p>`, `<li>`,
+ * `<td>`, …) — neither is left open at end of input, so neither is tracked.
+ */
+const NEVER_LEFT_OPEN = new Set([
+  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source',
+  'track', 'wbr', 'li', 'p', 'dt', 'dd', 'td', 'th', 'tr', 'option', 'optgroup', 'thead', 'tbody',
+  'tfoot', 'colgroup', 'caption', 'rt', 'rp', 'html', 'head', 'body',
+]);
+
+/** Raw-text elements node-html-parser skips to their close tag. */
+const RAW_TEXT_TAGS = new Set(['script', 'style', 'noscript', 'pre']);
+
+const TAG_NAME_CHAR = /[a-z0-9:_.-]/;
+
+/**
+ * Find the opening tags a parse would leave unclosed, in one linear scan that
+ * mirrors node-html-parser's nesting: an opener is pushed, a closer pops the
+ * innermost element only when the names match (the parser ignores a closer
+ * that does not match its current element), comments and raw-text element
+ * bodies are skipped. Returns the `[start, end)` source span of each opener
+ * still on the stack at end of input.
+ */
+function findUnclosedOpeners(html: string): Array<[number, number]> {
+  const lower = asciiLower(html);
+  const stack: Array<{ name: string; span: [number, number] }> = [];
+  let i = 0;
+  for (;;) {
+    const lt = lower.indexOf('<', i);
+    if (lt < 0) break;
+    if (lower.startsWith('<!--', lt)) {
+      const end = lower.indexOf('-->', lt + 4);
+      if (end < 0) break;
+      i = end + 3;
+      continue;
+    }
+    const closing = lower[lt + 1] === '/';
+    let p = lt + (closing ? 2 : 1);
+    const nameStart = p;
+    while (p < lower.length && TAG_NAME_CHAR.test(lower[p]!)) p++;
+    const first = lower[nameStart];
+    if (p === nameStart || first === undefined || first < 'a' || first > 'z') {
+      i = lt + 1;
+      continue;
+    }
+    const name = lower.slice(nameStart, p);
+    const gt = lower.indexOf('>', p);
+    if (gt < 0) break;
+    i = gt + 1;
+    if (closing) {
+      if (stack.length > 0 && stack[stack.length - 1]!.name === name) stack.pop();
+      continue;
+    }
+    if (lower[gt - 1] === '/' || NEVER_LEFT_OPEN.has(name)) continue;
+    if (RAW_TEXT_TAGS.has(name)) {
+      const end = lower.indexOf(`</${name}>`, i);
+      if (end < 0) break;
+      i = end + name.length + 3;
+      continue;
+    }
+    stack.push({ name, span: [lt, gt + 1] });
+  }
+  return stack.map((e) => e.span);
+}
+
+/**
+ * `parse()` with a bound on node-html-parser's unclosed-tag repair, which is
+ * superlinear: 8000 unclosed `<div>` (39 KB) took 23 s, so one hostile or
+ * MITM'd response could pin the process (fleet-audit#1197). The parser's
+ * repair removes each never-closed element and hands its children to the
+ * parent — the same tree as deleting the never-closed opening tag from the
+ * source. So when the input would leave more than
+ * {@link HTML_UNCLOSED_REPAIR_MAX} elements open, those opening tags are cut
+ * from the source in one linear pass first, and the parse that follows has
+ * (almost) nothing left to repair. Well-formed pages take the untouched path.
+ */
+function boundedParse(html: string, options: Parameters<typeof parse>[1] = {}): HTMLElement {
+  const unclosed = findUnclosedOpeners(html);
+  if (unclosed.length <= HTML_UNCLOSED_REPAIR_MAX) return parse(html, options);
+  let repaired = '';
+  let at = 0;
+  for (const [start, end] of unclosed) {
+    repaired += html.slice(at, start);
+    at = end;
+  }
+  return parse(repaired + html.slice(at), options);
 }
 
 /**
@@ -229,20 +324,11 @@ export function extractJsonFromHtml(
   }
 }
 
-/** The small set of named entities IC message bodies actually contain. */
-const NAMED_ENTITIES: Record<string, string> = {
-  nbsp: ' ',
-  amp: '&',
-  lt: '<',
-  gt: '>',
-  quot: '"',
-  apos: "'",
-};
-
 /**
  * Strip an HTML document down to its readable plain text: remove `<script>` and
  * `<style>` blocks (and their contents), drop all remaining tags, decode common
- * HTML entities, then collapse whitespace.
+ * HTML entities (via `decodeHtmlEntities` from the `scrape` module, so the two
+ * renderers share one table), then collapse whitespace. Linear in the input.
  *
  * Dependency-free (no DOM parser) — this mirrors the Infinite Campus message
  * extractor, which renders `messageView.xsl` bodies into a flat string. Removing
@@ -260,17 +346,13 @@ export function extractPlainTextFromHtml(html: string): string {
   // a single forward pass is O(n) and preserves the load-bearing safety property
   // (inline JS/CSS text never reaches the output).
   let text = stripElementContent(stripElementContent(html, 'script'), 'style');
-  // Drop all remaining tags.
-  text = text.replace(/<[^>]+>/g, ' ');
-  // Decode numeric (decimal + hex) references, guarding out-of-range code points
-  // (`&#999999999999;`) that would otherwise throw RangeError on hostile input.
-  text = text.replace(/&#(\d+);/g, (whole, d: string) => codePointOr(Number(d), whole));
-  text = text.replace(/&#x([0-9a-fA-F]+);/g, (whole, h: string) => codePointOr(parseInt(h, 16), whole));
-  // Decode the common named entities.
-  text = text.replace(/&([a-zA-Z]+);/g, (whole, name: string) => {
-    const decoded = NAMED_ENTITIES[name.toLowerCase()];
-    return decoded ?? whole;
-  });
+  // Drop all remaining tags — a linear scan with `/<[^>]+>/g` semantics (the
+  // regex itself was quadratic on a withheld `>`, fleet-audit#1197) — then
+  // decode through scrape's decodeHtmlEntities, the one entity table
+  // (fleet-audit#1300): numeric references guarded against out-of-range code
+  // points, the common named entities, and `&amp;` last so a double-escaped
+  // entity survives exactly one level.
+  text = decodeHtmlEntities(replaceTags(text, ' '));
   // Collapse whitespace runs and trim.
   return text.replace(/\s+/g, ' ').trim();
 }
@@ -352,9 +434,13 @@ export interface ReadableTextOptions {
  *     `<iframe>` and `<svg>` content is dropped, and comments are ignored;
  *   - the full named-entity table is decoded (`&eacute;`, `&ndash;`, …).
  *
- * Use it for article / post / message bodies. Iterative, so hostile nesting
- * depth cannot overflow the stack. Hoisted from onthecheap-mcp's `htmlToText`
- * (fleet audit #1083).
+ * Use it for article / post / message bodies. The walk is iterative, so
+ * hostile nesting depth cannot overflow the stack; and the parse is bounded
+ * (past {@link HTML_UNCLOSED_REPAIR_MAX} unclosed elements the parser's
+ * superlinear repair is skipped), so a flood of unclosed tags cannot pin the
+ * process either. There is no size cap: a 2 MB well-formed page parses in
+ * well under 100 ms. Hoisted from onthecheap-mcp's `htmlToText` (fleet audit
+ * #1083).
  *
  * @param html The HTML (fragment or full document). `null`/`undefined` → `''`.
  * @returns The readable text (`''` for empty input).
@@ -366,7 +452,7 @@ export function htmlToReadableText(html: string | null | undefined, opts: Readab
   // to emit after an element's children.
   // node-html-parser surfaces a leading `<!doctype …>` as a TEXT node, so it
   // would read as words; drop it before parsing (anchored, so linear).
-  const stack: Array<Node | string> = [parse(html.replace(/^\s*<!doctype[^>]*>/i, ''))];
+  const stack: Array<Node | string> = [boundedParse(html.replace(/^\s*<!doctype[^>]*>/i, ''))];
   while (stack.length > 0) {
     const item = stack.pop()!;
     if (typeof item === 'string') {
