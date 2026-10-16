@@ -55,6 +55,14 @@ describe('redactSecrets ReDoS resistance', () => {
     ['ya29.', 'ya29.'.repeat(40_000)],
     ['1//', '1//'.repeat(70_000)],
     [' 1//x', ' 1//x'.repeat(40_000)],
+    // fleet-audit#1297: the `#` / `;` anchors and the new key names.
+    ['#x-', `#${'x-'.repeat(100_000)}`],
+    [';x-a-', ';x-a-'.repeat(40_000)],
+    ['#api_token', '#api_token'.repeat(20_000)],
+    [';secret', ';secret'.repeat(28_000)],
+    ['&auth', '&auth'.repeat(40_000)],
+    ['"aws_secret_access_key":"', '"aws_secret_access_key":"'.repeat(8_000)],
+    ['"aws_secret_access_key":1', '"aws_secret_access_key":1'.repeat(8_000)],
   ])('is linear on 200 KB of `%s` runs', (_label, evil) => {
     expect(elapsedMs(() => redactSecrets(evil))).toBeLessThan(100);
   });

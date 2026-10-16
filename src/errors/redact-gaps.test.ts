@@ -112,3 +112,37 @@ describe('redactSecrets — code_verifier JSON values', () => {
     expect(out).toContain('"grant_type":"authorization_code"');
   });
 });
+
+// fleet-audit#1297: shapes still passed verbatim after #1057 — an OAuth
+// implicit-flow fragment, `;` path params, `api_token` / bare `secret` / bare
+// `auth` query params, and an AWS secret access key as a JSON value.
+describe('redactSecrets — fragments, path params and more key names (fleet-audit#1297)', () => {
+  it.each([
+    ['an implicit-grant fragment', 'https://x.example/cb#access_token=FAKEtok0123456789XYZ&token_type=bearer', '&token_type=bearer'],
+    ['a bare #token= fragment', 'https://x.example/cb#token=FAKEtok0123456789XYZ', 'x.example/cb#token='],
+    ['a ;access_token= path param', 'https://x.example/p;access_token=FAKEtok0123456789XYZ', 'x.example/p;access_token='],
+    ['?api_token=', 'https://x.example/v1?api_token=FAKEtok0123456789XYZ&q=1', '&q=1'],
+    ['?apiToken=', 'https://x.example/v1?apiToken=FAKEtok0123456789XYZ&q=1', '&q=1'],
+    ['?api-token=', 'https://x.example/v1?api-token=FAKEtok0123456789XYZ', 'api-token='],
+    ['?secret=', 'https://x.example/v1?secret=FAKEtok0123456789XYZ&q=1', '&q=1'],
+    ['?auth=', 'https://x.example/v1?q=1&auth=FAKEtok0123456789XYZ', '?q=1'],
+    ['an aws_secret_access_key JSON value', '{"aws_secret_access_key":"FAKEtok0123456789XYZ","region":"us-east-1"}', '"region":"us-east-1"'],
+    ['an AwsSecretAccessKey JSON value', "{'AwsSecretAccessKey': 'FAKEtok0123456789XYZ'}", 'AwsSecretAccessKey'],
+  ])('redacts %s', (_label, input, kept) => {
+    const out = redactSecrets(input);
+    expect(out).not.toContain('FAKEtok0123456789XYZ');
+    expect(out).toContain('[REDACTED]');
+    expect(out).toContain(kept);
+  });
+
+  it('leaves non-secret look-alikes alone', () => {
+    for (const s of [
+      'https://x.example/docs#section=2&authors=3',
+      'https://x.example/v1?author=jo&secretary=no&authority=x',
+      'see &#39;quoted&#39; text; token_type=bearer',
+      '{"aws_region":"us-east-1","access_key_id_hint":"AKIA…"}',
+    ]) {
+      expect(redactSecrets(s)).toBe(s);
+    }
+  });
+});
