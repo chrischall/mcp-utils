@@ -33,6 +33,7 @@ import type { McpToolErrorKind } from '../errors/index.js';
 import {
   EdgeBlockedError,
   RateLimitedError,
+  ResponseTooLargeError,
   UnauthorizedError,
   UpstreamHttpError,
   detectEdgeBlock,
@@ -41,6 +42,7 @@ import {
   type RateLimitContext,
   type RetryPolicy,
 } from '../http/index.js';
+import { readBytesCapped } from '../http/body-limit.js';
 import { retryAfterToMs } from '../internal/retry-after.js';
 import { isReadOnlyGraphqlDocument } from './operation-kind.js';
 
@@ -153,6 +155,17 @@ export interface GraphqlClientOptions {
    * after sending). Name the tool that checks the state.
    */
   writeOutcomeHint?: string;
+  /**
+   * Byte cap on every response body. A `Content-Length` over it is refused
+   * before reading; a body that grows past it is cancelled mid-stream. Either
+   * way {@link ResponseTooLargeError} (`kind: 'too_large'`), never a
+   * transport error — the response arrived, only its size was refused.
+   * Defaults to {@link GRAPHQL_DEFAULT_MAX_RESPONSE_BYTES} (16 MiB); `Infinity`
+   * disables it. Must be a non-negative number (a `TypeError` otherwise).
+   * Same implementation as `createApiClient`'s `maxResponseBytes`
+   * (fleet-audit#1387).
+   */
+  maxResponseBytes?: number;
   /** Injectable fetch. Defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
   /** Injectable sleep for retries (tests). */
@@ -165,7 +178,8 @@ export interface GraphqlClient {
    * Send a request and return its parsed envelope, `errors[]` and all — for a
    * raw passthrough tool that shows the caller what the server said. Still
    * throws for everything that is not a GraphQL answer: a transport failure,
-   * a CDN/WAF refusal, an exhausted 429, or a body that is not a GraphQL
+   * a CDN/WAF refusal, an exhausted 429, a body over `maxResponseBytes`
+   * ({@link ResponseTooLargeError}), or a body that is not a GraphQL
    * response object (a non-JSON error page is an {@link UpstreamHttpError}).
    * An auth failure is replayed once when `onAuthError` is set, then
    * returned as-is.
@@ -261,9 +275,25 @@ export function isGraphqlAuthError(status: number, errors: readonly GraphqlError
   });
 }
 
+/**
+ * The default {@link GraphqlClientOptions.maxResponseBytes}: 16 MiB, far above
+ * any GraphQL answer the fleet reads, and low enough that a hostile or runaway
+ * endpoint cannot make the process buffer an unbounded body.
+ */
+export const GRAPHQL_DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_RETRY: RetryPolicy = { count: 1, delayMs: 2000 };
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Validate {@link GraphqlClientOptions.maxResponseBytes}; `undefined` = no cap. */
+function checkMaxBytes(value: number | undefined): number | undefined {
+  if (value === undefined) return GRAPHQL_DEFAULT_MAX_RESPONSE_BYTES;
+  if (typeof value !== 'number' || Number.isNaN(value) || value < 0) {
+    throw new TypeError(`createGraphqlClient: maxResponseBytes must be a non-negative number, got ${String(value)}.`);
+  }
+  return value === Infinity ? undefined : value;
+}
 
 /** Thrown internally when our own timer fired. */
 class TimedOut extends Error {}
@@ -346,10 +376,27 @@ export function createGraphqlClient(opts: GraphqlClientOptions): GraphqlClient {
   const retry = opts.retry ?? DEFAULT_RETRY;
   const retryStatuses = retry.statuses ?? [429];
   const isAuth = opts.isAuthError ?? isGraphqlAuthError;
+  const maxBytes = checkMaxBytes(opts.maxResponseBytes);
 
   async function headersFor(req: GraphqlRequest): Promise<Record<string, string>> {
     const base = typeof opts.headers === 'function' ? await opts.headers() : (opts.headers ?? {});
     return { 'content-type': 'application/json', accept: 'application/json', ...base, ...req.headers };
+  }
+
+  /**
+   * The body as text under {@link GraphqlClientOptions.maxResponseBytes}. A
+   * fetch shim whose response has no readable stream (only `text()`) is read
+   * whole and then measured, so the cap still holds for it.
+   */
+  async function readText(res: Response, race: <T>(p: Promise<T>) => Promise<T>): Promise<string> {
+    if (maxBytes === undefined) return res.text();
+    const body = (res as { body?: unknown }).body as { getReader?: unknown } | null | undefined;
+    if (!body || typeof body.getReader !== 'function') {
+      const text = await res.text();
+      if (new TextEncoder().encode(text).byteLength > maxBytes) throw new ResponseTooLargeError(service, maxBytes);
+      return text;
+    }
+    return new TextDecoder().decode(await readBytesCapped(res, maxBytes, service, race));
   }
 
   /**
@@ -370,9 +417,12 @@ export function createGraphqlClient(opts: GraphqlClientOptions): GraphqlClient {
       timer = setTimeout(() => controller.abort(), timeoutMs);
     }
     const signal = withAmbientCancellation(controller?.signal);
+    // Racing each read against the timer makes a stalled read reject too, so
+    // readBytesCapped cancels the stream instead of leaving it held.
+    const race = <T>(p: Promise<T>): Promise<T> => (expired ? Promise.race([p, expired]) : p);
     const work = (async () => {
       const res = await doFetch(opts.endpoint, { ...init, ...(signal ? { signal } : {}) });
-      return { res, text: await res.text() };
+      return { res, text: await readText(res, race) };
     })();
     work.catch(() => {});
     try {
@@ -417,10 +467,18 @@ export function createGraphqlClient(opts: GraphqlClientOptions): GraphqlClient {
       ...(req.operationName !== undefined ? { operationName: req.operationName } : {}),
     });
     for (let tries = 0; ; tries++) {
+      // Resolved BEFORE the transport try: a throwing `headers()` hook (a token
+      // refresh rejecting with UnauthorizedError, a missing-config error) has
+      // sent nothing, so it is rethrown untouched — never reported as a
+      // transport failure, nor, for a write, as outcome-unknown
+      // (fleet-audit#1196).
+      const headers = await headersFor(req);
       let sent: { res: Response; text: string };
       try {
-        sent = await attempt({ method: 'POST', headers: await headersFor(req), body });
+        sent = await attempt({ method: 'POST', headers, body });
       } catch (err) {
+        // The response arrived; only its size was refused.
+        if (err instanceof ResponseTooLargeError) throw err;
         if (err instanceof TimedOut) throw transportError(err, true, write);
         if (err instanceof Error && err.name === 'AbortError') throw err; // the caller cancelled
         throw transportError(err, false, write);

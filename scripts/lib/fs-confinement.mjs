@@ -18,9 +18,18 @@
  *   repo-local function that happens to be called `resolveOutputDir`
  *   (gemini-mcp, flightaware-mcp) is not this helper and is not checked.
  * - A call passes when the token `allowedRoots` appears in its own argument
- *   list, outside comments and strings: a key, a shorthand `{ allowedRoots }`,
- *   or a conditional spread all count. Options built in a separate variable
- *   do not — inline them, so a reviewer sees the confinement at the call.
+ *   list, outside comments and strings: a key or a shorthand `{ allowedRoots }`.
+ *   Options built in a separate variable do not — inline them, so a reviewer
+ *   sees the confinement at the call. A token that appears ONLY inside a
+ *   spread group (`...(roots ? { allowedRoots: roots } : {})`) is marked
+ *   `conditional`: the call is unconfined whenever the condition is falsy, so
+ *   the CLI warns on it (an error under `--strict`).
+ * - {@link findRawFsWrites} covers what the helper check cannot see: a
+ *   `node:fs` write / append / mkdir / write-stream call whose path is not a
+ *   literal. The CLI reports those as warnings (errors under `--strict`): many
+ *   are an operator-configured path, but one fed by a tool argument is the
+ *   same hole as an unconfined helper, and should be `writeFileSafe` /
+ *   `writeUniqueFile` with `allowedRoots`.
  * - `resolveOutputDir(undefined, …)` is exempt: with no per-call directory it
  *   reads only the operator's env var, which `allowedRoots` never constrains.
  *
@@ -237,14 +246,38 @@ function firstArgument(args) {
 }
 
 /**
+ * Where `allowedRoots` appears in a (masked) argument list: `'none'`, only
+ * inside a spread group `...( … )` (`'conditional'` — a conditional or `&&`
+ * spread confines only when its condition holds), or at least once outside
+ * any (`'plain'`).
+ */
+function allowedRootsPlacement(args) {
+  const token = /(?<![\w$])allowedRoots(?![\w$])/g;
+  const spreads = []; // [start, end) of each `...(` group's contents
+  for (let k = 0; k < args.length; k++) {
+    if (args[k] !== '(') continue;
+    if (!/\.\.\.\s*$/.test(args.slice(Math.max(0, k - 8), k))) continue;
+    const end = closingParen(args, k);
+    spreads.push([k, end === -1 ? args.length : end]);
+  }
+  let seen = false;
+  for (const m of args.matchAll(token)) {
+    seen = true;
+    if (!spreads.some(([a, b]) => m.index > a && m.index < b)) return 'plain';
+  }
+  return seen ? 'conditional' : 'none';
+}
+
+/**
  * @typedef {{ helper: string, local: string, line: number, column: number, text: string }} UnconfinedCall
- * @typedef {UnconfinedCall & { confined: boolean }} FsHelperCall
+ * @typedef {UnconfinedCall & { confined: boolean, conditional: boolean }} FsHelperCall
  */
 
 /**
  * Every call to an mcp-utils file helper in `source`, each marked `confined`
  * when it passes `allowedRoots` (or is the exempt `resolveOutputDir(undefined,
- * …)`). Line and column are 1-based and point at the callee (the namespace,
+ * …)`), and `conditional` when that `allowedRoots` is only inside a spread
+ * group. Line and column are 1-based and point at the callee (the namespace,
  * for `ns.fileBlob(…)`).
  *
  * @param {string} source
@@ -283,11 +316,12 @@ export function findFsHelperCalls(source) {
     const close = closingParen(code, open);
     if (close === -1) continue;
     const args = code.slice(open + 1, close);
-    const confined =
-      /(?<![\w$])allowedRoots(?![\w$])/.test(args) ||
-      (helper === 'resolveOutputDir' && firstArgument(args).trim() === 'undefined');
+    const exempt = helper === 'resolveOutputDir' && firstArgument(args).trim() === 'undefined';
+    const roots = allowedRootsPlacement(args);
+    const confined = roots !== 'none' || exempt;
     findings.push({
       confined,
+      conditional: !exempt && roots === 'conditional',
       helper,
       local: callee.replace(/\s+/g, ''),
       ...position(m.index),
@@ -307,7 +341,98 @@ export function findFsHelperCalls(source) {
 export function findUnconfinedFsCalls(source) {
   return findFsHelperCalls(source)
     .filter((c) => !c.confined)
-    .map(({ confined: _confined, ...call }) => call);
+    .map(({ confined: _confined, conditional: _conditional, ...call }) => call);
+}
+
+/** The `node:fs` calls {@link findRawFsWrites} checks: each creates or writes at its first argument. */
+export const RAW_FS_WRITES = Object.freeze([
+  'writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'mkdir', 'mkdirSync', 'createWriteStream',
+]);
+
+const FS_MODULE = /^(?:node:)?fs(?:\/promises)?$/;
+
+/** Line/column (1-based) lookup for offsets into `source`. */
+function positioner(source) {
+  const lineStarts = [0];
+  for (let k = 0; k < source.length; k++) if (source[k] === '\n') lineStarts.push(k + 1);
+  return (offset) => {
+    let lo = 0;
+    let hi = lineStarts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (lineStarts[mid] <= offset) lo = mid; else hi = mid - 1;
+    }
+    return { line: lo + 1, column: offset - lineStarts[lo] + 1 };
+  };
+}
+
+/**
+ * @typedef {{ fn: string, local: string, line: number, column: number, text: string }} RawFsWrite
+ */
+
+/**
+ * Every `node:fs` (or `fs`, `fs/promises`) write / append / mkdir /
+ * write-stream call in `source` whose path — the first argument — is not a
+ * plain string literal. Follows named imports (and `as` aliases), `* as ns`
+ * namespaces, default imports, and `ns.promises.writeFile`. Line and column
+ * point at the callee.
+ *
+ * @param {string} source
+ * @returns {RawFsWrite[]}
+ */
+export function findRawFsWrites(source) {
+  const { code, strings } = mask(source);
+  const named = new Map();
+  const namespaces = new Set();
+  const importRe = /\bimport\s+(?!type\s*[{*]|type\s+[\w$]+\s*(?:,|\bfrom\b))([^;]*?)\s*\bfrom\s*(?=["'])/g;
+  for (const m of code.matchAll(importRe)) {
+    const spec = strings.get(m.index + m[0].length);
+    if (spec === undefined || !FS_MODULE.test(spec)) continue;
+    const clause = m[1];
+    const ns = /\*\s*as\s+([\w$]+)/.exec(clause);
+    if (ns) namespaces.add(ns[1]);
+    const def = /^\s*([\w$]+)\s*(?:,|$)/.exec(clause);
+    if (def && def[1] !== 'type') namespaces.add(def[1]);
+    const braces = /\{([^}]*)\}/.exec(clause);
+    if (!braces) continue;
+    for (const part of braces[1].split(',')) {
+      const p = part.trim();
+      if (!p || /^type\s/.test(p)) continue;
+      const as = /^([\w$]+)(?:\s+as\s+([\w$]+))?$/.exec(p);
+      if (!as) continue;
+      const [, imported, local] = as;
+      if (RAW_FS_WRITES.includes(imported)) named.set(local ?? imported, imported);
+    }
+  }
+  if (named.size === 0 && namespaces.size === 0) return [];
+
+  const esc = (s) => s.replace(/[$]/g, '\\$');
+  const alts = [];
+  for (const local of named.keys()) alts.push(esc(local));
+  for (const ns of namespaces) alts.push(`${esc(ns)}\\s*\\.\\s*(?:promises\\s*\\.\\s*)?(?:${RAW_FS_WRITES.join('|')})`);
+  const callRe = new RegExp(`(?<![\\w$.])(${alts.join('|')})\\s*\\(`, 'g');
+  const position = positioner(source);
+  const found = [];
+  for (const m of code.matchAll(callRe)) {
+    const before = code.slice(Math.max(0, m.index - 12), m.index);
+    if (/\bfunction\s*\*?\s*$/.test(before)) continue;
+    const callee = m[1];
+    const fn = named.get(callee) ?? callee.replace(/^.*\.\s*/, '');
+    const open = m.index + m[0].length - 1;
+    const close = closingParen(code, open);
+    if (close === -1) continue;
+    const first = firstArgument(code.slice(open + 1, close)).trim();
+    // Masked, a plain string literal is its quotes around blanks; a template
+    // with no `${…}` is backticks around blanks. Anything else is computed.
+    if (/^(["'`])\s*\1$/.test(first)) continue;
+    found.push({
+      fn,
+      local: callee.replace(/\s+/g, ''),
+      ...position(m.index),
+      text: source.slice(m.index, close + 1).replace(/\s+/g, ' ').trim(),
+    });
+  }
+  return found;
 }
 
 const SOURCE_EXT = /\.(?:[cm]?[jt]s|[jt]sx)$/;

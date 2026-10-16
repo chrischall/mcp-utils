@@ -34,8 +34,10 @@ closes the "stable key + in-memory store = replay after restart" window.
 **2.12.0** added `confirmWrite`, which binds the arguments, the account and the
 displayed preview on **both** rails — resolving the audit's SEC-2 concern
 (a token bound to a tool-chosen `payload` rather than to what the call does)
-for every adopter. A `subject()` that returns no payload now throws instead of
-binding only the target. **3.0** made `account` and `args` required keys of
+for every adopter. On the raw token rail, a `subject()` that returns no
+payload now throws instead of binding only the target (under
+`confirmationFromEnv` the payload is always the `{ payload, args }` wrapper, so
+it never throws there — the bound `args` already cover what the call does). **3.0** made `account` and `args` required keys of
 `confirmationFromEnv` (fleet-audit#979, #986, #1066, #1072, #1086, #1089,
 #1098: every one a token minted without one of them), and folded `account`
 into the elicitation binding; see [`MIGRATION-3.md`](MIGRATION-3.md).
@@ -163,8 +165,11 @@ not a convenient subset. The fleet layers enforce this:
   single-account server; it becomes the `a` claim) and `args` (`undefined` or
   `null` throws; a tool with no arguments passes `{}`).
 - `confirmWrite` hashes the whole binding object of [§10](#10-confirmwrite).
-- A `subject()` returning no `payload` throws (`hash(undefined)` is a constant
-  and would authorise anything at the target).
+- On the raw `tokenFallback` rail, a `subject()` returning no `payload` throws
+  (`hash(undefined)` is a constant and would authorise anything at the
+  target). Under `confirmationFromEnv` it does not throw: the env layer binds
+  `{ payload: undefined, args }`, and the required `args` already pin what the
+  call does.
 
 ## 5. Verify order
 

@@ -423,3 +423,103 @@ describe("createApiClient redirect: 'same-origin'", () => {
     expect('redirect' in calls[2]!.init).toBe(false);
   });
 });
+
+// fleet-audit#1302: fetch strips only `Authorization` on a cross-origin
+// redirect, so a credential in a custom `tokenHeader` was re-sent to whatever
+// host the Location named. With `tokenHeader` set and `redirect` omitted, the
+// client now follows redirects itself and drops the credential (and the
+// `Authorization` / `Cookie` / `Proxy-Authorization` fetch would drop) once a
+// hop leaves the base origin.
+describe('createApiClient tokenHeader + default redirect (fleet-audit#1302)', () => {
+  const headersOf = (init: RequestInit) => new Headers(init.headers as Record<string, string>);
+
+  it('never re-sends the tokenHeader credential to another origin', async () => {
+    const { fn, calls } = stubFetch([redirect('https://elsewhere.test/landing'), jsonResponse({ ok: true })]);
+    const client = createApiClient({
+      baseUrl: 'https://api.example.com',
+      tokenHeader: 'x-api-key',
+      getToken: () => 'XKEY_SECRET',
+      baseHeaders: { Cookie: 'sid=1', 'X-API-KEY': 'dup' },
+      fetchImpl: fn,
+    });
+    await expect(client.fetchJson('GET', '/x')).resolves.toEqual({ ok: true });
+    expect(calls.map((c) => c.url)).toEqual(['https://api.example.com/x', 'https://elsewhere.test/landing']);
+    expect(calls.every((c) => c.init.redirect === 'manual')).toBe(true);
+    expect(headersOf(calls[0]!.init).get('x-api-key')).toContain('XKEY_SECRET');
+    const hop = headersOf(calls[1]!.init);
+    expect(hop.get('x-api-key')).toBeNull();
+    expect(hop.get('cookie')).toBeNull();
+    expect(hop.get('accept')).toBe('application/json');
+  });
+
+  it('keeps the credential on a same-origin hop, and stays stripped after leaving once', async () => {
+    const { fn, calls } = stubFetch([
+      redirect('/v2/x', 301),
+      redirect('https://cdn.test/a'),
+      redirect('https://api.example.com/back'),
+      jsonResponse({}),
+    ]);
+    const client = createApiClient({
+      baseUrl: 'https://api.example.com',
+      tokenHeader: 'x-api-key',
+      getToken: () => 'K',
+      fetchImpl: fn,
+    });
+    await client.fetchJson('GET', '/x');
+    expect(calls.map((c) => headersOf(c.init).get('x-api-key'))).toEqual(['K', 'K', null, null]);
+  });
+
+  it('still follows like fetch: 303 becomes a body-less GET, and the hop limit is 20 by default', async () => {
+    const { fn, calls } = stubFetch([redirect('https://other.test/done', 303), jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://api.example.com', tokenHeader: 'x-k', getToken: () => 'K', fetchImpl: fn });
+    await client.fetchJson('POST', '/x', { body: { a: 1 } });
+    expect([calls[1]!.init.method, calls[1]!.init.body]).toEqual(['GET', undefined]);
+
+    const loop = stubFetch([redirect('/loop')]);
+    const looping = createApiClient({ baseUrl: 'https://api.example.com', tokenHeader: 'x-k', getToken: () => 'K', fetchImpl: loop.fn });
+    await expect(looping.fetchJson('GET', '/loop')).rejects.toThrow(/too many redirects/i);
+    expect(loop.calls).toHaveLength(21);
+  });
+
+  it("leaves a client without tokenHeader on fetch's own redirect handling", async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    await createApiClient({ baseUrl: 'https://api.example.com', getToken: () => 'T', fetchImpl: fn }).fetchJson('GET', '/');
+    expect(calls[0]!.init.redirect).toBeUndefined();
+  });
+
+  it("an explicit redirect mode still wins over the tokenHeader default", async () => {
+    const { fn, calls } = stubFetch([redirect('https://elsewhere.test/'), jsonResponse({})]);
+    const client = createApiClient({
+      baseUrl: 'https://api.example.com',
+      tokenHeader: 'x-k',
+      getToken: () => 'K',
+      fetchImpl: fn,
+      redirect: 'same-origin',
+    });
+    await expect(client.fetchJson('GET', '/x')).rejects.toBeInstanceOf(RedirectRefusedError);
+    expect(calls).toHaveLength(1);
+  });
+});
+
+// fleet-audit#1294: a path that already carries a query string got the
+// `query` option appended with a second `?`.
+describe('createApiClient query joining (fleet-audit#1294)', () => {
+  it.each([
+    ['/a?x=1', { y: 2 }, 'https://api.example.com/a?x=1&y=2'],
+    ['/a?', { y: 2 }, 'https://api.example.com/a?y=2'],
+    ['/a?x=1&', { y: 2 }, 'https://api.example.com/a?x=1&y=2'],
+    ['/a', { y: 2 }, 'https://api.example.com/a?y=2'],
+    ['/a?x=1', {}, 'https://api.example.com/a?x=1'],
+  ])('%s + %j → %s', async (path, query, want) => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    await createApiClient({ baseUrl: 'https://api.example.com', fetchImpl: fn }).fetchJson('GET', path, { query });
+    expect(calls[0]!.url).toBe(want);
+  });
+
+  it('inserts the query before a fragment rather than after the #', async () => {
+    const { fn, calls } = stubFetch([jsonResponse({})]);
+    const client = createApiClient({ baseUrl: 'https://api.example.com', fetchImpl: fn });
+    await client.fetchJson('GET', '/a#frag', { query: { y: 2 } });
+    expect(calls[0]!.url).toBe('https://api.example.com/a?y=2#frag');
+  });
+});

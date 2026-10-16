@@ -68,7 +68,8 @@ import { readBytesCapped } from '../http/body-limit.js';
  *
  * `false` for everything else — and for anything that is not a well-formed
  * IPv4 dotted quad or IPv6 literal (a bracketed `[::1]`, a zone id
- * `fe80::1%eth0`, the `127.1` shorthand): a guard that admits what it does not
+ * `fe80::1%eth0`, the `127.1` shorthand, a leading-zero octet such as
+ * `012.0.0.1`, which a resolver may read as octal): a guard that admits what it does not
  * understand is the wrong default for this control.
  *
  * The ranges:
@@ -102,9 +103,14 @@ export function isPublicAddress(ip: string): boolean {
   return false;
 }
 
-/** Four octets for a canonical dotted quad, else `undefined`. */
+/**
+ * Four octets for a canonical dotted quad, else `undefined`. An octet with a
+ * leading zero is refused: `inet_aton` and most libc resolvers read `012` as
+ * OCTAL (10), so `012.0.0.1` may mean 10.0.0.1 — reading it as decimal 12
+ * would admit a private address (fleet-audit#1298).
+ */
 function parseIPv4(text: string): number[] | undefined {
-  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(text)) return undefined;
+  if (!/^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/.test(text)) return undefined;
   const octets = text.split('.').map(Number);
   return octets.every((o) => o <= 255) ? octets : undefined;
 }

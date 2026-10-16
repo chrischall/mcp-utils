@@ -5,7 +5,7 @@
 // visible on the wire, so this reads source. Pure, so tested on strings.
 import { describe, expect, it } from 'vitest';
 
-import { findFsHelperCalls, findUnconfinedFsCalls, isLintedSourceFile } from './fs-confinement.mjs';
+import { findFsHelperCalls, findRawFsWrites, findUnconfinedFsCalls, isLintedSourceFile } from './fs-confinement.mjs';
 
 const lines = (findings) => findings.map((f) => `${f.line}:${f.column} ${f.helper}`);
 
@@ -176,5 +176,94 @@ describe('isLintedSourceFile', () => {
     ['README.md', false],
   ])('%s → %s', (path, want) => {
     expect(isLintedSourceFile(path)).toBe(want);
+  });
+});
+
+// Fleet audit 2026-10-15 (zillow / redfin / flightaware findings): two blind
+// spots. A conditional spread confines only when its condition holds, and a
+// raw node:fs write/mkdir is not one of the helpers at all.
+describe('findFsHelperCalls — conditional confinement', () => {
+  it('marks allowedRoots that is only inside a conditional spread as conditional', () => {
+    const src = [
+      "import { fileBlob, readFileHead, resolveOutputDir } from '@chrischall/mcp-utils';",
+      "resolveOutputDir(dir, 'X', { ...(roots ? { allowedRoots: roots } : {}) });",
+      'await fileBlob(p, { label: "I", ...(roots && { allowedRoots: roots }) });',
+      'await readFileHead(p, 16, { allowedRoots: roots });',
+      'await fileBlob(p, { allowedRoots: base, ...(extra ? { maxBytes: 1 } : {}) });',
+    ].join('\n');
+    expect(findFsHelperCalls(src).map((c) => [c.line, c.confined, c.conditional])).toEqual([
+      [2, true, true],
+      [3, true, true],
+      [4, true, false],
+      [5, true, false],
+    ]);
+  });
+
+  it('keeps findUnconfinedFsCalls to the plainly unconfined calls', () => {
+    const src = [
+      "import { fileBlob } from '@chrischall/mcp-utils';",
+      'await fileBlob(p, { ...(roots ? { allowedRoots: roots } : {}) });',
+      'await fileBlob(q);',
+    ].join('\n');
+    expect(lines(findUnconfinedFsCalls(src))).toEqual(['3:7 fileBlob']);
+  });
+});
+
+describe('findRawFsWrites', () => {
+  const fnLines = (found) => found.map((f) => `${f.line}:${f.column} ${f.fn}`);
+
+  it('flags node:fs write/mkdir calls whose path is not a literal', () => {
+    const src = [
+      "import { writeFileSync, mkdirSync as mk } from 'node:fs';",
+      "import { writeFile, appendFile } from 'fs/promises';",
+      'writeFileSync(join(dir, name), data);',
+      'mk(outDir, { recursive: true });',
+      'await writeFile(target, bytes);',
+      'await appendFile(`${dir}/log.txt`, line);',
+    ].join('\n');
+    expect(fnLines(findRawFsWrites(src))).toEqual([
+      '3:1 writeFileSync',
+      '4:1 mkdirSync',
+      '5:7 writeFile',
+      '6:7 appendFile',
+    ]);
+  });
+
+  it('follows namespace and default imports, and fs.promises', () => {
+    const src = [
+      "import * as fs from 'node:fs';",
+      "import fsp from 'node:fs/promises';",
+      "import nodeFs, { createWriteStream } from 'fs';",
+      'fs.writeFileSync(p, d);',
+      'await fsp.mkdir(p, { recursive: true });',
+      'await fs.promises.writeFile(p, d);',
+      'nodeFs.appendFileSync(p, d);',
+      'createWriteStream(p);',
+    ].join('\n');
+    expect(fnLines(findRawFsWrites(src))).toEqual([
+      '4:1 writeFileSync',
+      '5:7 mkdir',
+      '6:7 writeFile',
+      '7:1 appendFileSync',
+      '8:1 createWriteStream',
+    ]);
+  });
+
+  it('ignores literal paths, reads, other modules, comments and declarations', () => {
+    const src = [
+      "import { writeFileSync, readFileSync, mkdirSync } from 'node:fs';",
+      "import { writeFile } from './local-io.js';",
+      "writeFileSync('/tmp/fixed.json', data);",
+      'mkdirSync(`cache`, { recursive: true });',
+      'readFileSync(p);',
+      'await writeFile(p, d);',
+      '// writeFileSync(p, d);',
+      'const s = "mkdirSync(p)";',
+    ].join('\n');
+    expect(findRawFsWrites(src)).toEqual([]);
+  });
+
+  it('ignores a file that never imports node:fs', () => {
+    expect(findRawFsWrites('function writeFileSync(p) {}\nwriteFileSync(p);')).toEqual([]);
   });
 });

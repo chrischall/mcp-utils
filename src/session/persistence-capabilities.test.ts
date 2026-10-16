@@ -585,3 +585,44 @@ describe('the file-backed stores are synchronous', () => {
     expect(isThenable(view.clear())).toBe(false);
   });
 });
+
+// fleet-audit#1295: a corrupt shared file was read as `{}`, so the next save()
+// for ONE account atomically replaced the file — every sibling account's
+// credentials gone. Preserve the corrupt bytes first, as SessionStore does.
+describe('createKeyedFileStatePersistence — corrupt file (fleet-audit#1295)', () => {
+  it.each([
+    ['unparseable JSON', '{"alice": {"accessToken": "A"'],
+    ['a JSON array', '[{"accessToken": "A"}]'],
+  ])('moves a file holding %s to <file>.corrupt before the next save', (_label, body) => {
+    const file = join(dir, 'tokens.json');
+    writeFileSync(file, body);
+    const errors: unknown[] = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => errors.push(args.join(' '));
+    try {
+      const store = createKeyedFileStatePersistence<{ accessToken: string }>({ filePath: file });
+      store.forKey('bob').save({ accessToken: 'B' });
+    } finally {
+      console.error = orig;
+    }
+    expect(readFileSync(`${file}.corrupt`, 'utf8')).toBe(body);
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ bob: { accessToken: 'B' } });
+    expect(String(errors[0])).toContain(`${file}.corrupt`);
+    expect(String(errors[0])).not.toContain('"A"');
+  });
+
+  it('never overwrites an earlier backup', () => {
+    const file = join(dir, 'tokens.json');
+    writeFileSync(`${file}.corrupt`, 'first');
+    writeFileSync(file, 'second{');
+    const orig = console.error;
+    console.error = () => {};
+    try {
+      expect(createKeyedFileStatePersistence({ filePath: file }).keys()).toEqual([]);
+    } finally {
+      console.error = orig;
+    }
+    expect(readFileSync(`${file}.corrupt`, 'utf8')).toBe('first');
+    expect(readFileSync(`${file}.corrupt-1`, 'utf8')).toBe('second{');
+  });
+});

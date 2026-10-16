@@ -561,25 +561,9 @@ export class SessionStore<T extends Record<string, unknown>> {
     }
   }
 
-  /**
-   * Move a corrupt store file to `<filePath>.corrupt` (or `.corrupt-<n>` if a
-   * previous backup exists) so a subsequent save cannot overwrite the only
-   * copy of the prior credentials. Best-effort: returns the backup path, or
-   * `null` if the rename failed.
-   */
+  /** See {@link preserveCorruptFile}. */
   private preserveCorruptFile(): string | null {
-    try {
-      let candidate = `${this.filePath}.corrupt`;
-      for (let n = 1; existsSync(candidate) && n <= 100; n++) {
-        candidate = `${this.filePath}.corrupt-${n}`;
-      }
-      // All 101 slots taken — refuse rather than clobber the last backup.
-      if (existsSync(candidate)) return null;
-      renameSync(this.filePath, candidate);
-      return candidate;
-    } catch {
-      return null;
-    }
+    return preserveCorruptFile(this.filePath);
   }
 
   /** Serialize the store to its on-disk JSON form (array, insertion order). */
@@ -985,6 +969,27 @@ export interface KeyedStatePersistence<T> {
 }
 
 /**
+ * Move a corrupt state file to `<filePath>.corrupt` (or `.corrupt-<n>` if a
+ * previous backup exists) so a subsequent save cannot overwrite the only
+ * copy of the prior credentials. Best-effort: returns the backup path, or
+ * `null` if the rename failed or all 101 slots are taken.
+ */
+function preserveCorruptFile(filePath: string): string | null {
+  try {
+    let candidate = `${filePath}.corrupt`;
+    for (let n = 1; existsSync(candidate) && n <= 100; n++) {
+      candidate = `${filePath}.corrupt-${n}`;
+    }
+    // All 101 slots taken — refuse rather than clobber the last backup.
+    if (existsSync(candidate)) return null;
+    renameSync(filePath, candidate);
+    return candidate;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Many records in one file, keyed by account.
  *
  * {@link createFileStatePersistence} holds exactly one record, which is wrong
@@ -993,7 +998,10 @@ export interface KeyedStatePersistence<T> {
  * single-record file would hand one user's token to the next. kiaaccess-mcp and
  * alphaportal-mcp both hand-rolled this over {@link SessionStore}; this is the
  * shared form, with the same atomic-replace and `0600`/`0700` hardening as the
- * single-record store.
+ * single-record store, and the same corrupt-file handling as
+ * {@link SessionStore}: a file that does not parse to an object is moved to
+ * `<filePath>.corrupt` (warned on stderr) before the store starts empty, so
+ * one account's next save cannot erase the others.
  *
  * Reads go through the file each time rather than an in-process cache, so a
  * record written by a SIBLING process is picked up — the property kiaaccess-mcp's
@@ -1015,13 +1023,26 @@ export function createKeyedFileStatePersistence<T>(
 
   const readAll = (): Record<string, unknown> => {
     if (!existsSync(filePath)) return {};
+    let detail: string;
     try {
       const raw: unknown = JSON.parse(readFileSync(filePath, 'utf8'));
-      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {};
-      return raw as Record<string, unknown>;
-    } catch {
-      return {};
+      if (raw !== null && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>;
+      detail = 'not a JSON object';
+    } catch (err) {
+      detail = err instanceof Error ? err.message : String(err);
     }
+    // Reading a corrupt file as `{}` is safe only if it is moved out of the
+    // way first: the next save() for ONE key would otherwise atomically
+    // replace the file and drop every other account's record
+    // (fleet-audit#1295) — the loss SessionStore guards against the same way.
+    const backupPath = preserveCorruptFile(filePath);
+    // stderr only — stdout is reserved for JSON-RPC in MCP servers.
+    console.error(
+      `[mcp-utils] createKeyedFileStatePersistence: failed to parse ${filePath} (${detail}); ` +
+        (backupPath !== null ? `preserved the corrupt file at ${backupPath}; ` : 'could not preserve the corrupt file; ') +
+        'starting empty.',
+    );
+    return {};
   };
 
   const writeAll = (all: Record<string, unknown>): void => {

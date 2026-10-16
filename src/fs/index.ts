@@ -96,6 +96,7 @@ export { assertPathWithinRoots } from './confine.js';
 export { bytesMatchMime, sniffMimeBytes } from './magic.js';
 export {
   FileWriteRefusedError,
+  isSafeExtension,
   writeFileSafe,
   writeUniqueFile,
   type FileWriteRefusal,

@@ -696,7 +696,8 @@ without re-reading). Pass `readFile` to inject a reader in tests.
 
 `fileBlob`, `readFileHead`, `resolveOutputDir`, `uniquePath`,
 `writeBinaryOutput`, `writeFileSafe`, `writeUniqueFile`, `vetUploadFile`,
-`sniffMimeBytes`, `bytesMatchMime`, `assertPathWithinRoots`.
+`sniffMimeBytes`, `bytesMatchMime`, `assertPathWithinRoots`,
+`extensionForMime`, `isSafeExtension`.
 
 The binary-output kit (hoisted from gemini + flightaware) is the fleet
 convention for tools that generate bytes: `resolveOutputDir(perCall,
@@ -710,6 +711,16 @@ config error (`McpToolError`) naming the env var, so pass `name`.
 Each name is claimed with an exclusive, no-follow create
 (`O_CREAT | O_EXCL | O_NOFOLLOW`), so two writers can't pick the same name and
 a symlink planted at the name is skipped, never written through.
+
+**Extensions.** `extensionForMime(mime, { url?, fallback? })` is the one
+MIME → extension table (`image/jpeg` → `jpg`, `video/quicktime` → `mov`,
+`audio/mpeg` → `mp3`, …; parameters and case ignored), falling back to a plain
+1–5 character subtype, then the URL path's extension, then `'bin'` — so gemini,
+concur and splitwise need not each hand-roll one. Its result always passes
+`isSafeExtension` (1–16 of `A-Z a-z 0-9 . _ -`, starting alphanumeric), which
+`writeUniqueFile`, `writeBinaryOutput` and `uniquePath` now enforce with a
+`TypeError`: the stem was always sanitised, but an extension such as
+`/../../x` was joined verbatim and wrote outside `dir` (fleet-audit#1303).
 
 **Safe writes** (from accessoticketing's `wx` writer and infinitecampus's
 `writeConfined`): `writeFileSafe(path, bytes, { overwrite?, mode?, allowedRoots? })`
@@ -786,8 +797,15 @@ The fleet CI enforces the opt-in: `scripts/audit-fs-confinement.mjs` (run by
 chrischall/workflows' `reusable-mcp-ci.yml`) fails a server whose source calls
 one of these three helpers, imported from this package, without `allowedRoots`
 in the call's own arguments. `resolveOutputDir(undefined, …)` is exempt (no
-per-call path). The scripts are not in the npm package, so run it from a
-clone of this repo: `node scripts/audit-fs-confinement.mjs ../your-mcp`.
+per-call path). It also **warns** — without failing, unless `--strict` is
+passed — on two shapes the rule cannot prove safe: an `allowedRoots` that
+appears only inside a conditional spread (`...(roots ? { allowedRoots: roots }
+: {})`, unconfined whenever the condition is falsy), and a raw `node:fs` write
+/ append / mkdir / `createWriteStream` whose path is not a literal (use
+`writeFileSafe` / `writeUniqueFile` with `allowedRoots` when any part of it can
+come from a tool argument). The scripts are not in the npm package, so run it
+from a clone of this repo: `node scripts/audit-fs-confinement.mjs ../your-mcp
+[--strict]`.
 
 ### `http` — bearer API-client kit
 
@@ -940,8 +958,14 @@ const api = createApiClient({ baseUrl, getToken, maxResponseBytes: 5 * 1024 * 10
 const receipt = await api.fetchRaw('GET', apiPath`/receipts/${id}`, { maxBytes: 25 * 1024 * 1024 });
 ```
 
-Redirects: by default `createApiClient` leaves `fetch` to follow them, which
-re-sends the bearer wherever they point. Pass `redirect: 'same-origin'` to have
+Redirects: by default `createApiClient` leaves `fetch` to follow them. `fetch`
+strips `Authorization` on a cross-origin hop, but re-sends every other header —
+so a credential in a custom `tokenHeader` (`x-api-key`, `x-goog-api-key`, …)
+would follow the `Location` to any host. A client with `tokenHeader` and no
+`redirect` option therefore follows redirects itself (like `fetch`, up to 20
+hops, 303 / POST-after-301/302 becoming a GET) and drops the `tokenHeader`,
+`Authorization`, `Cookie` and `Proxy-Authorization` headers from the first hop
+that leaves the base origin onward. Pass `redirect: 'same-origin'` to have
 the client follow them itself: each `Location` is checked against the base
 origin before anything is re-sent, and a hop to another origin, a scheme
 downgrade or a hop that adds userinfo throws `RedirectRefusedError`.
@@ -1401,7 +1425,11 @@ const data = JSON.parse(stripJsonGuard(body));      // )]}'  while(1);  for(;;);
 
 `isCloudflareChallenge` matches the DEFINITIVE interstitial markers only
 (`_cf_chl_opt`, `<title>Just a moment`) — never `cdn-cgi/challenge-platform`,
-which Cloudflare inlines on cleared pages too. `decodeHtmlEntities` decodes
+which Cloudflare inlines on cleared pages too. It, `stripHtml`, and the deep
+walkers are linear on hostile input and safe to run on a whole upstream body:
+the tag scans are single forward passes (fleet-audit#1197) and
+`deepFindObject` / `deepCollectArrays` use an explicit stack, so a blob nested
+50 000 deep does not overflow the call stack (fleet-audit#1296). `decodeHtmlEntities` decodes
 `&amp;` LAST so attribute-escaped JSON survives one level, and leaves a numeric
 reference that is not a character — out of range, or a lone surrogate
 (U+D800–U+DFFF) — verbatim, so it neither throws nor emits an unpaired UTF-16
@@ -1705,6 +1733,9 @@ turned up behaviour the first cut did not have:
   and for anything serving several users from one process, where a
   single-record file would hand one user's token to the next. Keys normalize
   trim+lowercase by default, because they are account identities, not origins.
+  A file that does not parse to an object is moved to `<file>.corrupt` (warned
+  on stderr) before the store starts empty, as `SessionStore` does — so one
+  account's next save cannot erase every other account's record.
   Writes are whole-file read-modify-write, so two processes saving different
   keys at the same instant can drop one update — the loser re-authenticates
   rather than reading anything wrong, which is the right trade for a credential
@@ -2185,6 +2216,8 @@ maps every outcome onto the package's existing error types:
 | non-JSON 4xx/5xx | `UpstreamHttpError` (redacted `formatApiError` excerpt) |
 | non-JSON or empty 2xx, or no `data` | `GraphqlResponseError` ("usually a challenge or error page") |
 | timeout (default 30 s, body read included) / dropped connection | `GraphqlTransportError` — `.timedOut`, `.outcomeUnknown` |
+| body over `maxResponseBytes` (default 16 MiB, `GRAPHQL_DEFAULT_MAX_RESPONSE_BYTES`; `Infinity` = off) | `ResponseTooLargeError` (`kind: 'too_large'`) — refused on `Content-Length` or cancelled mid-stream |
+| the `headers()` hook throws (a token refresh fails) | that error, untouched — nothing was sent, so it is never a transport error or outcome-unknown |
 
 `mapError` claims a failure first (e.g. "FORBIDDEN is a permission denial");
 `execute()` returns the envelope instead of throwing on `errors[]`, for raw
@@ -2229,9 +2262,20 @@ walks the DOM: block boundaries (`<p>`, `<li>`, `<td>`, `<br>`, …) become word
 breaks, inline markup stays joined (`<b>F</b>ree` → `Free`), `<script>` /
 `<style>` / JSON-LD / `<noscript>` / `<template>` / `<iframe>` / `<svg>` content
 is dropped, and every named entity decodes — use it for article, post and
-message bodies. `extractPlainTextFromHtml` is the older dependency-free regex
-pass (every tag becomes a space, so `<b>F</b>ree` → `F ree`; a short entity
-table); it is unchanged so existing callers' output does not shift.
+message bodies. `extractPlainTextFromHtml` is the older dependency-free pass
+(every tag becomes a space, so `<b>F</b>ree` → `F ree`; entities through
+`decodeHtmlEntities`, the same table as `scrape`); its output is unchanged for
+existing callers.
+
+Both are linear on hostile input. `extractPlainTextFromHtml` strips tags with a
+forward scan, not `/<[^>]+>/g` (quadratic on a withheld `>`: 14 s on 200 KB).
+The DOM helpers (`htmlToReadableText`, `parsePropertyTable`,
+`findLinksUnderHeading`) bound node-html-parser's unclosed-tag repair, which is
+superlinear (8000 unclosed `<div>` took 23 s): past
+`HTML_UNCLOSED_REPAIR_MAX` (500) never-closed elements, those opening tags are
+cut from the source first — the same tree the parser's repair would build, in
+one linear pass (fleet-audit#1197). There is no size cap; a 2 MB well-formed
+page parses in well under 100 ms.
 
 ### `netguard` — SSRF guard for third-party URLs *(subpath, optional peer)*
 

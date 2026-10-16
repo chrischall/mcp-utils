@@ -18,6 +18,7 @@
 
 import { asciiLower } from '../internal/ascii.js';
 import { codePointOr } from '../internal/code-point.js';
+import { replaceTags } from '../internal/tags.js';
 
 // ---------------------------------------------------------------------------
 // Entity decoding / tag stripping
@@ -64,7 +65,9 @@ export function decodeHtmlEntities(text: string): string {
  */
 export function stripHtml(html: string): string {
   if (!html) return '';
-  return decodeHtmlEntities(html.replace(/<[^>]+>/g, ' '))
+  // Linear tag scan, not `/<[^>]+>/g` (quadratic on a withheld `>`,
+  // fleet-audit#1197).
+  return decodeHtmlEntities(replaceTags(html, ' '))
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -631,58 +634,60 @@ export function findArrayByShape<T = unknown>(
 
 /**
  * Depth-first, cycle-guarded walk collecting every array whose FIRST element
- * passes `pred`. Recurses into matched arrays too (nested hits are collected).
+ * passes `pred`. Descends into matched arrays too (nested hits are collected).
+ * Iterative, so hostile nesting depth cannot overflow the stack.
  * Consolidates tock's `collectArrays` — the "walk for the shape, don't
  * hard-code the path" discipline for SSR stores.
  */
 export function deepCollectArrays(root: unknown, pred: (first: unknown) => boolean): unknown[][] {
   const found: unknown[][] = [];
   const seen = new WeakSet<object>();
-  const walk = (node: unknown): void => {
-    if (node === null || typeof node !== 'object') return;
-    if (seen.has(node)) return;
+  // Explicit stack, not recursion: JSON.parse is iterative, so a hostile blob
+  // nested deeper than the call stack parses fine and must not then overflow
+  // here (fleet-audit#1296). Children are pushed in reverse so the pop order is
+  // the recursive pre-order (same results, same order).
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (node === null || typeof node !== 'object') continue;
+    if (seen.has(node)) continue;
     seen.add(node);
-    if (Array.isArray(node)) {
-      if (node.length > 0 && pred(node[0])) found.push(node);
-      for (const item of node) walk(item);
-      return;
-    }
-    for (const v of Object.values(node)) walk(v);
-  };
-  walk(root);
+    const children = Array.isArray(node) ? (node as unknown[]) : Object.values(node);
+    if (Array.isArray(node) && node.length > 0 && pred(node[0])) found.push(node);
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+  }
   return found;
 }
 
 /**
  * Depth-first, cycle-guarded search for the first non-array object passing
- * `pred`. Returns `null` when nothing matches. Consolidates tock's
- * `findObject`.
+ * `pred`. Returns `null` when nothing matches. Iterative, so hostile nesting
+ * depth cannot overflow the stack. Consolidates tock's `findObject`.
  */
 export function deepFindObject(
   root: unknown,
   pred: (obj: Record<string, unknown>) => boolean,
 ): Record<string, unknown> | null {
   const seen = new WeakSet<object>();
-  const walk = (node: unknown): Record<string, unknown> | null => {
-    if (node === null || typeof node !== 'object') return null;
-    if (seen.has(node)) return null;
+  // Explicit stack (see deepCollectArrays): hostile nesting depth cannot throw
+  // RangeError, and the reversed pushes keep the recursive pre-order.
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (node === null || typeof node !== 'object') continue;
+    if (seen.has(node)) continue;
     seen.add(node);
+    let children: unknown[];
     if (Array.isArray(node)) {
-      for (const item of node) {
-        const hit = walk(item);
-        if (hit) return hit;
-      }
-      return null;
+      children = node as unknown[];
+    } else {
+      const obj = node as Record<string, unknown>;
+      if (pred(obj)) return obj;
+      children = Object.values(obj);
     }
-    const obj = node as Record<string, unknown>;
-    if (pred(obj)) return obj;
-    for (const v of Object.values(obj)) {
-      const hit = walk(v);
-      if (hit) return hit;
-    }
-    return null;
-  };
-  return walk(root);
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -699,7 +704,32 @@ export function deepFindObject(
  * predicates in musescore and tock.
  */
 export function isCloudflareChallenge(html: string): boolean {
-  return /_cf_chl_opt/.test(html) || /<title[^>]*>\s*Just a moment/i.test(html);
+  return html.includes('_cf_chl_opt') || hasJustAMomentTitle(html);
+}
+
+const JUST_A_MOMENT = 'just a moment';
+
+/**
+ * `/<title[^>]*>\s*Just a moment/i` in one forward pass. The regex re-scans to
+ * the end of the body from every `<title` when the `>` is withheld — 5 s on
+ * 200 KB, and fleet repos call isCloudflareChallenge on whole upstream bodies
+ * (fleet-audit#1197). Every `<title` before a given `>` shares that same `>`
+ * (the `[^>]*` stops at the first one), so after testing it the scan resumes
+ * past it; once no `>` remains, no later `<title` can match.
+ */
+function hasJustAMomentTitle(html: string): boolean {
+  const lower = asciiLower(html);
+  let i = 0;
+  for (;;) {
+    const open = lower.indexOf('<title', i);
+    if (open < 0) return false;
+    const gt = lower.indexOf('>', open + 6);
+    if (gt < 0) return false;
+    let j = gt + 1;
+    while (j < lower.length && /\s/.test(lower[j]!)) j++;
+    if (lower.startsWith(JUST_A_MOMENT, j)) return true;
+    i = gt + 1;
+  }
 }
 
 // Known anti-XSSI guard prefixes, each anchored to the string start:

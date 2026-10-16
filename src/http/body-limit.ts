@@ -14,6 +14,7 @@
  */
 
 import { McpToolError } from '../errors/index.js';
+import { responseHeader } from '../internal/headers.js';
 
 /**
  * Thrown when a response body is larger than the caller's cap —
@@ -48,7 +49,7 @@ export async function readBytesCapped(
   bounded: <T>(p: Promise<T>) => Promise<T>,
 ): Promise<Uint8Array> {
   if (maxBytes !== undefined) {
-    const declared = Number(res.headers.get('content-length') ?? NaN);
+    const declared = Number(responseHeader(res, 'content-length') ?? NaN);
     if (Number.isFinite(declared) && declared > maxBytes) {
       cancelStream(res.body);
       throw new ResponseTooLargeError(service, maxBytes);
