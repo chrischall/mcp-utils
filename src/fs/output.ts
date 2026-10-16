@@ -19,7 +19,7 @@ import { join } from 'node:path';
 import { expandPath, readEnvVar, type EnvSource } from '../config/index.js';
 import { McpToolError } from '../errors/index.js';
 import { assertPathWithinRoots } from './confine.js';
-import { sanitizeBaseName, writeUniqueFileSync } from './write.js';
+import { assertSafeExtension, isSafeExtension, sanitizeBaseName, writeUniqueFileSync } from './write.js';
 
 /** Options for {@link resolveOutputDir}. */
 export interface ResolveOutputDirOptions {
@@ -88,7 +88,8 @@ function defaultOutputDir(envVar: string, name: string | undefined): string {
 /**
  * A non-overwriting path for `base.ext` in `dir`: the bare name when free,
  * else `base-2.ext`, `base-3.ext`, … (gemini's numbering). `ext` is passed
- * without the dot. `base` is sanitized to a single path component so a `../…`
+ * without the dot and must pass {@link isSafeExtension} (a `TypeError`
+ * otherwise). `base` is sanitized to a single path component so a `../…`
  * stem can't write outside `dir`.
  *
  * Check-then-use: the name can be taken (or a symlink planted there) between
@@ -96,6 +97,7 @@ function defaultOutputDir(envVar: string, name: string | undefined): string {
  * {@link writeBinaryOutput}, which claim the name with an exclusive create.
  */
 export function uniquePath(dir: string, base: string, ext: string): string {
+  assertSafeExtension(ext, 'uniquePath');
   const safe = sanitizeBaseName(base);
   const first = join(dir, `${safe}.${ext}`);
   if (!existsSync(first)) return first;
@@ -105,21 +107,88 @@ export function uniquePath(dir: string, base: string, ext: string): string {
   }
 }
 
-/** Extensions for the MIME types the fleet's binary tools emit. */
+/**
+ * Extensions for the MIME types the fleet's binary tools emit — the union of
+ * mcp-utils' own table and the ones gemini-mcp (`mediaExt`), concur-mcp
+ * (`extensionForMime`) and splitwise-mcp (`extensionFor`) hand-rolled.
+ */
 const MIME_EXT: Record<string, string> = {
   'image/png': 'png',
   'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/pjpeg': 'jpg',
   'image/webp': 'webp',
   'image/gif': 'gif',
   'image/heic': 'heic',
+  'image/heif': 'heif',
   'image/avif': 'avif',
+  'image/tiff': 'tif',
+  'image/bmp': 'bmp',
+  'image/svg+xml': 'svg',
   'application/pdf': 'pdf',
   'application/json': 'json',
   'application/zip': 'zip',
+  'application/gzip': 'gz',
+  'text/plain': 'txt',
+  'text/csv': 'csv',
+  'text/html': 'html',
+  'text/calendar': 'ics',
   'audio/midi': 'mid',
+  'audio/mpeg': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/wav': 'wav',
+  'audio/wave': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/ogg': 'ogg',
+  'audio/webm': 'webm',
+  'audio/mp4': 'm4a',
   'video/mp4': 'mp4',
   'video/quicktime': 'mov',
+  'video/webm': 'webm',
 };
+
+/** A MIME subtype or URL extension short and plain enough to use as-is. */
+const PLAIN_EXT = /^[a-z0-9]{1,5}$/;
+
+/** Options for {@link extensionForMime}. */
+export interface ExtensionForMimeOptions {
+  /** The URL the bytes came from; its path's extension is the second fallback. */
+  url?: string;
+  /** What to return when nothing else fits. Default `'bin'`. Must pass {@link isSafeExtension}. */
+  fallback?: string;
+}
+
+/**
+ * The file extension (no dot) for a MIME type: the known-type table (`image/
+ * jpeg` → `jpg`, `video/quicktime` → `mov`, …; parameters and case ignored),
+ * else the subtype when it is a plain 1–5 character `[a-z0-9]` word (an `x-`
+ * prefix dropped: `image/x-icon` → `icon`), else the extension of `opts.url`'s
+ * path when it has a plain one, else `opts.fallback` (`'bin'`). The result
+ * always passes {@link isSafeExtension}, so it can go straight to
+ * `writeUniqueFile` / `writeBinaryOutput` — whatever the upstream's
+ * Content-Type said (fleet-audit#1301, #1303).
+ *
+ * @throws {TypeError} when `opts.fallback` is not a safe extension.
+ */
+export function extensionForMime(mime: string | null | undefined, opts: ExtensionForMimeOptions = {}): string {
+  const fallback = opts.fallback ?? 'bin';
+  assertSafeExtension(fallback, 'extensionForMime');
+  const type = (mime ?? '').split(';', 1)[0]!.trim().toLowerCase();
+  const known = MIME_EXT[type];
+  if (known !== undefined) return known;
+  const slash = type.indexOf('/');
+  const subtype = slash > 0 && type.indexOf('/', slash + 1) < 0 ? type.slice(slash + 1).replace(/^x-/, '') : '';
+  if (PLAIN_EXT.test(subtype)) return subtype;
+  if (opts.url !== undefined) {
+    try {
+      const fromUrl = /\.([a-z0-9]{1,5})$/i.exec(new URL(opts.url).pathname)?.[1]?.toLowerCase();
+      if (fromUrl !== undefined && isSafeExtension(fromUrl)) return fromUrl;
+    } catch {
+      // Not a URL: no extension to read from it.
+    }
+  }
+  return fallback;
+}
 
 /** Options for {@link writeBinaryOutput}. */
 export interface WriteBinaryOutputOptions {
@@ -131,7 +200,7 @@ export interface WriteBinaryOutputOptions {
   base64: string;
   /** MIME type used to derive the extension when `extension` is not given. */
   mimeType?: string;
-  /** Explicit extension (no dot); overrides the MIME lookup. */
+  /** Explicit extension (no dot); overrides the MIME lookup. Must pass {@link isSafeExtension}. */
   extension?: string;
   /** File mode for the new file (before umask), e.g. `0o600`. Default `0o666`. */
   mode?: number;
@@ -139,7 +208,9 @@ export interface WriteBinaryOutputOptions {
 
 /**
  * Decode `base64` and write it to a **non-overwriting** file in `dir`, deriving
- * the extension from `extension` → the MIME type → `'bin'`. Returns the
+ * the extension from `extension` (which must pass {@link isSafeExtension}; a
+ * `TypeError` otherwise) → {@link extensionForMime} of the MIME type (→
+ * `'bin'`). Returns the
  * absolute path written. The caller returns that path from the tool result
  * (with an `inline` flag for base64 via `imageResult` when the user asks).
  *
@@ -150,6 +221,6 @@ export interface WriteBinaryOutputOptions {
  * write created its target outside `dir`.
  */
 export function writeBinaryOutput(opts: WriteBinaryOutputOptions): string {
-  const ext = opts.extension ?? (opts.mimeType ? MIME_EXT[opts.mimeType] : undefined) ?? 'bin';
+  const ext = opts.extension ?? extensionForMime(opts.mimeType);
   return writeUniqueFileSync(opts.dir, opts.baseName, ext, Buffer.from(opts.base64, 'base64'), opts.mode);
 }

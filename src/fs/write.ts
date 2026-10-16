@@ -163,6 +163,32 @@ export function sanitizeBaseName(base: string): string {
   return safe.length > 0 ? safe : 'file';
 }
 
+const SAFE_EXTENSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,15}$/;
+
+/**
+ * Whether `ext` (no leading dot) is safe to append to a filename: 1–16
+ * characters of `A-Z a-z 0-9 . _ -`, starting with a letter or digit — so no
+ * path separator, no leading dot, no `..` component, no control or reserved
+ * character. Multi-part extensions (`tar.gz`) pass.
+ */
+export function isSafeExtension(ext: string): boolean {
+  return SAFE_EXTENSION.test(ext);
+}
+
+/**
+ * Throw a `TypeError` unless {@link isSafeExtension}. The stem is sanitised,
+ * but an extension such as `/../../elsewhere/x` would otherwise be joined
+ * verbatim and write outside `dir` — past `allowedRoots` too, which confines
+ * only `dir` (fleet-audit#1303).
+ */
+export function assertSafeExtension(ext: string, caller: string): void {
+  if (!isSafeExtension(ext)) {
+    throw new TypeError(
+      `${caller}: extension must be 1-16 characters of A-Z a-z 0-9 . _ - starting with a letter or digit, got ${JSON.stringify(ext)}.`,
+    );
+  }
+}
+
 /** The n-th candidate name: `base.ext`, then `base-2.ext`, `base-3.ext`, … */
 function candidate(dir: string, safeBase: string, ext: string, n: number): string {
   return join(dir, n === 1 ? `${safeBase}.${ext}` : `${safeBase}-${n}.${ext}`);
@@ -177,7 +203,11 @@ export interface WriteUniqueFileOptions {
   dir: string;
   /** Filename stem (no extension); sanitized to one path component. */
   baseName: string;
-  /** Extension, without the dot. */
+  /**
+   * Extension, without the dot. Must pass {@link isSafeExtension} (a
+   * `TypeError` otherwise); derive one from a MIME type with
+   * `extensionForMime`.
+   */
   extension: string;
   bytes: Uint8Array;
   /** As {@link WriteFileSafeOptions.mode}. */
@@ -199,6 +229,7 @@ export interface WriteUniqueFileOptions {
  *   `allowedRoots`; `exists` after `maxAttempts` taken names.
  */
 export async function writeUniqueFile(opts: WriteUniqueFileOptions): Promise<string> {
+  assertSafeExtension(opts.extension, 'writeUniqueFile');
   const dir = confine(opts.dir, opts.allowedRoots);
   await mkdir(dir, { recursive: true });
   // Re-check now it exists, in case a component was swapped for a symlink.
@@ -222,6 +253,7 @@ export async function writeUniqueFile(opts: WriteUniqueFileOptions): Promise<str
  * `writeBinaryOutput`. Not exported from the package.
  */
 export function writeUniqueFileSync(dir: string, baseName: string, ext: string, bytes: Uint8Array, mode?: number): string {
+  assertSafeExtension(ext, 'writeBinaryOutput');
   mkdirSync(dir, { recursive: true });
   const safe = sanitizeBaseName(baseName);
   for (let n = 1; ; n++) {
