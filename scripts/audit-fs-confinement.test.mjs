@@ -85,4 +85,32 @@ describe('audit-fs-confinement.mjs', () => {
     expect(r.status).toBe(2);
     expect(r.stderr).toContain('nope');
   });
+
+  it('warns (exit 0) on a conditional allowedRoots spread, and fails with --strict', () => {
+    repo({ 'src/up.ts': `${IMPORT}fileBlob(p, { ...(roots ? { allowedRoots: roots } : {}) });\n` });
+    const r = run('.');
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('src/up.ts:2:1: warning: fileBlob(');
+    expect(r.stdout).toContain('only inside a conditional spread');
+    expect(r.stdout).toContain('1 warning');
+    expect(run('.', '--strict').status).toBe(1);
+    expect(run('.', '--github').stdout).toMatch(/^::warning file=src\/up\.ts,line=2,col=1::/m);
+  });
+
+  it('warns (exit 0) on a raw fs write with a non-literal path, and fails with --strict', () => {
+    repo({ 'src/save.ts': "import { writeFileSync } from 'node:fs';\nexport const save = (p: string) => writeFileSync(p, 'x');\n" });
+    const r = run('.');
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("src/save.ts:2:36: warning: writeFileSync(p, 'x') writes a non-literal path");
+    expect(r.stdout).toMatch(/1 raw fs write/);
+    expect(run('.', '--strict').status).toBe(1);
+    expect(run('.', '--github').stdout).toMatch(/^::warning file=src\/save\.ts,line=2,col=36::/m);
+  });
+
+  it('still fails an unconfined helper call without --strict', () => {
+    repo({ 'src/a.ts': `${IMPORT}fileBlob(p);\n`, 'src/b.ts': "import { mkdirSync } from 'fs';\nmkdirSync(d);\n" });
+    const r = run('.');
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('1 unconfined');
+  });
 });
