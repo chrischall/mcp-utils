@@ -1,8 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import { withCallSignal } from '../cancel/index.js';
 import { McpToolError } from '../errors/index.js';
-import { EdgeBlockedError, RateLimitedError, UnauthorizedError, UpstreamHttpError } from '../http/index.js';
 import {
+  EdgeBlockedError,
+  RateLimitedError,
+  ResponseTooLargeError,
+  UnauthorizedError,
+  UpstreamHttpError,
+} from '../http/index.js';
+import {
+  GRAPHQL_DEFAULT_MAX_RESPONSE_BYTES,
   GraphqlResponseError,
   GraphqlTransportError,
   createGraphqlClient,
@@ -454,5 +461,92 @@ describe('createGraphqlClient — transport failures', () => {
     const err = (await pending.catch((e: unknown) => e)) as Error;
     expect(err).not.toBeInstanceOf(GraphqlTransportError);
     expect(err.name).toBe('AbortError');
+  });
+});
+
+// fleet-audit#1196: a failure inside the `headers()` hook happens before
+// anything is sent, so it is not a transport failure — and for a mutation it
+// must not claim the change may already have been applied.
+describe('createGraphqlClient — a failing headers() hook (fleet-audit#1196)', () => {
+  it.each([
+    ['a mutation', 'mutation M { del(id: 1) }'],
+    ['a query', 'query Q { me { id } }'],
+  ])('rethrows the hook error untouched for %s, and sends nothing', async (_label, doc) => {
+    const { impl, calls } = fakeFetch({ body: { data: {} } });
+    const refused = new UnauthorizedError('Example');
+    const gql = client(impl, {
+      headers: async () => {
+        throw refused;
+      },
+    });
+    const err = await gql.request(doc).catch((e: unknown) => e);
+    expect(err).toBe(refused);
+    expect(err).not.toBeInstanceOf(GraphqlTransportError);
+    expect((err as McpToolError).kind).toBe('credential_rejected');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rethrows a synchronous hook throw untouched too', async () => {
+    const { impl, calls } = fakeFetch({ body: { data: {} } });
+    const boom = new McpToolError('config missing', { hint: 'set EXAMPLE_TOKEN' });
+    const err = await client(impl, {
+      headers: () => {
+        throw boom;
+      },
+    })
+      .request('mutation M { x }')
+      .catch((e: unknown) => e);
+    expect(err).toBe(boom);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+// fleet-audit#1387: the body is read under a byte cap, like createApiClient's
+// maxResponseBytes, instead of an unbounded res.text().
+describe('createGraphqlClient — response size cap (fleet-audit#1387)', () => {
+  it('defaults the cap to GRAPHQL_DEFAULT_MAX_RESPONSE_BYTES (16 MiB)', () => {
+    expect(GRAPHQL_DEFAULT_MAX_RESPONSE_BYTES).toBe(16 * 1024 * 1024);
+  });
+
+  it('refuses a body over maxResponseBytes with ResponseTooLargeError, not a transport error', async () => {
+    const { impl } = fakeFetch({ body: { data: { blob: 'x'.repeat(5_000) } } });
+    const err = await client(impl, { maxResponseBytes: 1_000 })
+      .request('mutation M { blob }')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ResponseTooLargeError);
+    expect((err as ResponseTooLargeError).maxBytes).toBe(1_000);
+    expect((err as McpToolError).kind).toBe('too_large');
+  });
+
+  it('refuses on Content-Length before reading', async () => {
+    const impl = (async () =>
+      new Response('{"data":{}}', { status: 200, headers: { 'content-length': '99999999' } })) as unknown as typeof fetch;
+    await expect(client(impl, { maxResponseBytes: 100 }).request('query Q { a }')).rejects.toBeInstanceOf(
+      ResponseTooLargeError,
+    );
+  });
+
+  it('reads a body under the cap normally, and Infinity disables the cap', async () => {
+    const { impl } = fakeFetch({ body: { data: { a: 'é'.repeat(100) } } });
+    expect(await client(impl, { maxResponseBytes: 10_000 }).request('query Q { a }')).toEqual({ a: 'é'.repeat(100) });
+    expect(await client(impl, { maxResponseBytes: Infinity }).request('query Q { a }')).toEqual({ a: 'é'.repeat(100) });
+  });
+
+  it('caps a stream-less fetch shim (text() only) too', async () => {
+    const shim = (async () => ({
+      status: 200,
+      headers: new Headers(),
+      text: async () => JSON.stringify({ data: { a: 'x'.repeat(2_000) } }),
+    })) as unknown as typeof fetch;
+    await expect(client(shim, { maxResponseBytes: 100 }).request('query Q { a }')).rejects.toBeInstanceOf(
+      ResponseTooLargeError,
+    );
+    expect(await client(shim).request('query Q { a }')).toEqual({ a: 'x'.repeat(2_000) });
+  });
+
+  it('rejects a negative or NaN cap with a TypeError', () => {
+    const { impl } = fakeFetch({ body: { data: {} } });
+    expect(() => client(impl, { maxResponseBytes: -1 })).toThrow(TypeError);
+    expect(() => client(impl, { maxResponseBytes: Number.NaN })).toThrow(TypeError);
   });
 });
