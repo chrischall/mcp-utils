@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.0.3](https://github.com/chrischall/mcp-utils/compare/v3.0.2...v3.0.3) (2026-10-16)
+
+
+### Bug Fixes
+
+* bound hostile-page scans, keep GraphQL hook errors intact, and harden redirects, writes and redaction ([#374](https://github.com/chrischall/mcp-utils/issues/374)) ([242500f](https://github.com/chrischall/mcp-utils/commit/242500fabdff04881b956426a494ecbbecf03cb1))
+
 ## [3.0.2](https://github.com/chrischall/mcp-utils/compare/v3.0.1...v3.0.2) (2026-10-09)
 
 
