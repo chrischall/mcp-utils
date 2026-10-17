@@ -15,6 +15,15 @@
  *    request back.
  *  - {@link createApiClient} never embeds the token in a thrown message; a 401
  *    yields a fixed "unauthorized" string, not the credential.
+ *
+ * Write-outcome and transport-failure helpers ({@link writeOrUnknown},
+ * {@link unknownOutcomeReason}, {@link describeTransportFailure}) come from
+ * microsoft-teams-mcp (`tools/send.ts`, `network-error.ts`) and
+ * office-outlook-mcp (`tools/writes.ts`) — chrischall/fleet-audit#1306; the
+ * {@link ApiClientOptions.onErrorResponse} hook and
+ * {@link ApiClientOptions.idempotencyHeader} from honeybook-mcp's
+ * `hbApiRequest` (404-disguised dead credential, API-version retry, one
+ * duplicate-call-prevention id per logical request) — fleet-audit#1380.
  */
 
 import { responseHeader } from '../internal/headers.js';
@@ -28,6 +37,7 @@ export * from './response-cache.js';
 export * from './net-atoms.js';
 export * from './fetch-bounded.js';
 export * from './url-safety.js';
+export * from './transport-failure.js';
 
 import { readBytesCapped, ResponseTooLargeError } from './body-limit.js';
 import { parseRetryAfterMs } from './net-atoms.js';
@@ -114,8 +124,56 @@ export interface ApiClientOptions {
   /**
    * Default headers sent on every request (e.g. an API-version or client-id
    * header). A per-request `headers` entry of the same name overrides them.
+   *
+   * A function is re-read for every request sent — every retry and redirect
+   * hop included — which is where a value that can change between attempts
+   * belongs (honeybook-mcp's `hb-api-client-version`, adopted from an
+   * `HBWrongAPIVersionError` and then retried via
+   * {@link ApiClientOptions.onErrorResponse}).
    */
-  baseHeaders?: Record<string, string>;
+  baseHeaders?: Record<string, string> | (() => Record<string, string>);
+  /**
+   * Name of a header that carries ONE random id per logical call
+   * (`crypto.randomUUID()`), the same on every attempt of that call: a 429
+   * retry, an {@link ApiClientOptions.onErrorResponse} retry, a
+   * `tokenManager` 401 replay, a redirect hop. A server-side duplicate-call
+   * guard (`Idempotency-Key`, honeybook's
+   * `hb-api-duplicate-calls-prevention-uuid`) can then recognise a replay —
+   * a fresh id per attempt would let a retried POST create a second record
+   * (fleet-audit#1380). A call can supply its own value with
+   * {@link RequestOptions.idempotencyKey}; a per-request `headers` entry of
+   * the same name (any case) wins over both. Unset (the default), nothing is
+   * sent.
+   */
+  idempotencyHeader?: string;
+  /**
+   * See every error response before the client maps it — the RAW status,
+   * headers and body — and claim it: return an `Error` to throw that instead,
+   * `'retry'` to re-send the request once, or `undefined` to fall through to
+   * the default {@link ApiError}.
+   *
+   * Consulted for every non-2xx except a 401 and an exhausted 429 (which
+   * have {@link onUnauthorized} / {@link onRateLimited}) and a CDN/WAF refusal
+   * page (which still throws {@link EdgeBlockedError} — no API judged it), on
+   * `fetchJson`, `fetchHtml` and `fetchRaw` alike. This is where an API's
+   * quirks belong (honeybook-mcp, fleet-audit#1380): a dead credential
+   * disguised as a 404 with an `HBUnauthorizedError` body becomes the
+   * re-authenticate error; an `HBWrongAPIVersionError` body carries the
+   * version to adopt (update what a {@link baseHeaders} function returns) and
+   * asks for a `'retry'`.
+   *
+   * `'retry'` is honoured ONCE per call: the re-sent request's error response
+   * is shown to the hook again with `retried: true`, and a second `'retry'`
+   * falls through to the default error. The re-send is a new request: a
+   * write's re-send is the hook's decision, so only ask for one when the
+   * first was refused outright (as a version mismatch is).
+   *
+   * **`body` is NOT redacted** — it is the upstream's own text (decoded, under
+   * the response byte cap; `''` when over it or unreadable). Anything taken
+   * from it into an error message must go through `truncateErrorMessage`
+   * first, exactly as the default mapping does.
+   */
+  onErrorResponse?: (ctx: ErrorResponseContext) => ErrorResponseDecision | Promise<ErrorResponseDecision>;
   /**
    * 429 retry policy. Defaults to `{ count: 1, delayMs: 2000 }` — the
    * fleet-wide "retry once after 2s" behavior. Set `count: 0` to disable.
@@ -227,6 +285,28 @@ export interface ApiClientOptions {
   maxResponseBytes?: number;
 }
 
+/** What {@link ApiClientOptions.onErrorResponse} is shown. */
+export interface ErrorResponseContext {
+  /** The response status (never 2xx, 401 or 429). */
+  status: number;
+  /** The request method, as passed. */
+  method: string;
+  /** The request path, as passed. */
+  path: string;
+  /** The response headers. */
+  headers: Headers;
+  /**
+   * The raw, UNREDACTED response body as text — under the call's byte cap,
+   * `''` when over it or unreadable. Redact before surfacing any of it.
+   */
+  body: string;
+  /** Whether this call has already been re-sent once at the hook's request. */
+  retried: boolean;
+}
+
+/** What {@link ApiClientOptions.onErrorResponse} may return. */
+export type ErrorResponseDecision = Error | 'retry' | undefined;
+
 /**
  * What {@link ApiClientOptions.onRateLimited} is told about the 429 that
  * exhausted the retry budget (the LAST response, not the first).
@@ -308,6 +388,13 @@ export interface RequestOptions {
    * {@link WriteOutcomeUnknownError}. Never sent upstream.
    */
   idempotent?: boolean;
+  /**
+   * The value of the client's {@link ApiClientOptions.idempotencyHeader} for
+   * this call, instead of a generated one — e.g. a key the caller persisted
+   * so a retry after a restart is recognised too. Ignored when the client has
+   * no `idempotencyHeader`. Never sent under any other name.
+   */
+  idempotencyKey?: string;
   /**
    * Largest response body, in bytes, this call will read; overrides the
    * client's {@link ApiClientOptions.maxResponseBytes} (larger or smaller).
@@ -524,6 +611,82 @@ export class WriteOutcomeUnknownError extends McpToolError {
     this.timedOut = opts.timeoutMs !== undefined;
     this.timeoutMs = opts.timeoutMs;
     this.method = verb;
+  }
+}
+
+/**
+ * The HTTP status behind a {@link WriteOutcomeUnknownError} — set when the
+ * write was sent and the far side then answered a 5xx (a hand-rolled client
+ * chains the status-carrying error as `cause`, as microsoft-teams-mcp does) —
+ * or `undefined` when it timed out or the connection dropped.
+ */
+export function writeOutcomeStatus(err: WriteOutcomeUnknownError): number | undefined {
+  const status = (err.cause as { status?: unknown } | null | undefined)?.status;
+  return typeof status === 'number' ? status : undefined;
+}
+
+/** Options for {@link unknownOutcomeReason}. */
+export interface UnknownOutcomeReasonOptions {
+  /** What was sent, for the "answered HTTP 502 after … was sent" wording. Defaults to `'the request'`. */
+  sent?: string;
+}
+
+/**
+ * Why a write's outcome is unknown, as a clause for a tool's warning:
+ * `'it did not answer in time'`, `'it answered HTTP 502 after the request was
+ * sent'` (see {@link writeOutcomeStatus}), or `'the connection dropped'`.
+ * Shared by microsoft-teams-mcp (`tools/send.ts`) and office-outlook-mcp
+ * (`tools/writes.ts`), whose warnings read "Teams did not confirm this post
+ * (<reason>), so it may already be in the conversation…".
+ */
+export function unknownOutcomeReason(err: WriteOutcomeUnknownError, opts: UnknownOutcomeReasonOptions = {}): string {
+  if (err.timedOut) return 'it did not answer in time';
+  const status = writeOutcomeStatus(err);
+  if (status !== undefined) return `it answered HTTP ${status} after ${opts.sent ?? 'the request'} was sent`;
+  return 'the connection dropped';
+}
+
+/** What {@link writeOrUnknown} resolves to: the write's value, or the caller's "unknown" result. */
+export type WriteOrUnknownOutcome<T, R> = { ok: true; value: T } | { ok: false; result: R };
+
+/**
+ * Run a non-idempotent write; a {@link WriteOutcomeUnknownError} (the request
+ * was sent, then timed out or dropped) becomes `{ ok: false, result }` —
+ * where `result` is whatever `onUnknown` builds, typically a non-error
+ * `status: "unknown"` tool result — instead of an error. Any other failure is
+ * a real failure and still throws.
+ *
+ * Why not an error: by the time the write runs its confirm token is spent and
+ * the far side has often already accepted it (Outlook queues `sendMail` with
+ * a 202). An error invites the model to start over — fresh preview, fresh
+ * token — and send a second identical email. An "unknown" result tells it to
+ * check first.
+ *
+ * Consolidates the adapter microsoft-teams-mcp (`src/tools/send.ts`) and
+ * office-outlook-mcp (`src/tools/writes.ts`) each carry
+ * (chrischall/fleet-audit#1306):
+ *
+ * ```ts
+ * const sent = await writeOrUnknown(
+ *   () => client.sendMail(message),
+ *   (err) => minifiedResult({
+ *     status: 'unknown',
+ *     warning: `Outlook did not confirm this write (${unknownOutcomeReason(err)}), so it may already ` +
+ *       'have happened. Check Sent Items before retrying; do not resend blindly.',
+ *   }),
+ * );
+ * if (!sent.ok) return sent.result;
+ * ```
+ */
+export async function writeOrUnknown<T, R>(
+  run: () => Promise<T>,
+  onUnknown: (err: WriteOutcomeUnknownError, reason: string) => R | Promise<R>,
+): Promise<WriteOrUnknownOutcome<T, R>> {
+  try {
+    return { ok: true, value: await run() };
+  } catch (err) {
+    if (!(err instanceof WriteOutcomeUnknownError)) throw err;
+    return { ok: false, result: await onUnknown(err, unknownOutcomeReason(err)) };
   }
 }
 
@@ -1172,7 +1335,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
       const headers: Record<string, string> = {
         Accept: 'application/json',
         ...(withBody && contentType !== undefined ? { 'Content-Type': contentType } : {}),
-        ...opts.baseHeaders,
+        ...(typeof opts.baseHeaders === 'function' ? opts.baseHeaders() : opts.baseHeaders),
         ...authHeader(token || undefined),
         ...opt.headers,
       };
@@ -1342,28 +1505,69 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     }
   }
 
-  const fetchJson = <T>(method: string, path: string, opt: RequestOptions = {}): Promise<T> =>
-    guardWrite(method, opt, (dispatch) => fetchJsonOnce<T>(method, path, opt, dispatch));
-  const fetchHtml = (method: string, path: string, opt: RequestOptions = {}): Promise<string> =>
-    guardWrite(method, opt, (dispatch) => fetchHtmlOnce(method, path, opt, dispatch));
-  const fetchRaw = (method: string, path: string, opt: RequestOptions = {}): Promise<RawApiResponse> =>
-    guardWrite(method, opt, (dispatch) => fetchRawOnce(method, path, opt, dispatch));
+  /**
+   * `opt` with this call's {@link ApiClientOptions.idempotencyHeader} added —
+   * ONE value for the whole logical call, so every attempt below (429 retry,
+   * hook retry, 401 replay, redirect hop) re-sends the same id. A per-request
+   * header of the same name, in any case, wins.
+   */
+  function withIdempotency(opt: RequestOptions): RequestOptions {
+    const name = opts.idempotencyHeader;
+    if (name === undefined || name === '') return opt;
+    const lower = name.toLowerCase();
+    if (opt.headers && Object.keys(opt.headers).some((k) => k.toLowerCase() === lower)) return opt;
+    const key = opt.idempotencyKey ?? globalThis.crypto.randomUUID();
+    return { ...opt, headers: { ...opt.headers, [name]: key } };
+  }
+
+  /**
+   * The error an unsuccessful response (not 401 / 429) becomes, or `'retry'`.
+   * A CDN/WAF refusal page is checked first, exactly as {@link httpError}
+   * always has, so the hook never sees one; then
+   * {@link ApiClientOptions.onErrorResponse}; then the default.
+   */
+  async function errorFor(res: Response, text: string, method: string, path: string, retried: boolean): Promise<Error | 'retry'> {
+    const edge = detectEdgeBlock({ body: text, headers: res.headers, status: res.status });
+    if (edge) return new EdgeBlockedError(res.status, edge.vendor, { service, method, path });
+    if (opts.onErrorResponse) {
+      const decision = await opts.onErrorResponse({ status: res.status, method, path, headers: res.headers, body: text, retried });
+      if (decision instanceof Error) return decision;
+      if (decision === 'retry' && !retried) return 'retry';
+    }
+    return httpError(res, text, method, path, service);
+  }
+
+  const fetchJson = <T>(method: string, path: string, opt: RequestOptions = {}): Promise<T> => {
+    const o = withIdempotency(opt);
+    return guardWrite(method, o, (dispatch) => fetchJsonOnce<T>(method, path, o, dispatch));
+  };
+  const fetchHtml = (method: string, path: string, opt: RequestOptions = {}): Promise<string> => {
+    const o = withIdempotency(opt);
+    return guardWrite(method, o, (dispatch) => fetchHtmlOnce(method, path, o, dispatch));
+  };
+  const fetchRaw = (method: string, path: string, opt: RequestOptions = {}): Promise<RawApiResponse> => {
+    const o = withIdempotency(opt);
+    return guardWrite(method, o, (dispatch) => fetchRawOnce(method, path, o, dispatch));
+  };
 
   async function fetchJsonOnce<T>(method: string, path: string, opt: RequestOptions, dispatch: Dispatch): Promise<T> {
     const maxBytes = capOf(opt);
-    const attempt = await send(method, path, opt, dispatch);
+    let attempt: Attempt;
+    for (let retried = false; ; retried = true) {
+      attempt = await send(method, path, opt, dispatch);
+      const res = attempt.res;
+
+      if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path, maxBytes);
+      if (res.status === 429) throw await rateLimitedError(attempt, method, path, maxBytes);
+      if (res.status === 204) {
+        discard(attempt);
+        return parseJsonBody<T>('', { expect: opt.expect, service, method, path, status: 204 });
+      }
+      if (res.ok) break;
+      const failure = await errorFor(res, await readErrorText(attempt, maxBytes), method, path, retried);
+      if (failure !== 'retry') throw failure;
+    }
     const res = attempt.res;
-
-    if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path, maxBytes);
-    if (res.status === 429) throw await rateLimitedError(attempt, method, path, maxBytes);
-    if (res.status === 204) {
-      discard(attempt);
-      return parseJsonBody<T>('', { expect: opt.expect, service, method, path, status: 204 });
-    }
-
-    if (!res.ok) {
-      throw httpError(res, await readErrorText(attempt, maxBytes), method, path, service);
-    }
     const text = await readText(attempt, maxBytes);
     return parseJsonBody<T>(text, {
       expect: opt.expect,
@@ -1378,16 +1582,16 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   async function fetchHtmlOnce(method: string, path: string, opt: RequestOptions, dispatch: Dispatch): Promise<string> {
     const maxBytes = capOf(opt);
     const headers = { Accept: 'text/html,*/*', ...opt.headers };
-    const attempt = await send(method, path, { ...opt, headers }, dispatch);
-    const res = attempt.res;
+    for (let retried = false; ; retried = true) {
+      const attempt = await send(method, path, { ...opt, headers }, dispatch);
+      const res = attempt.res;
 
-    if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path, maxBytes);
-    if (res.status === 429) throw await rateLimitedError(attempt, method, path, maxBytes);
-
-    if (!res.ok) {
-      throw httpError(res, await readErrorText(attempt, maxBytes), method, path, service);
+      if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path, maxBytes);
+      if (res.status === 429) throw await rateLimitedError(attempt, method, path, maxBytes);
+      if (res.ok) return readText(attempt, maxBytes);
+      const failure = await errorFor(res, await readErrorText(attempt, maxBytes), method, path, retried);
+      if (failure !== 'retry') throw failure;
     }
-    return readText(attempt, maxBytes);
   }
 
   async function fetchRawOnce(
@@ -1398,19 +1602,22 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   ): Promise<RawApiResponse> {
     const maxBytes = capOf(opt);
     const headers = { Accept: '*/*', ...opt.headers };
-    const attempt = await send(method, path, { ...opt, headers }, dispatch);
-    const res = attempt.res;
+    let attempt: Attempt;
+    for (let retried = false; ; retried = true) {
+      attempt = await send(method, path, { ...opt, headers }, dispatch);
+      const res = attempt.res;
 
-    if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path, maxBytes);
-    if (res.status === 429) throw await rateLimitedError(attempt, method, path, maxBytes);
-
-    if (!res.ok) {
+      if (res.status === 401) throw await unauthorizedOrEdge(attempt, method, path, maxBytes);
+      if (res.status === 429) throw await rateLimitedError(attempt, method, path, maxBytes);
+      if (res.ok) break;
       const text = await readText(attempt, maxBytes).catch((err: unknown) => {
         if (err instanceof RequestTimeoutError) throw err;
         return '';
       });
-      throw httpError(res, text, method, path, service);
+      const failure = await errorFor(res, text, method, path, retried);
+      if (failure !== 'retry') throw failure;
     }
+    const res = attempt.res;
     const bytes = await readBytes(attempt, maxBytes);
     return {
       status: res.status,
