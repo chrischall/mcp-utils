@@ -1619,6 +1619,18 @@ const registry = createSessionRegistry();
 registerSessionTools(server, { registry /* ... */ });
 ```
 
+**A token captured from the browser** (no refresh grant — refreshing means
+capturing again) gets `createCapturedTokenManager({ capture, direct?,
+onDirectRejected?, persistence?, onPersistError? })`, a `TokenManager` that
+captures on first use, re-captures on a 401 (replayed once) or inside the skew
+window, expires a JWT at its `exp` (an opaque token after
+`UNKNOWN_CAPTURED_TOKEN_TTL_MS`, 10 min), caches only CAPTURED tokens, and
+never re-captures for an operator-supplied `direct` token — that would swap
+the chosen credential for whichever account a tab is signed into. Pieces:
+`capturedBearerTokens(token)`, `RECAPTURE_SENTINEL`, `isBearerTokens` (the
+cache `validate`). microsoft-teams-mcp `chatsvc.ts` / office-outlook-mcp
+`client.ts` (fleet-audit#1305).
+
 The `${prefix}_register_session` tool takes an optional `mark_active`
 (default `false`); passing `mark_active: true` makes the newly-registered
 session active in the same call instead of requiring a follow-up
@@ -2078,6 +2090,47 @@ put a remedy in the message) keeps the typed error as `cause`; the healthcheck
 classifies that cause — `session_not_ready`, `bridge_down`, `http`,
 `edge_blocked`, a capability gap — so no `classifyThrown` is needed just to
 unwrap it.
+
+#### Capture a bearer once, then talk to the API: `captureBearerHeader`
+
+For a site whose API takes a bearer the signed-in tab already sends, and
+nothing else from the page (microsoft-teams-mcp, office-outlook-mcp —
+fleet-audit#1305). One call builds a transport declaring only the header
+capture, starts it, snapshots the header off the next matching request,
+closes it whatever happened, and returns the bare token:
+
+```ts
+import { captureBearerHeader } from '@chrischall/mcp-utils/fetchproxy';
+
+const token = await captureBearerHeader({
+  captures: [{ host: 'teams.cloud.microsoft', path: '/api/chatsvc/*', headerName: 'authorization' }],
+  windowMs: readTtlMsEnv('TEAMS_CAPTURE_TIMEOUT', 30_000), // read per capture
+  port: readPortEnv('TEAMS_WS_PORT', 37_149),
+  serverName: PACKAGE_NAME,
+  version: VERSION,
+  what: 'a Teams token',
+  guidance: 'Open a signed-in teams.cloud.microsoft tab and click into any chat, then retry.',
+});
+```
+
+The window is both the verb's `timeoutMs` and the transport's
+`captureWindowMs`, so the bridge deadline (window + 15 s, never under 30 s)
+outlasts it. Several `captures` (a site on two hosts) are raced under ONE
+window (`raceCaptures` — the bridge serialises them, so separate windows
+summed). A missing, or shorter-than-`minLength` (default 100), header fails
+with `could not capture <what> from the browser (<host>: …). <guidance>`;
+`normalise` (default `stripBearer`) turns the raw header into the token;
+`createTransport` is the test seam. Pair it with `createCapturedTokenManager`
+(`/session`) for the cache and the re-capture on 401.
+
+#### Build once, start once: `createLazyTransport`
+
+`createLazyTransport(() => createSiteTransport())` returns `{ transport(),
+ready() }`: `transport()` builds it on first use without starting it (for a
+healthcheck), `ready()` starts it once — concurrent callers share the one
+start, and a rejected start is forgotten so the next call retries it.
+tripadvisor-mcp's and alltrails-mcp's `bridge()` / `bridgeReady()`
+(fleet-audit#1342).
 
 #### The direct-first router: `createDirectFirstTransport`
 
