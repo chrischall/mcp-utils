@@ -884,6 +884,58 @@ try {
 }
 ```
 
+`writeOrUnknown(run, onUnknown)` is that catch as a helper: it resolves
+`{ ok: true, value }`, or — for a `WriteOutcomeUnknownError` only —
+`{ ok: false, result }` with whatever `onUnknown(err, reason)` builds
+(typically a non-error `status: "unknown"` tool result); every other failure
+still throws. `unknownOutcomeReason(err, { sent? })` is the clause for the
+warning (`it did not answer in time` / `it answered HTTP 502 after the post
+was sent` / `the connection dropped`), and `writeOutcomeStatus(err)` the 5xx
+behind one, if any (teams `send.ts` / outlook `writes.ts`, fleet-audit#1306):
+
+```ts
+const sent = await writeOrUnknown(() => client.sendMail(msg), (err) =>
+  minifiedResult({ status: 'unknown', warning: `Outlook did not confirm this write (${unknownOutcomeReason(err)}); check Sent Items before retrying.` }));
+if (!sent.ok) return sent.result;
+```
+
+**A request that never got a response, named.** `describeTransportFailure(err,
+url, service, { hints? })` turns undici's bare `TypeError('fetch failed')` into
+an `McpToolError` (`kind: 'transport'`) reading `Could not reach <service> at
+<host> (<code>: <cause>).` — the host only, never the path or query — with a
+hint keyed to the cause: an egress proxy that refused the tunnel (the
+mcp-host allow-list, not DNS), DNS (`nslookup`), TLS (`NODE_EXTRA_CA_CERTS`), a
+refused/reset connection (`HTTPS_PROXY` + `NODE_USE_ENV_PROXY=1`), anything
+else (`curl -sI`). Anything that is not that failure returns `undefined`, so
+the call site is `throw describeTransportFailure(e, url, 'Outlook') ?? e`.
+`hints` rewords one class (`egress` / `proxy` / `dns` / `tls` / `connect` /
+`other`); `transportCauseCode(err)` and `isFetchFailedError(err)` are the
+pieces (microsoft-teams-mcp `network-error.ts`, fleet-audit#1306).
+
+**An API with quirks in its error responses** gets `onErrorResponse(ctx)`: it
+sees every non-2xx the client would map — except a 401 and an exhausted 429
+(their own hooks) and a CDN/WAF page (still `EdgeBlockedError`) — with the RAW
+`status`, `method`, `path`, `headers` and **unredacted** `body`, and returns an
+`Error` to throw, `'retry'` to re-send once (`retried: true` on the second
+look), or `undefined` for the default `ApiError`. Pair it with a
+`baseHeaders` **function** (re-read per request) when the retry needs a
+changed header, and `idempotencyHeader: 'Idempotency-Key'` to send ONE random
+id per logical call on every attempt (429 retry, hook retry, 401 replay) — or
+a call's own `idempotencyKey`. honeybook-mcp's shape (fleet-audit#1380):
+
+```ts
+const api = createApiClient({
+  baseUrl: 'https://api.honeybook.com',
+  baseHeaders: () => ({ 'hb-api-client-version': String(version), ...authHeaders() }),
+  idempotencyHeader: 'hb-api-duplicate-calls-prevention-uuid',
+  onErrorResponse: ({ status, body }) => {
+    if (status === 404 && body.includes('HBUnauthorizedError')) return authExpiredError();
+    if (body.includes('HBWrongAPIVersionError')) { version = serverVersionFrom(body); return 'retry'; }
+    return undefined;
+  },
+});
+```
+
 `retry` also accepts `statuses` (e.g. `[429, 503]`), `honorRetryAfter: true`
 (sleep the response's `Retry-After` instead of the fixed `delayMs`, bounded by
 `maxRetryAfterMs`, default 30 s — hoisted from getyourguide / musicbrainz /
