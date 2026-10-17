@@ -1352,7 +1352,6 @@ function isTransientFailure(err: unknown): boolean {
   return false;
 }
 
-/** Whether a parsed record has the shape of {@link BearerTokens}. */
 /**
  * Whether `raw` is a usable {@link BearerTokens} record: a non-empty
  * `accessToken`, a finite numeric `expiresAt`, and a `refreshToken` that is
@@ -1696,16 +1695,6 @@ export class TokenManager {
   }
 }
 
-// ===========================================================================
-// 5. CookieSessionManager — cookie-session lifecycle (single-flight, replay)
-// ===========================================================================
-
-/**
- * The minimal cookie-session shape the manager understands. Callers usually
- * supply a richer `S` (extra cookies, a parsed JWT, a frame id, …) — only
- * `cookieHeader` is structurally required, `csrfToken` is the common optional
- * second field (Django/Rails CSRF rotation).
- */
 // ---------------------------------------------------------------------------
 // createCapturedTokenManager — a TokenManager over a browser-captured token
 // ---------------------------------------------------------------------------
@@ -1855,6 +1844,16 @@ export function createCapturedTokenManager(opts: CapturedTokenManagerOptions): T
   });
 }
 
+// ===========================================================================
+// 5. CookieSessionManager — cookie-session lifecycle (single-flight, replay)
+// ===========================================================================
+
+/**
+ * The minimal cookie-session shape the manager understands. Callers usually
+ * supply a richer `S` (extra cookies, a parsed JWT, a frame id, …) — only
+ * `cookieHeader` is structurally required, `csrfToken` is the common optional
+ * second field (Django/Rails CSRF rotation).
+ */
 export interface CookieSession {
   /** The `Cookie:` request header value for authenticated calls. */
   cookieHeader: string;
