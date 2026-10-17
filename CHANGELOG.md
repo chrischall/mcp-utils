@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.1.0](https://github.com/chrischall/mcp-utils/compare/v3.0.3...v3.1.0) (2026-10-17)
+
+
+### Features
+
+* compose view responses and redact known secret values ([#377](https://github.com/chrischall/mcp-utils/issues/377)) ([78e31d7](https://github.com/chrischall/mcp-utils/commit/78e31d7d78fb19c389e781e1b3acc28eb8d3d2cf))
+* **fetchproxy:** add captureBearerHeader, createLazyTransport and a captured-token manager ([#379](https://github.com/chrischall/mcp-utils/issues/379)) ([adaff9c](https://github.com/chrischall/mcp-utils/commit/adaff9c1407545a16c91bd4dceae28a16cbe67bc))
+* **graphql:** add a document inspector and retry/edge-block hooks for direct transports ([#380](https://github.com/chrischall/mcp-utils/issues/380)) ([bbfe8bf](https://github.com/chrischall/mcp-utils/commit/bbfe8bf734eaabe159f4f9ab458388d060e89cfe))
+* **http:** add an error-response hook, idempotency keys, writeOrUnknown and transport-failure descriptions ([#378](https://github.com/chrischall/mcp-utils/issues/378)) ([0716520](https://github.com/chrischall/mcp-utils/commit/0716520e3fa7370bc2334c20029112f41f250179))
+
+
+### Documentation
+
+* **session:** put the captured-token manager docs back in their own section ([#383](https://github.com/chrischall/mcp-utils/issues/383)) ([9aa1617](https://github.com/chrischall/mcp-utils/commit/9aa1617b50008b30353d138b6aadb9ebaef543db))
+
 ## [3.0.3](https://github.com/chrischall/mcp-utils/compare/v3.0.2...v3.0.3) (2026-10-16)
 
 
