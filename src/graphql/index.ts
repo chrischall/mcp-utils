@@ -14,7 +14,10 @@
  *  - {@link graphqlOperationKinds} / {@link isReadOnlyGraphqlDocument} — is a
  *    document a query, mutation or subscription (onehome-mcp / hemnet-mcp /
  *    booli-mcp / vibo-mcp, chrischall/fleet-audit#1080, #988, #1020).
+ *  - {@link inspectGraphqlDocument} — which operations, fields and aliases a
+ *    document selects (concur-mcp / workday-mcp, chrischall/fleet-audit#1231).
  */
 
 export * from './client.js';
 export * from './operation-kind.js';
+export * from './inspect.js';

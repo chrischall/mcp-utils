@@ -2183,7 +2183,7 @@ and a healthcheck is the tool people paste into a chat when something is
 broken. Error messages go through `truncateErrorMessage`, so redaction runs
 before any upstream text reaches the result.
 
-### `graphql` — GraphQL transport & operation-kind lexer *(subpath, no optional peers)*
+### `graphql` — GraphQL transport, operation-kind lexer & document inspector *(subpath, no optional peers)*
 
 ```ts
 import {
@@ -2241,6 +2241,49 @@ queries and fragments; a mutation or subscription anywhere (after a fragment,
 after a query), an empty document, an unterminated string or an unknown
 keyword is NOT read-only. `graphqlOperationKinds(doc)` returns each
 definition's keyword in order (`'query'` for a `{ … }` shorthand).
+
+`inspectGraphqlDocument(doc)` goes further for a raw-GraphQL escape hatch:
+`{ operations: [{ kind, name }], fragments, fields, aliases: [{ alias, field }] }`
+— every operation (so a tool can insist on exactly one), every field selected
+by name or alias (a deny-list matches `s: submit` by either), and every alias
+(an alias renames the response key a PII redactor matches on). Same tokenizer
+discipline — string, comment and argument contents never count — but it
+THROWS `GraphqlDocumentError` on anything it cannot read, including nesting
+past `MAX_GRAPHQL_SELECTION_DEPTH` (64), so a guard built on it fails closed
+(concur-mcp `graphql-guard.ts`, workday-mcp's alias guard; fleet-audit#1231).
+
+**A direct transport behind a flaky, sometimes-walled edge** (hemnet / booli,
+fleet-audit#1261, #1223) configures the retry and the two error hooks:
+
+```ts
+const gql = createGraphqlClient({
+  endpoint: 'https://www.hemnet.se/graphql',
+  headers: { 'user-agent': USER_AGENT },
+  timeout: 20_000,
+  retry: {
+    count: 2, delayMs: 1000, statuses: [429, 500, 502, 503, 504],
+    transportErrors: true,            // a network error / timeout is retried too (reads only)
+    backoff: 'exponential', jitter: 0.5, // 1 s, 2 s, each spread over [w, 1.5w)
+    honorRetryAfter: true, retryAfterAsFloor: true, maxRetryAfterMs: 10_000, // max(backoff, Retry-After)
+  },
+  onEdgeBlocked: ({ status, vendor, headers }) =>
+    new CloudflareChallengeError(`HTTP ${status} — ${vendor} bot challenge (${responseDiagnostics(headers)})`, status, vendor),
+  onErrorResponse: ({ status, headers, body }) =>
+    new Error(`HTTP ${status} (${responseDiagnostics(headers)}) — body starts: ${body.slice(0, 200)}`),
+});
+```
+
+`GraphqlRetryPolicy`'s new fields are all off by default, so a plain
+`RetryPolicy` behaves as before. A refusal page is checked BEFORE any status
+retry (Cloudflare serves blocks as 429 and its legacy challenge as 503), and a
+mutation is never re-sent after a transport error. `onEdgeBlocked(ctx)`
+replaces the `EdgeBlockedError` — return a subclass so the direct-first
+fallback still fires; `responseDiagnostics(headers)` renders `server: …;
+cf-ray: …; cf-mitigated: …`. `onErrorResponse(ctx)` claims any 4xx/5xx (after
+retries, the edge check, `onRateLimited` and an auth replay) or a non-GraphQL
+2xx, on `execute()` too, with the RAW body — redact before surfacing it. An
+error response whose body breaks off mid-read is treated as an empty body, not
+a transport failure: its status is the answer.
 
 ### `html` — scraping helpers *(subpath, optional peer)*
 
