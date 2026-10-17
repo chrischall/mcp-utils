@@ -148,3 +148,20 @@ describe('extractNextData ReDoS resistance (fleet-audit#1145)', () => {
     expect(elapsedMs(() => extractNextData(evil))).toBeLessThan(100);
   });
 });
+
+describe('redactValues stays linear (fleet-audit#1398)', () => {
+  it('scrubs 200 KB of near-miss prefixes of several values within budget', async () => {
+    const { redactValues } = await import('./index.js');
+    const values = ['aaaaaaaaab', 'abababababc', '"q"q"q"q"x'];
+    const evil = 'a'.repeat(100_000) + 'ab'.repeat(50_000);
+    const t = performance.now();
+    redactValues(evil, values);
+    expect(performance.now() - t).toBeLessThan(100);
+  });
+
+  it('runs through truncateErrorMessage on a 200 KB body within budget', () => {
+    const t = performance.now();
+    truncateErrorMessage('x-'.repeat(100_000), 500, { values: ['x-x-x-y', 'secretvalue'] });
+    expect(performance.now() - t).toBeLessThan(100);
+  });
+});

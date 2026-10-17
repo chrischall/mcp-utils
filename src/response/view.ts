@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { CallToolResult } from '@modelcontextprotocol/server';
+import { stripMediaUrls } from './media.js';
 
 /**
  * The fleet's response-shape vocabulary (`docs/fleet-conventions.md`,
@@ -179,4 +180,103 @@ function warn(opts: ProjectOptions, why: string): void {
     `[${opts.label}] WARNING: could not project ${opts.context} (${why}); returning the unprojected payload. ` +
       'The upstream shape has probably changed — the projection needs updating.',
   );
+}
+
+// ---------------------------------------------------------------------------
+// View composition — viewArg / viewResponse / createViewKit
+// ---------------------------------------------------------------------------
+//
+// Consolidates the `src/view.ts` every compact-by-default read server grew on
+// top of the primitives above (chrischall/fleet-audit#1348): viator-mcp (the
+// reference — it already took an optional projector), tripadvisor-mcp,
+// eventbrite-mcp and getyourguide-mcp (accessoticketing-mcp and alltrails-mcp
+// carry the same rule inline). Each wrapped `viewParam` in a `viewArg(note)`
+// and answered with `minifiedResult(project ? project(data) :
+// stripMediaUrls(data))` on the compact rung, re-explaining the one rule worth
+// keeping in a 30-line docblock five times over: **a hand-written projection
+// is NOT then media-stripped.** A projection is written WITH knowledge of the
+// API and may deliberately keep an image (viator's `compactProduct` keeps
+// `coverImageUrl`); running a blind subtractive rule over its output lets an
+// un-grounded rule overrule a grounded one (viator #72).
+
+/** A tool's own field projection for its compact rung. */
+export type ViewProjector = (data: unknown) => unknown;
+
+/** Options for {@link viewResponse}. */
+export interface ViewResponseOptions {
+  /** The rungs this tool honours — the same list its {@link viewArg} offers. */
+  views: readonly View[];
+  /**
+   * The tool's own field projection, run on the compact rung INSTEAD of
+   * media stripping (never before it). Omit it and compact strips media URLs
+   * ({@link stripMediaUrls}) and keeps every other field.
+   */
+  project?: ViewProjector;
+}
+
+/**
+ * The `view` parameter a read tool takes: {@link viewParam} over the tool's
+ * rungs, with `note` saying what THIS tool's compact rung keeps. A tool whose
+ * compact rung is a field projection should pass its own note naming the
+ * fields it keeps — a note describing a rung the tool does not have is worse
+ * than a generic one, because the caller acts on it (viator-mcp's shared note
+ * promised "no field projection" on two tools that ran one).
+ */
+export function viewArg(
+  views: readonly View[],
+  note?: string,
+): z.ZodOptional<z.ZodEnum<Record<string, string>>> {
+  return viewParam(views, note !== undefined ? { note } : {});
+}
+
+/**
+ * Answer a read tool in the requested rung.
+ *
+ *  - `compact` (the default, and the fallback for a rung the tool does not
+ *    honour — {@link resolveView}): `project(data)` when the tool has a
+ *    projection, else `stripMediaUrls(data)`; minified.
+ *  - `full`: `data` untouched, minified. The projector never runs.
+ *  - `raw`: `data` untouched, indented ({@link viewResult}).
+ *
+ * Only ever for a READ tool: a write's response is a receipt — an id, a
+ * status — with nothing to strip and everything to keep.
+ */
+export function viewResponse(view: string | undefined, data: unknown, opts: ViewResponseOptions): CallToolResult {
+  const rung = resolveView(view, opts.views);
+  if (rung !== 'compact') return viewResult(rung, data);
+  return minifiedResult(opts.project ? opts.project(data) : stripMediaUrls(data));
+}
+
+/** What {@link createViewKit} returns: the two helpers, bound to one rung list. */
+export interface ViewKit {
+  /** The rungs every tool of this server honours. */
+  readonly views: readonly View[];
+  /** {@link viewArg} over {@link views}; `note` defaults to the kit's own. */
+  viewArg(note?: string): z.ZodOptional<z.ZodEnum<Record<string, string>>>;
+  /** {@link viewResponse} over {@link views}, with an optional projector. */
+  viewResponse(view: string | undefined, data: unknown, project?: ViewProjector): CallToolResult;
+}
+
+/**
+ * Bind {@link viewArg} and {@link viewResponse} to a server's rung list and
+ * default note — the `view.ts` each donor exported, in one line:
+ *
+ * ```ts
+ * export const { viewArg, viewResponse } = createViewKit(['compact', 'full'], {
+ *   note: 'compact strips image URLs; "full" returns the payload untouched.',
+ * });
+ * ```
+ *
+ * The rung list is validated at construction ({@link viewParam}'s rules), so a
+ * server cannot boot advertising a `view` it cannot honour.
+ */
+export function createViewKit(views: readonly View[], opts: { note?: string } = {}): ViewKit {
+  viewParam(views); // validate once, at construction
+  const fixed = [...views];
+  return {
+    views: fixed,
+    viewArg: (note = opts.note) => viewArg(fixed, note),
+    viewResponse: (view, data, project) =>
+      viewResponse(view, data, { views: fixed, ...(project !== undefined ? { project } : {}) }),
+  };
 }

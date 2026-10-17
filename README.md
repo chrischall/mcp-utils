@@ -534,6 +534,30 @@ exists to be read by a person); `minifiedResult` is the same rule with no view
 to hand. Formatting whitespace only — whitespace *inside* a value is content
 and is never touched.
 
+**View composition — `viewArg` / `viewResponse` / `createViewKit`.** The
+`src/view.ts` that viator, tripadvisor, eventbrite and getyourguide each wrote
+over the primitives above (fleet-audit#1348), as one export:
+
+```ts
+import { createViewKit } from '@chrischall/mcp-utils';
+
+export const { viewArg, viewResponse } = createViewKit(['compact', 'full'], {
+  note: 'compact strips image URLs; "full" returns the payload untouched.',
+});
+
+// a tool with no projection: compact media-strips
+return viewResponse(args.view, data);
+// a tool with its own projection: compact runs it INSTEAD of media stripping
+return viewResponse(args.view, data, compactProducts);
+```
+
+`viewResponse(view, data, { views, project? })` and `viewArg(views, note?)` are
+the same two helpers unbound. The rule they encode is the one each donor
+re-explained: **a hand-written projection is NOT then media-stripped** — it
+was written with knowledge of the API and may keep an image on purpose
+(viator's `compactProduct` keeps `coverImageUrl`). `full` returns the data
+untouched (the projector never runs); `raw` stays indented, as `viewResult`.
+
 ### `errors` — helpful errors
 
 `McpToolError` and its subclasses (`SessionNotAuthenticatedError`,
@@ -551,7 +575,15 @@ when welded inside a base64 blob), secret-bearing URL query params (including co
 ids such as `sessionid`/`PHPSESSID`/`JSESSIONID`/`sid`, `x-api-key`-style
 names, and PKCE `code_verifier` / bare `verifier` capabilities), and secret JSON values (including `code_verifier`) — quoted or numeric — plus the values under
 `"cookie"`/`"set-cookie"` JSON keys (names kept); `truncateErrorMessage` applies
-it before truncating, and `errorResult` applies it (without truncating). Every
+it before truncating, and `errorResult` applies it (without truncating).
+**A secret with no shape** — a password, a PIN, an opaque session id — is
+scrubbed by VALUE: `redactValues(text, [password, sessionId], { placeholder?,
+jsonEscaped? = true, minLength? = 1 })` replaces each known value, raw and
+JSON-escaped, longest first, skipping `undefined`/empty ones; or pass them to
+`truncateErrorMessage(text, max, { values })`, which scrubs them first —
+before the shape redactor and before the cut, so not even half a password
+survives at the boundary (skylight's `scrubSecret` / iaqualink's `scrubText`,
+fleet-audit#1398). Every
 pattern is linear in the input (`redos.test.ts` times each against 200 KB
 adversarial runs), and `truncateErrorMessage` hands the redactor at most
 `ERROR_REDACTION_INPUT_MAX` (64 KB) of the body as defence in depth, because

@@ -7,6 +7,10 @@
  *
  * The fetchproxy typed-error hierarchy (`Fetchproxy*Error`) is re-exported, not
  * reimplemented; {@link classifyBridgeError} is a thin discriminator over it.
+ *
+ * Redaction lives here too: {@link redactSecrets} for secret SHAPES, and
+ * {@link redactValues} for known secret VALUES that have no shape (skylight-mcp
+ * `scrubSecret`, iaqualink-mcp `scrub`/`scrubText` — fleet-audit#1398).
  */
 
 // NOTE: the fetchproxy typed-error hierarchy (Fetchproxy*Error) and the
@@ -593,6 +597,82 @@ export function redactSecrets(text: string): string {
  */
 export const ERROR_REDACTION_INPUT_MAX = 64 * 1024;
 
+/** Options for {@link redactValues}. */
+export interface RedactValuesOptions {
+  /** What each occurrence becomes. Defaults to `'[REDACTED]'`, the shape redactor's own marker. */
+  placeholder?: string;
+  /**
+   * Also replace each value's JSON-escaped spelling — how it appears inside a
+   * stringified body (`a"b` is `a\"b` there). Defaults to `true`.
+   */
+  jsonEscaped?: boolean;
+  /**
+   * Skip values shorter than this. Defaults to `1`: only an empty value is
+   * skipped, since an empty needle would splice the placeholder between every
+   * character. Raise it when a value may be short enough to collide with
+   * ordinary text.
+   */
+  minLength?: number;
+}
+
+/**
+ * Replace every occurrence of each KNOWN secret value in `text` — raw and, by
+ * default, JSON-escaped — with `[REDACTED]`.
+ *
+ * {@link redactSecrets} matches secret SHAPES (a `Bearer` header, a JWT, an
+ * `sk-` key). A password, a PIN or an opaque session id has no shape, so the
+ * only way to keep one out of an upstream echo is to scrub it by value. This
+ * consolidates skylight-mcp's `scrubSecret` (`src/tools/calendars.ts`, which
+ * also scrubs the JSON-escaped spelling) and iaqualink-mcp's `scrub` /
+ * `scrubText` (`src/client.ts`, a password plus four session tokens) —
+ * chrischall/fleet-audit#1398.
+ *
+ * - `undefined`, `null` and empty values are skipped, so a caller can pass
+ *   optional fields straight through.
+ * - Values are replaced longest first, so a value that contains another
+ *   leaves no fragment behind.
+ * - A value is matched literally (never as a pattern), by `split`/`join`:
+ *   linear in `text` per value, with no regex to backtrack.
+ *
+ * Run it BEFORE {@link redactSecrets} and before any truncation (or pass
+ * `values` to {@link truncateErrorMessage}, which does both in that order): a
+ * shape rule that rewrites part of a value, or a cut through one, would leave
+ * the rest unmatched.
+ */
+export function redactValues(
+  text: string,
+  values: Iterable<string | null | undefined>,
+  opts: RedactValuesOptions = {},
+): string {
+  const placeholder = opts.placeholder ?? '[REDACTED]';
+  const minLength = Math.max(1, opts.minLength ?? 1);
+  const needles = new Set<string>();
+  for (const value of values) {
+    if (typeof value !== 'string' || value.length < minLength) continue;
+    needles.add(value);
+    if (opts.jsonEscaped !== false) {
+      const escaped = JSON.stringify(value).slice(1, -1);
+      if (escaped !== value && escaped.length >= minLength) needles.add(escaped);
+    }
+  }
+  let out = String(text ?? '');
+  for (const needle of [...needles].sort((a, b) => b.length - a.length)) {
+    if (out.includes(needle)) out = out.split(needle).join(placeholder);
+  }
+  return out;
+}
+
+/** Options for {@link truncateErrorMessage}. */
+export interface TruncateErrorMessageOptions {
+  /**
+   * Known secret values to scrub by value ({@link redactValues}) before the
+   * shape redactor runs — a password, an opaque session token.
+   */
+  values?: Iterable<string | null | undefined>;
+  /** The placeholder for {@link values}. Defaults to `'[REDACTED]'`. */
+  placeholder?: string;
+}
+
 /**
  * Redact secrets, then cap an (upstream) error string at `max` characters,
  * appending a `… [truncated]` marker when clipped.
@@ -602,11 +682,25 @@ export const ERROR_REDACTION_INPUT_MAX = 64 * 1024;
  * go through this before reaching a tool result. The redactor is only ever
  * handed the first {@link ERROR_REDACTION_INPUT_MAX} characters (or `max`,
  * whichever is larger), so a pathological body cannot pin the event loop.
+ *
+ * `opts.values` adds known secret values ({@link redactValues}), scrubbed
+ * first — before the shape redactor, and before the cut — so a password the
+ * caller holds never survives in the message, not even half of one at the
+ * truncation boundary (fleet-audit#1398).
  */
-export function truncateErrorMessage(text: string, max: number = DEFAULT_ERROR_MESSAGE_MAX): string {
+export function truncateErrorMessage(
+  text: string,
+  max: number = DEFAULT_ERROR_MESSAGE_MAX,
+  opts: TruncateErrorMessageOptions = {},
+): string {
   const str = text === null || text === undefined ? '' : String(text);
   const cap = Math.max(ERROR_REDACTION_INPUT_MAX, max);
-  const redacted = redactSecrets(str.length > cap ? str.slice(0, cap) : str);
+  const capped = str.length > cap ? str.slice(0, cap) : str;
+  const scrubbed =
+    opts.values !== undefined
+      ? redactValues(capped, opts.values, opts.placeholder !== undefined ? { placeholder: opts.placeholder } : {})
+      : capped;
+  const redacted = redactSecrets(scrubbed);
   if (redacted.length <= max) return redacted;
   return `${redacted.slice(0, max)}… [truncated]`;
 }
