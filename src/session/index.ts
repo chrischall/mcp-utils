@@ -23,6 +23,10 @@
  *     reactive 401-replay, and a single-flight semaphore so concurrent callers
  *     coalesce into ONE exchange. Used by skylight/canvas/creditkarma/honeybook/zola.
  *
+ *     {@link createCapturedTokenManager} builds one over a token CAPTURED from
+ *     the browser (no refresh grant: re-capture instead) — microsoft-teams-mcp
+ *     `chatsvc.ts` / office-outlook-mcp `client.ts`, fleet-audit#1305.
+ *
  *  5. {@link CookieSessionManager} — the cookie-session analog of TokenManager:
  *     a single-flight login + reactive expiry-replay (with heuristic, not just
  *     status-code, expiry detection) + clear-on-settle so a rejected login never
@@ -48,7 +52,7 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { textResult } from '../response/index.js';
 import { readEnvVar } from '../config/index.js';
 import { McpToolError } from '../errors/index.js';
-import { ApiError, EdgeBlockedError, RateLimitedError, RequestTimeoutError } from '../http/index.js';
+import { ApiError, EdgeBlockedError, RateLimitedError, RequestTimeoutError, decodeJwtExp } from '../http/index.js';
 import { responseEdgeBlock } from '../internal/edge-block.js';
 
 export {
@@ -1349,7 +1353,14 @@ function isTransientFailure(err: unknown): boolean {
 }
 
 /** Whether a parsed record has the shape of {@link BearerTokens}. */
-function isBearerTokens(raw: unknown): raw is BearerTokens {
+/**
+ * Whether `raw` is a usable {@link BearerTokens} record: a non-empty
+ * `accessToken`, a finite numeric `expiresAt`, and a `refreshToken` that is
+ * absent or a string. The `validate` for a token cache —
+ * `createFileStatePersistence({ validate: (raw) => (isBearerTokens(raw) ? raw : null) })`
+ * — instead of a per-repo `isToken`.
+ */
+export function isBearerTokens(raw: unknown): raw is BearerTokens {
   if (raw === null || typeof raw !== 'object') return false;
   const t = raw as Partial<BearerTokens>;
   if (typeof t.accessToken !== 'string' || t.accessToken === '') return false;
@@ -1695,6 +1706,155 @@ export class TokenManager {
  * `cookieHeader` is structurally required, `csrfToken` is the common optional
  * second field (Django/Rails CSRF rotation).
  */
+// ---------------------------------------------------------------------------
+// createCapturedTokenManager — a TokenManager over a browser-captured token
+// ---------------------------------------------------------------------------
+
+/**
+ * The refresh token a captured credential carries. A token captured from the
+ * browser (MSAL's hidden-iframe flow, say) comes with no refresh grant we can
+ * drive, so "refreshing" means capturing a new one — and {@link TokenManager}
+ * only calls `refresh` when a refresh token is present. This stands in for
+ * it; its value is never sent anywhere.
+ */
+export const RECAPTURE_SENTINEL = 'fetchproxy:recapture';
+
+/**
+ * Lifetime given to a captured token whose `exp` cannot be read (a
+ * hand-supplied opaque token): 10 minutes. Deliberately short — being wrong
+ * in this direction costs one extra 401-and-replay; the other way, every call
+ * fails until a restart.
+ */
+export const UNKNOWN_CAPTURED_TOKEN_TTL_MS = 10 * 60 * 1000;
+
+/** Options for {@link capturedBearerTokens}. */
+export interface CapturedBearerTokensOptions {
+  /** Lifetime when the token is not a JWT with `exp`. Defaults to {@link UNKNOWN_CAPTURED_TOKEN_TTL_MS}. */
+  unknownTtlMs?: number;
+  /** Injectable clock. */
+  now?: () => number;
+}
+
+/**
+ * Wrap a bare access token as {@link BearerTokens}: expiring at its JWT `exp`
+ * (or `now + unknownTtlMs` when it has none), with {@link RECAPTURE_SENTINEL}
+ * as the refresh token. teams/outlook's `toBearerTokens`.
+ */
+export function capturedBearerTokens(accessToken: string, opts: CapturedBearerTokensOptions = {}): BearerTokens {
+  const now = opts.now ?? Date.now;
+  let expiresAt: number;
+  try {
+    expiresAt = decodeJwtExp(accessToken) * 1000; // seconds; a non-JWT throws
+  } catch {
+    expiresAt = now() + (opts.unknownTtlMs ?? UNKNOWN_CAPTURED_TOKEN_TTL_MS);
+  }
+  return { accessToken, refreshToken: RECAPTURE_SENTINEL, expiresAt };
+}
+
+/** Options for {@link createCapturedTokenManager}. */
+export interface CapturedTokenManagerOptions {
+  /** Capture a fresh token from the browser (`captureBearerHeader`, lazily imported). */
+  capture: () => Promise<string>;
+  /**
+   * A token the operator supplied directly (`<SVC>_ACCESS_TOKEN`). When set it
+   * is the credential: `capture` is never called, the cache is never read or
+   * written (caching it would only copy a credential onto disk), and a 401
+   * throws {@link onDirectRejected} instead of re-capturing — re-capturing
+   * would silently swap the operator's chosen credential for whichever
+   * account a browser tab happens to be signed into, and on a machine with no
+   * bridge just hang for the capture window on every 401.
+   *
+   * `withAuth` then hands the replayed 401 back, so the caller's status check
+   * maps it (teams' `#checkStatus` throws its `TEAMS_ACCESS_TOKEN was
+   * rejected` error there).
+   */
+  direct?: string;
+  /**
+   * What the "refresh" of a {@link direct} token throws — name the variable
+   * and the fix (`McpToolError('TEAMS_ACCESS_TOKEN was rejected by Teams
+   * (401).', { status: 401, kind: 'credential_rejected', hint })`). With the
+   * default {@link TokenManagerOptions.isRefreshRevoked} it is read as a dead
+   * credential, so the manager re-serves the direct token rather than
+   * surfacing it; a caller that overrides `isRefreshRevoked` would see it
+   * thrown. Defaults to a generic `McpToolError` of that shape.
+   */
+  onDirectRejected?: () => Error;
+  /**
+   * Where a CAPTURED token is cached between runs, or `null`/omitted for
+   * none. Ignored when {@link direct} is set. A cold start inside the
+   * token's lifetime then proceeds with no browser present.
+   */
+  persistence?: StatePersistence<BearerTokens> | null;
+  /**
+   * Told about a failed cache write; the call proceeds on the in-memory token
+   * either way (it is re-capturable). Report it on stderr — a read-only data
+   * dir otherwise looks exactly like a server that never caches.
+   */
+  onPersistError?: (err: unknown) => void;
+  /** See {@link capturedBearerTokens}. */
+  unknownTtlMs?: number;
+  /** See {@link TokenManagerOptions.skewMs}. */
+  skewMs?: number;
+  /** Injectable clock. */
+  now?: () => number;
+}
+
+/**
+ * A {@link TokenManager} over a bearer token captured from the user's browser
+ * — the `#tokenManager()` microsoft-teams-mcp (`chatsvc.ts`, copied into
+ * `sharepoint.ts` and `substrate.ts`) and office-outlook-mcp (`client.ts`)
+ * each build (chrischall/fleet-audit#1305):
+ *
+ *  - the first `getAccessToken()` / `withAuth()` captures (single-flight), or
+ *    loads a still-valid captured token from {@link CapturedTokenManagerOptions.persistence};
+ *  - "refresh" — proactive inside the skew window, or after a 401 — is a
+ *    re-capture, replayed once by `withAuth`;
+ *  - a {@link CapturedTokenManagerOptions.direct} token is used as is and
+ *    never re-captured: a 401 on it comes back from `withAuth` for the
+ *    caller's status check to map.
+ *
+ * ```ts
+ * const tokens = createCapturedTokenManager({
+ *   capture: async () => (await import('./auth-fetchproxy.js')).captureToken(),
+ *   direct: readEnvVar('TEAMS_ACCESS_TOKEN'),
+ *   onDirectRejected: () => new McpToolError('TEAMS_ACCESS_TOKEN was rejected by Teams (401).', { status: 401, kind: 'credential_rejected' }),
+ *   persistence: createTokenCache(env),
+ *   onPersistError: reportCacheWriteFailure,
+ * });
+ * ```
+ */
+export function createCapturedTokenManager(opts: CapturedTokenManagerOptions): TokenManager {
+  const { direct } = opts;
+  const wrap = (token: string): BearerTokens =>
+    capturedBearerTokens(token, {
+      ...(opts.unknownTtlMs !== undefined ? { unknownTtlMs: opts.unknownTtlMs } : {}),
+      ...(opts.now !== undefined ? { now: opts.now } : {}),
+    });
+  const persistence = direct === undefined ? (opts.persistence ?? undefined) : undefined;
+  return new TokenManager({
+    initial: async () => wrap(direct ?? (await opts.capture())),
+    refresh: async () => {
+      if (direct !== undefined) {
+        throw opts.onDirectRejected
+          ? opts.onDirectRejected()
+          : new McpToolError('The directly supplied access token was rejected (401).', {
+              status: 401,
+              kind: 'credential_rejected',
+              hint: 'A directly supplied token cannot be refreshed automatically. Replace it with a current one, or unset it to capture from a signed-in browser tab instead.',
+            });
+      }
+      return wrap(await opts.capture());
+    },
+    ...(persistence !== undefined ? { persistence } : {}),
+    // Never fatal: the token is in hand and re-capturable.
+    onPersistError: (err) => {
+      opts.onPersistError?.(err);
+    },
+    ...(opts.skewMs !== undefined ? { skewMs: opts.skewMs } : {}),
+    ...(opts.now !== undefined ? { now: opts.now } : {}),
+  });
+}
+
 export interface CookieSession {
   /** The `Cookie:` request header value for authenticated calls. */
   cookieHeader: string;

@@ -21,6 +21,17 @@
  *    the required `capabilities` from the declared bootstrap so callers can't
  *    forget to unlock the verb they declared.
  *
+ *  - {@link captureBearerHeader} — the "capture a bearer off the signed-in
+ *    tab, then talk to the API directly" bootstrap: microsoft-teams-mcp
+ *    `auth-fetchproxy.ts` + `capture-window.ts` (reference; also
+ *    `sharepoint-auth.ts`, `substrate-auth.ts`) and office-outlook-mcp
+ *    `auth-fetchproxy.ts` (several hosts raced under one window) —
+ *    chrischall/fleet-audit#1305.
+ *  - {@link createLazyTransport} — build-once, start-once (single-flight,
+ *    cleared on rejection): tripadvisor-mcp `web/client.ts` and
+ *    alltrails-mcp `client.ts` `bridge()` / `bridgeReady()` —
+ *    chrischall/fleet-audit#1342.
+ *
  * The adapter shape is identical across 12+ fetchproxy MCPs; collapsing it here
  * keeps the per-row / concurrency / deadline helpers as re-exports rather than
  * re-rolled code.
@@ -1694,3 +1705,256 @@ export {
   type ReadTransportModeOptions,
   type TransportMode,
 } from './fallback.js';
+
+// ---------------------------------------------------------------------------
+// createLazyTransport — build once, start once (fleet-audit#1342)
+// ---------------------------------------------------------------------------
+
+/** What {@link createLazyTransport} returns. */
+export interface LazyTransport<T extends { start(): Promise<void> }> {
+  /**
+   * The transport, built on first use (construction is cheap — the bridge
+   * binds nothing until its first verb). NOT started: for a healthcheck that
+   * reports bridge state without touching it.
+   */
+  transport(): T;
+  /**
+   * The transport, started. `start()` runs once: concurrent callers share the
+   * one in-flight start, and a REJECTED start is forgotten so the next call
+   * retries it instead of failing forever (an unwritable identity dir that
+   * the user then fixes).
+   */
+  ready(): Promise<T>;
+}
+
+/**
+ * Build a transport lazily and start it exactly once — the `bridge()` /
+ * `bridgeReady()` pair tripadvisor-mcp (`src/web/client.ts`) and alltrails-mcp
+ * (`src/client.ts`) carry byte-for-byte (chrischall/fleet-audit#1342).
+ *
+ * {@link FetchproxyTransport.start} loads the identity keypair and must
+ * precede the first verb (skipping it makes that verb throw "ensureConnected
+ * called before listen()", which reads like a pairing problem), but it is not
+ * itself single-flighted — so a client that starts the bridge per request,
+ * rather than once at boot, needs this:
+ *
+ * ```ts
+ * class WebClient {
+ *   private readonly lazy = createLazyTransport(() => this.injected.transport ?? createSiteTransport());
+ *   bridge() { return this.lazy.transport(); }
+ *   bridgeReady() { return this.lazy.ready(); }
+ * }
+ * ```
+ *
+ * Any object with `start(): Promise<void>` works, so a test can pass a stub.
+ */
+export function createLazyTransport<T extends { start(): Promise<void> }>(factory: () => T): LazyTransport<T> {
+  let built: T | undefined;
+  let starting: Promise<void> | undefined;
+  const transport = (): T => {
+    if (built === undefined) built = factory();
+    return built;
+  };
+  return {
+    transport,
+    async ready() {
+      const t = transport();
+      if (starting === undefined) {
+        starting = t.start().catch((err: unknown) => {
+          starting = undefined;
+          throw err;
+        });
+      }
+      await starting;
+      return t;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// captureBearerHeader — capture a bearer off the signed-in tab (fleet-audit#1305)
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalise a captured header to a bare token: drop a leading `Bearer `
+ * (any case, any run of spaces) and trim.
+ */
+export function stripBearer(raw: string): string {
+  const m = /^\s*Bearer\s+(.+)$/i.exec(raw);
+  return (m?.[1] ?? raw).trim();
+}
+
+/**
+ * Settle per-host capture attempts under ONE overall deadline: resolve with
+ * the first that SUCCEEDS, reject with every failure joined (`; `) when all
+ * fail, or reject with a timeout once `windowMs` has passed.
+ *
+ * `Promise.any` alone is not enough: the bridge serialises the hosts behind
+ * its single connection, so the wait was the SUM of the windows, not the max —
+ * measured live by office-outlook-mcp at 14.4 s for a 5 s window, which at the
+ * 30 s default lands past a client's 60 s request timeout. A losing rejection
+ * is observed, so it never surfaces as an unhandled rejection.
+ */
+export async function raceCaptures(attempts: readonly Promise<string>[], windowMs: number): Promise<string> {
+  for (const a of attempts) a.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(`timed out after ${Math.round(windowMs / 1000)}s waiting for the page to make a request we could read`),
+        ),
+      windowMs,
+    );
+  });
+  try {
+    return await Promise.race([
+      Promise.any(attempts).catch((e: unknown) => {
+        throw new Error(
+          e instanceof AggregateError ? e.errors.map((x) => messageOf(x)).join('; ') : messageOf(e),
+        );
+      }),
+      expiry,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The part of a transport {@link captureBearerHeader} uses (and a test stubs). */
+export interface CaptureTransport {
+  start(): Promise<void>;
+  close(): Promise<void>;
+  readonly server: Pick<FetchproxyServer, 'captureRequestHeader'>;
+}
+
+/** Options for {@link captureBearerHeader}. */
+export interface CaptureBearerHeaderOptions {
+  /**
+   * The request(s) to capture the header from: `{ host, path, headerName }`.
+   * One is awaited directly; several are raced ({@link raceCaptures}) under
+   * one overall window — for a site served from more than one host
+   * (`outlook.cloud.microsoft` / `outlook.office.com`), where the tab is on
+   * one and the other never answers.
+   */
+  captures: readonly CaptureHeaderDecl[];
+  /**
+   * The extension's trust boundary. Defaults to the capture hosts. Pass a
+   * parent domain when the host varies per tenant (`sharepoint.com`).
+   */
+  domains?: readonly string[];
+  /**
+   * How long the capture may wait for the page to make a matching request,
+   * in ms — passed as the verb's `timeoutMs`, and declared as the
+   * transport's `captureWindowMs` so the bridge deadline
+   * ({@link deadlineForCaptureWindow}: window + 15 s, never under 30 s)
+   * outlasts it and the extension's own "no request arrived" answer is the
+   * one the caller sees. Read it per capture (e.g. `readTtlMsEnv`), not at
+   * import, so a host-supplied env is honoured.
+   */
+  windowMs: number;
+  /** The fetchproxy concentrator port (`readPortEnv('<SVC>_WS_PORT', 37149)`). */
+  port?: number;
+  /** This MCP's name and version, as `createFetchproxyTransport` takes them. */
+  serverName: string;
+  version: string;
+  /**
+   * Shortest plausible token, after normalising. Defaults to 100 — real
+   * bearer JWTs are several KB; this only guards against an empty or echoed
+   * header, not a wrong-audience token. resy's API key is shorter (20).
+   */
+  minLength?: number;
+  /** Turn the raw header into the token. Defaults to {@link stripBearer}. */
+  normalise?: (raw: string) => string;
+  /** What is being captured, for the error: `'a Teams token'`. */
+  what: string;
+  /**
+   * What the user should do, appended to the error — name the tab to open and
+   * the action that makes the page send the request (an idle tab sends none):
+   * `'Open a signed-in teams.cloud.microsoft tab and click into any chat, then retry.'`
+   */
+  guidance: string;
+  /** Further `createFetchproxyTransport` options (`debugEnvVar`, `env`, `createServer`, …). */
+  transportOptions?: Partial<CreateFetchproxyTransportOptions>;
+  /**
+   * Test seam: build the transport. Defaults to
+   * {@link createFetchproxyTransport}. A consumer's test passes a stub here
+   * instead of `vi.mock`-ing a module it no longer calls directly.
+   */
+  createTransport?: (opts: CreateFetchproxyTransportOptions) => CaptureTransport;
+}
+
+/**
+ * Capture a bearer token from the user's signed-in browser tab through the
+ * fetchproxy bridge, ONCE: build a transport declaring only the header
+ * capture, `start()` it, snapshot the header off the next matching request
+ * the page makes, and `close()` it again whatever happened. The bridge is
+ * touched once per token (Teams: ~23 h), never on the hot path — every API
+ * call after that is a plain server-side fetch.
+ *
+ * Returns the token (`normalise`d — by default with any `Bearer ` prefix
+ * dropped). Throws a plain `Error` reading
+ * `could not capture <what> from the browser (<detail>). <guidance>` when the
+ * capture fails, returns no header, or returns one shorter than `minLength`
+ * (the detail names the host). A `start()` failure is rethrown as is — it is
+ * not a capture problem. A `close()` failure is swallowed: the token, or the
+ * original failure, is what matters.
+ *
+ * Consolidates microsoft-teams-mcp's three captures (`auth-fetchproxy.ts`,
+ * `sharepoint-auth.ts`, `substrate-auth.ts`) and office-outlook-mcp's
+ * (`auth-fetchproxy.ts`) — chrischall/fleet-audit#1305. Pair it with
+ * `createCapturedTokenManager` (`@chrischall/mcp-utils/session`) for the
+ * cache / re-capture-on-401 half. Import the module that calls this LAZILY
+ * from the client, so a server run with a directly supplied token never loads
+ * the optional `@fetchproxy/server` peer.
+ */
+export async function captureBearerHeader(opts: CaptureBearerHeaderOptions): Promise<string> {
+  if (opts.captures.length === 0) throw new Error('captureBearerHeader: at least one capture declaration is required.');
+  const minLength = opts.minLength ?? 100;
+  const normalise = opts.normalise ?? stripBearer;
+  const domains = opts.domains ?? [...new Set(opts.captures.map((c) => c.host))];
+  const build = opts.createTransport ?? ((o: CreateFetchproxyTransportOptions) => createFetchproxyTransport<CaptureTransport>(o));
+  const transport = build({
+    ...opts.transportOptions,
+    ...createBootstrapOpts({ domains: [...domains], bootstrap: { captureHeaders: opts.captures.map((c) => ({ ...c })) } }),
+    ...(opts.port !== undefined ? { port: opts.port } : {}),
+    // Both: the explicit deadline for every bridge version, and the declared
+    // window so the transport's own derivation agrees with it.
+    fetchTimeoutMs: deadlineForCaptureWindow(undefined, opts.windowMs) ?? SERVER_DEFAULT_FETCH_TIMEOUT_MS,
+    captureWindowMs: opts.windowMs,
+    serverName: opts.serverName,
+    version: opts.version,
+  });
+
+  const one = async (decl: CaptureHeaderDecl): Promise<string> => {
+    const raw = await transport.server.captureRequestHeader({ ...decl, timeoutMs: opts.windowMs });
+    if (typeof raw !== 'string') throw new Error(`${decl.host}: capture returned no header`);
+    const token = normalise(raw);
+    if (token.length < minLength) {
+      throw new Error(
+        `${decl.host}: ${decl.headerName} header was present but too short to be a token (${token.length} chars)`,
+      );
+    }
+    return token;
+  };
+
+  try {
+    // `start()` loads the identity keypair. It does not bind the port or dial,
+    // but skipping it makes the first verb throw "ensureConnected called
+    // before listen()", which reads exactly like a pairing problem.
+    await transport.start();
+    try {
+      return opts.captures.length === 1
+        ? await one(opts.captures[0]!)
+        : await raceCaptures(opts.captures.map(one), opts.windowMs);
+    } catch (e) {
+      throw new Error(`could not capture ${opts.what} from the browser (${messageOf(e)}). ${opts.guidance}`);
+    }
+  } finally {
+    try {
+      await transport.close();
+    } catch {
+      /* the token, or the original failure, is what matters */
+    }
+  }
+}
