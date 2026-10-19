@@ -51,7 +51,18 @@ export * from './confirm-env.js';
 export * from './confirm-spent-file.js';
 export * from './confirm-write.js';
 export * from './merge-write.js';
+export {
+  createPendingCallStore,
+  processPendingCalls,
+  type ConfirmToolOptions,
+  type PendingCall,
+  type PendingCallStore,
+  type PendingCallStoreOptions,
+} from './confirm-pending.js';
+export * from './confirm-replay.js';
+export * from './write-batch.js';
 import { withCallSignal } from '../cancel/index.js';
+import { rememberToolHandler, withToolCall } from './confirm-pending.js';
 import { withCallerCapabilities } from '../caller/index.js';
 import type { CallerCapabilities } from '../caller/index.js';
 
@@ -262,8 +273,8 @@ export function surfaceToolHints(server: McpServer): void {
     name: unknown,
     config: unknown,
     cb: (...args: unknown[]) => CallToolResult | Promise<CallToolResult>,
-  ): unknown =>
-    register(name, config, (...args: unknown[]) =>
+  ): unknown => {
+    const wrapped = (...args: unknown[]) =>
       // THE CALLER'S CANCELLATION, made ambient for the whole handler
       // (`cancel/index.ts`). The SDK delivers it and the fleet ignored it:
       // measured against @modelcontextprotocol/server 2.0.0, a cancelled
@@ -286,18 +297,29 @@ export function surfaceToolHints(server: McpServer): void {
           // can be shown a prompt returns one the SDK then refuses to deliver,
           // and that refusal reaches the caller as an unexplained protocol
           // error it had no chance to catch.
-          withCallerCapabilities(declaredCapabilitiesFrom(server), () => {
-            let result: CallToolResult | Promise<CallToolResult>;
-            try {
-              result = cb(...args);
-            } catch (err) {
-              return hintResultOrRethrow(err);
-            }
-            return result instanceof Promise ? result.catch(hintResultOrRethrow) : result;
-          }),
+          withCallerCapabilities(declaredCapabilitiesFrom(server), () =>
+            // THE CALL ITSELF, made ambient for a confirm gate inside the
+            // handler (`confirm-pending.ts`): on a server with a confirm tool,
+            // phase 1 keeps these arguments so phase 2 can be the token alone.
+            // The SDK passes `(args, ctx)` to a tool with an input schema and
+            // `(ctx)` to one without; only the former has arguments to keep.
+            withToolCall({ server, tool: String(name), args: args.length >= 2 ? args[0] : undefined }, () => {
+              let result: CallToolResult | Promise<CallToolResult>;
+              try {
+                result = cb(...args);
+              } catch (err) {
+                return hintResultOrRethrow(err);
+              }
+              return result instanceof Promise ? result.catch(hintResultOrRethrow) : result;
+            }),
+          ),
         mcpRequestFrom(args),
-      ),
-    );
+      );
+    // Kept per server so a confirm tool can replay this handler — through this
+    // same wrapper, so the replay gets the hints, cancellation and capture too.
+    rememberToolHandler(server, String(name), wrapped);
+    return register(name, config, wrapped);
+  };
 }
 
 /**

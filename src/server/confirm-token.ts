@@ -40,6 +40,7 @@ import { callerAcceptsFormElicitation } from '../caller/index.js';
 import { textResult } from '../response/index.js';
 import { canonicalJson } from './canonical.js';
 import { requireConfirmation, type RequireConfirmationOptions } from './confirmation.js';
+import { recordPendingCall } from './confirm-pending.js';
 
 /** Why a phase-2 token was refused. `DRAFT_CHANGED` covers any target, not only drafts. */
 export type ConfirmTokenError = 'DRAFT_CHANGED' | 'TOKEN_EXPIRED' | 'TOKEN_REUSED' | 'TOKEN_INVALID';
@@ -224,6 +225,14 @@ export const CONFIRM_TOKEN_INSTRUCTION =
   'Show this preview to the user verbatim and proceed only after they explicitly approve in chat. '
   + 'Then call again with confirmToken.';
 
+/**
+ * Appended to phase 1's instruction on a server with a confirm tool
+ * (`registerConfirmTool`): the token-only way to finish.
+ */
+export function confirmToolInstruction(confirmTool: string): string {
+  return `To confirm without repeating the arguments, call ${confirmTool} with only confirmToken.`;
+}
+
 /** The `confirmToken` input a gated tool adds to its schema. */
 export const confirmTokenParam = z.string().optional().describe(
   'ONLY for the two-step confirmation fallback (a client without MCP elicitation). The confirmToken from this same '
@@ -321,13 +330,19 @@ async function tokenConfirmation(action: string, fb: ConfirmTokenFallback): Prom
   };
   const phaseOne = () => {
     const { token, expiresAt } = issueConfirmToken(fb.key, binding, { ttlSeconds: fb.ttlSeconds });
+    const instruction = fb.instruction ?? CONFIRM_TOKEN_INSTRUCTION;
+    // On a server with a confirm tool, keep this call's arguments so phase 2
+    // can be the token alone (`confirm-pending.ts`). Otherwise unchanged.
+    const confirmTool = recordPendingCall(token, Date.parse(expiresAt));
     return {
       action,
       preview: subject.preview,
       confirmToken: token,
       expiresAt,
       ttlSeconds: ttlOf(fb.ttlSeconds),
-      instruction: fb.instruction ?? CONFIRM_TOKEN_INSTRUCTION,
+      ...(confirmTool === undefined
+        ? { instruction }
+        : { confirmTool, instruction: `${instruction} ${confirmToolInstruction(confirmTool)}` }),
     };
   };
   if (!fb.confirmToken) {

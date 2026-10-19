@@ -20,10 +20,12 @@ import {
   verifyConfirmToken,
 } from './confirm-token.js';
 import { CONFIRM_FLOW_SENTENCE, CONFIRM_INJECTION_RULE } from './confirm-write.js';
+import { CONFIRM_TOOL_DESCRIPTION, PENDING_NOT_FOUND_NOTE } from './confirm-replay.js';
+import { confirmToolInstruction } from './confirm-token.js';
 
 const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
 const DOC = read('../../docs/CONFIRM-TOKEN.md');
-const SOURCES = ['./confirm-token.ts', './confirm-env.ts', './confirm-write.ts', './confirmation.ts', './confirm-spent-file.ts']
+const SOURCES = ['./confirm-token.ts', './confirm-env.ts', './confirm-write.ts', './confirmation.ts', './confirm-spent-file.ts', './confirm-replay.ts', './write-batch.ts']
   .map(read)
   .join('\n');
 
@@ -107,6 +109,9 @@ describe('docs/CONFIRM-TOKEN.md matches the implementation', () => {
       CONFIRM_TOKEN_AUTO_INSTRUCTION,
       CONFIRM_FLOW_SENTENCE,
       CONFIRM_INJECTION_RULE,
+      CONFIRM_TOOL_DESCRIPTION,
+      PENDING_NOT_FOUND_NOTE,
+      confirmToolInstruction('<prefix>_confirm'),
     ]) {
       expect(text).toBeTruthy();
       expect(DOC).toContain(text);
