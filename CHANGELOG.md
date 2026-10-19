@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.2.0](https://github.com/chrischall/mcp-utils/compare/v3.1.0...v3.2.0) (2026-10-19)
+
+
+### Features
+
+* **server:** no op cap on registerBatchTool by default; set one with maxOps or MCP_BATCH_MAX_OPS ([#387](https://github.com/chrischall/mcp-utils/issues/387)) ([6351a3b](https://github.com/chrischall/mcp-utils/commit/6351a3b69acd30bf347474be5ed2661ca5856985))
+* **server:** token-only confirmation (registerConfirmTool) and batched writes (registerBatchTool) ([#386](https://github.com/chrischall/mcp-utils/issues/386)) ([7ba76a1](https://github.com/chrischall/mcp-utils/commit/7ba76a1f8e0777f3358606167fae33e75b0f1ed2))
+
+
+### Documentation
+
+* **skill:** scaffold allowScripts as a name-only deny, not a pinned approval ([#384](https://github.com/chrischall/mcp-utils/issues/384)) ([5a3c9e1](https://github.com/chrischall/mcp-utils/commit/5a3c9e186c639f6bff89eb3469f481ee3d77310e))
+
 ## [3.1.0](https://github.com/chrischall/mcp-utils/compare/v3.0.3...v3.1.0) (2026-10-17)
 
 
