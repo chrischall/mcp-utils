@@ -60,6 +60,7 @@ export {
   type PendingCallStoreOptions,
 } from './confirm-pending.js';
 export * from './confirm-replay.js';
+export * from './write-batch.js';
 import { withCallSignal } from '../cancel/index.js';
 import { rememberToolHandler, withToolCall } from './confirm-pending.js';
 import { withCallerCapabilities } from '../caller/index.js';
