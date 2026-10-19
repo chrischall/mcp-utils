@@ -572,5 +572,6 @@ describe the gate; no side effects) and `execute` — under ONE gate:
 }
 ```
 
-`partial` and `failed` are `isError: true`. A batch is confirmable through the
+`partial` and `failed` are `isError: true`. A batch has no op cap unless the
+server sets one (`maxOps`, or the operator's environment — see the README). A batch is confirmable through the
 confirm tool of §13 like any other gated write.

@@ -431,7 +431,10 @@ Every op is validated before anything is previewed; ops without refs are
 planned and bound by their gates, ops with refs by their arguments (shown as
 `<expense_id from op 0>`) and planned when they run. One gate covers the list,
 ops run in order, and the batch stops at the first failure — no rollback; the
-result names what was applied, what failed and what never ran. Spec:
+result names what was applied, what failed and what never ran. There is no cap
+on the number of ops unless one is set: `maxOps` on `registerBatchTool`, or
+`MCP_BATCH_MAX_OPS` (a positive whole number) for an operator who cannot change
+the code; the option wins over the variable. Spec:
 [`docs/CONFIRM-TOKEN.md` §14](docs/CONFIRM-TOKEN.md#14-batch).
 
 #### Full-replace updates: `prepareMergedUpdate`

@@ -46,6 +46,7 @@
 import type { CallToolResult, McpServer, ServerContext } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { currentCallSignal } from '../cancel/index.js';
+import { readEnvVar, type EnvSource } from '../config/index.js';
 import { messageOf, redactSecrets } from '../errors/index.js';
 import { textResult } from '../response/index.js';
 import { confirmTokenParam } from './confirm-token.js';
@@ -139,10 +140,35 @@ export function registerWrite<Schema extends z.ZodObject, State, Result>(
 export interface BatchToolOptions {
   /** `<prefix>_batch` by fleet convention. */
   name: string;
-  /** Most ops in one batch. Default 10. */
+  /**
+   * Most ops in one batch. Default: `MCP_BATCH_MAX_OPS` when the operator set
+   * it, else no cap — one approval covers the whole list either way, and every
+   * op is in its preview.
+   */
   maxOps?: number;
+  /** Environment to read `MCP_BATCH_MAX_OPS` from; default `process.env`. */
+  env?: EnvSource;
   /** Prepended to the generated description (which lists the batchable writes). */
   description?: string;
+}
+
+const warnedMaxOps = new Set<string>();
+
+/**
+ * `MCP_BATCH_MAX_OPS`: a positive whole number caps every batch tool in the
+ * process; absent means no cap. An unparseable value warns once on stderr and
+ * leaves the default (no cap) — it cannot widen anything, since uncapped IS
+ * the default.
+ */
+function maxOpsFromEnv(env: EnvSource): number | undefined {
+  const raw = readEnvVar('MCP_BATCH_MAX_OPS', { env })?.trim();
+  if (!raw) return undefined;
+  if (/^[1-9]\d*$/.test(raw)) return Number(raw);
+  if (!warnedMaxOps.has(raw)) {
+    warnedMaxOps.add(raw);
+    process.stderr.write(`MCP_BATCH_MAX_OPS="${raw}" is not a positive whole number; batches are not capped.\n`);
+  }
+  return undefined;
 }
 
 const REF = /^(\d+)\.([A-Za-z_][A-Za-z0-9_]*)$/;
@@ -243,7 +269,10 @@ function opBinding(op: PreparedOp, gate: WriteGateFields | undefined): Record<st
  * it AFTER those writes — its description lists them.
  */
 export function registerBatchTool(server: McpServer, options: BatchToolOptions): void {
-  const maxOps = options.maxOps ?? 10;
+  if (options.maxOps !== undefined && !(Number.isInteger(options.maxOps) && options.maxOps > 0)) {
+    throw new RangeError(`registerBatchTool: maxOps must be a positive whole number (got ${options.maxOps}).`);
+  }
+  const maxOps = options.maxOps ?? maxOpsFromEnv(options.env ?? process.env);
   const registry = writes.get(server) ?? new Map<string, AnyWrite>();
   writes.set(server, registry);
 
@@ -256,7 +285,7 @@ export function registerBatchTool(server: McpServer, options: BatchToolOptions):
 
   const description =
     `${options.description ? `${options.description} ` : ''}`
-    + `Run up to ${maxOps} writes with ONE preview and ONE approval, in order, stopping at the first failure (no rollback: `
+    + `Run ${maxOps === undefined ? 'several' : `up to ${maxOps}`} writes with ONE preview and ONE approval, in order, stopping at the first failure (no rollback: `
     + 'the result says which ops were applied). Each op is {tool, args, refs?}; args are exactly what that tool takes '
     + '(without confirmToken). refs feeds an earlier op\'s output into an argument, e.g. '
     + '{"tool": "…", "args": {…}, "refs": {"expense_id": "0.expense_id"}} takes expense_id from op 0. '
@@ -280,7 +309,7 @@ export function registerBatchTool(server: McpServer, options: BatchToolOptions):
             }),
           )
           .min(1)
-          .max(maxOps),
+          .max(maxOps ?? Number.MAX_SAFE_INTEGER),
         confirmToken: confirmTokenParam,
       }),
     },

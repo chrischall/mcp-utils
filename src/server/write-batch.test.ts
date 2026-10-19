@@ -258,7 +258,61 @@ describe('registerBatchTool', () => {
     await h.close();
   });
 
-  it('caps the number of ops', async () => {
+  it('has no op cap by default', async () => {
+    const h = await createTestHarness((s) => {
+      registerWrite(s, thingCreate);
+      registerBatchTool(s, { name: 'thing_batch' });
+    });
+    const ops = Array.from({ length: 25 }, (_, i) => ({ tool: 'thing_create', args: { name: `t${i}` } }));
+    const { result } = await confirmBatch(h, ops);
+    expect(json(result).status).toBe('ok');
+    expect(created).toHaveBeenCalledTimes(25);
+    const tool = (await h.client.listTools()).tools.find((t) => t.name === 'thing_batch')!;
+    expect(tool.description).not.toMatch(/up to \d+ writes/);
+    await h.close();
+  });
+
+  it('takes a cap from MCP_BATCH_MAX_OPS, and the maxOps option over it', async () => {
+    vi.stubEnv('MCP_BATCH_MAX_OPS', '2');
+    const op = { tool: 'thing_create', args: { name: 'a' } };
+    const fromEnv = await createTestHarness((s) => {
+      registerWrite(s, thingCreate);
+      registerBatchTool(s, { name: 'thing_batch' });
+    });
+    expect((await fromEnv.callTool('thing_batch', { ops: [op, op, op] })).isError).toBe(true);
+    const tool = (await fromEnv.client.listTools()).tools.find((t) => t.name === 'thing_batch')!;
+    expect(tool.description).toContain('up to 2 writes');
+    await fromEnv.close();
+
+    const fromOption = await createTestHarness((s) => {
+      registerWrite(s, thingCreate);
+      registerBatchTool(s, { name: 'thing_batch', maxOps: 3 });
+    });
+    expect(json(await fromOption.callTool('thing_batch', { ops: [op, op, op] })).status).toBe('confirmation-required');
+    await fromOption.close();
+    vi.unstubAllEnvs();
+  });
+
+  it('warns about an unparseable MCP_BATCH_MAX_OPS and stays uncapped', async () => {
+    vi.stubEnv('MCP_BATCH_MAX_OPS', 'ten');
+    const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const h = await createTestHarness((s) => {
+      registerWrite(s, thingCreate);
+      registerBatchTool(s, { name: 'thing_batch' });
+    });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('MCP_BATCH_MAX_OPS="ten"'));
+    const op = { tool: 'thing_create', args: { name: 'a' } };
+    expect(json(await h.callTool('thing_batch', { ops: Array(12).fill(op) })).status).toBe('confirmation-required');
+    await h.close();
+    vi.unstubAllEnvs();
+  });
+
+  it('refuses a maxOps option that is not a positive whole number', () => {
+    expect(() => registerBatchTool({} as McpServer, { name: 'x', maxOps: 0 })).toThrow(/maxOps/);
+    expect(() => registerBatchTool({} as McpServer, { name: 'x', maxOps: 2.5 })).toThrow(/maxOps/);
+  });
+
+  it('caps the number of ops when maxOps is set', async () => {
     const h = await createTestHarness((s) => {
       registerWrite(s, thingCreate);
       registerBatchTool(s, { name: 'thing_batch', maxOps: 2 });
