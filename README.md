@@ -40,7 +40,7 @@ import light:
 | `@chrischall/mcp-utils/healthcheck` | credential-style healthcheck factory (no fetchproxy peer needed) |
 | `@chrischall/mcp-utils/graphql` | GraphQL POST transport + operation-kind lexer (no optional peers) |
 | `@chrischall/mcp-utils/netguard` | SSRF guard for fetching third-party URLs: public-address table, DNS-pinning undici dispatcher, redirect-checked `fetchPublic` (needs `undici`) |
-| `@chrischall/mcp-utils/export` | bulk-export plumbing: mcp-host blob-store signer — signed GET/PUT URLs and the PUT (no optional peers) |
+| `@chrischall/mcp-utils/export` | bulk-export plumbing: export sink (local disk with absolute paths, or one zip in the mcp-host blob store behind a signed link), resume-cursor codec, zip writer, and the blob-store signer — signed GET/PUT URLs and the PUT (no optional peers) |
 | `@chrischall/mcp-utils/html` | opt-in HTML scraping helpers (needs `node-html-parser`) |
 | `@chrischall/mcp-utils/scrape` | convenience alias for the zero-dep `scrape` module (also in the core barrel) |
 | `@chrischall/mcp-utils/test` | in-memory test harness for tool registration |
@@ -2522,7 +2522,7 @@ cut from the source first — the same tree the parser's repair would build, in
 one linear pass (fleet-audit#1197). There is no size cap; a 2 MB well-formed
 page parses in well under 100 ms.
 
-### `export` — bulk-export plumbing: mcp-host blob store *(subpath, no optional peers)*
+### `export` — bulk-export plumbing: export sink + mcp-host blob store *(subpath, no optional peers)*
 
 ```ts
 import { blobStoreFromEnv } from '@chrischall/mcp-utils/export';
@@ -2558,6 +2558,64 @@ mcp-host hands each hosted child `MCP_BLOB_BASE_URL`
   — PUTs with a `content-type` header and resolves `{ key, bytes }`. A non-2xx
   throws `McpToolError` (kind `'http'`, `status` set); a request that never
   completes throws kind `'transport'`. Neither message carries the signed URL.
+
+#### Export sink — local disk or a hosted download link
+
+```ts
+import {
+  openExportSink, encodeExportCursor, decodeExportCursor, jsonlLine, exportPartName,
+} from '@chrischall/mcp-utils/export';
+
+const resume = args.cursor ? decodeExportCursor(args.cursor) : undefined; // validate its fields!
+const sink = await openExportSink({
+  name: 'office-outlook-mcp', envVar: 'OUTLOOK_OUTPUT_DIR', baseName: 'outlook-mail',
+  dest: args.dest,                                   // confined; ignored in blob mode
+  ...(resume ? { exportId: String(resume.exportId), part: Number(resume.part), existingDir: resume.dir as string } : {}),
+});
+await sink.addFile(exportPartName(sink.part, 'jsonl'), header + records.map(jsonlLine).join(''));
+await sink.addFile(`attachments/${id8}/${sanitizeExportFileName(att.name)}`, bytes, att.contentType);
+const loc = await sink.finish();
+// disk: loc.location = absolute export dir, loc.files[].path absolute
+// blob: loc.location = signed URL of exp/<exportId>/part-NNNN.zip, loc.urlExpiresAt
+const cursor = hasMore
+  ? encodeExportCursor({ exportId: loc.exportId, part: loc.part + 1, dir: loc.dir, pos })
+  : undefined;
+```
+
+The mode is chosen by the install, not the caller:
+
+- **disk** (no `MCP_BLOB_*` — every local / stdio install): a fresh directory
+  `<dir>/<baseName>-<YYYYMMDD-HHmmss>[-n]/` (UTC, created exclusively, `0700`)
+  under the per-call `dest` → `envVar` → `~/Downloads/<name>`. A per-call
+  `dest` must lie within **`exportAllowedRoots(envVar)`** — the env dir when
+  set, else `~/Downloads`, `~/Documents`, `~/Desktop` — checked through
+  symlinks. Files are written with `writeFileSafe` confined to the export
+  directory (exclusive, no-follow, `0600`), and every path returned is
+  absolute. Resuming passes the cursor's `existingDir`, which is re-validated
+  against the same roots (and must be an existing directory, not a root
+  itself) — a cursor is model-supplied text.
+- **blob** (both `MCP_BLOB_BASE_URL` and `MCP_BLOB_SIGNING_KEY`, i.e. hosted on
+  mcp-host): files are held in memory, zipped into ONE archive (DEFLATE for
+  text — by `contentType` via `isCompressibleType`, else by extension — STORE
+  for media), PUT to `exp/<exportId>/part-<NNNN>.zip`, and `location` is a
+  signed GET URL (`ttlMs` default 1h, max 24h, checked at open). Always a zip,
+  even for one file, so consumers handle one shape. `dest`/`existingDir` are
+  ignored.
+
+`addFile(relPath, data, contentType?, { overwrite? })` refuses (`McpToolError`)
+an absolute, `.`/`..`/empty-segmented, backslashed or control-character path, a
+duplicate name unless `overwrite`, and any call after `finish()`.
+`finish()` runs once.
+
+Helpers: **`encodeExportCursor(state)`** / **`decodeExportCursor(str)`** —
+base64url JSON with `v: 1`, capped at `EXPORT_CURSOR_MAX_LENGTH` (16 KiB);
+decode throws `McpToolError` on anything else. Not signed: re-validate every
+field. **`jsonlLine(value)`** — one `JSON.stringify` line plus `\n`.
+**`exportPartName(part, ext)`** — `part-0001.jsonl`.
+**`sanitizeExportFileName(name, max = 120)`** — one safe path component from an
+upstream file name or title. **`buildZip(entries, modifiedAt?)`** /
+**`crc32(bytes)`** — the minimal STORE/DEFLATE zip writer (ported from
+gemini-mcp `zip.ts`; no ZIP64, UTF-8 names, unsafe or duplicate names refused).
 
 ### `netguard` — SSRF guard for third-party URLs *(subpath, optional peer)*
 
