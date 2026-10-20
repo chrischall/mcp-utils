@@ -40,6 +40,7 @@ import light:
 | `@chrischall/mcp-utils/healthcheck` | credential-style healthcheck factory (no fetchproxy peer needed) |
 | `@chrischall/mcp-utils/graphql` | GraphQL POST transport + operation-kind lexer (no optional peers) |
 | `@chrischall/mcp-utils/netguard` | SSRF guard for fetching third-party URLs: public-address table, DNS-pinning undici dispatcher, redirect-checked `fetchPublic` (needs `undici`) |
+| `@chrischall/mcp-utils/export` | bulk-export plumbing: mcp-host blob-store signer — signed GET/PUT URLs and the PUT (no optional peers) |
 | `@chrischall/mcp-utils/html` | opt-in HTML scraping helpers (needs `node-html-parser`) |
 | `@chrischall/mcp-utils/scrape` | convenience alias for the zero-dep `scrape` module (also in the core barrel) |
 | `@chrischall/mcp-utils/test` | in-memory test harness for tool registration |
@@ -2520,6 +2521,43 @@ superlinear (8000 unclosed `<div>` took 23 s): past
 cut from the source first — the same tree the parser's repair would build, in
 one linear pass (fleet-audit#1197). There is no size cap; a 2 MB well-formed
 page parses in well under 100 ms.
+
+### `export` — bulk-export plumbing: mcp-host blob store *(subpath, no optional peers)*
+
+```ts
+import { blobStoreFromEnv } from '@chrischall/mcp-utils/export';
+
+const store = blobStoreFromEnv(); // undefined on a local stdio install → write to disk instead
+if (store) {
+  await store.put('exp/<exportId>/part-0001.zip', zipBytes, 'application/zip');
+  const { url, expiresAtMs } = store.signGetUrl('exp/<exportId>/part-0001.zip'); // 1h default, 24h max
+}
+```
+
+mcp-host hands each hosted child `MCP_BLOB_BASE_URL`
+(`https://<host>/b/<registrationId>`) and its own derived
+`MCP_BLOB_SIGNING_KEY`. Consolidates splitwise-mcp `_blob.ts` and gemini-mcp
+`blob-store.ts`; office-outlook-mcp and microsoft-teams-mcp bulk export use it.
+
+- **`blobStoreFromEnv(env = process.env)`** — `undefined` unless BOTH variables
+  are set (read with `readEnvVar`, so placeholders and `'null'` are unset). A
+  set but malformed base URL (not a URL, not http(s), userinfo, query/fragment,
+  no registration path) throws `McpToolError` naming the variable, never its
+  value. **`createBlobStore({ baseUrl, signingKey })`** is the same with
+  explicit settings.
+- **`signGetUrl(key, { ttlMs?, now? })`** / **`signPutUrl(key, contentType, { ttlMs?, now? })`**
+  — return `{ url, expiresAtMs }`. The signed payloads are the gateway's byte
+  for byte: GET `<prefix>/<key>\n<exp>`, PUT
+  `put\0<prefix>/<key>\0<contentType>\0<exp>`, HMAC-SHA256 base64url, `exp`
+  in epoch ms, `prefix` the base path minus its leading `b/`. TTL defaults to
+  1h and anything over 24h (or ≤ 0) is refused, since the gateway would.
+  Keys must be relative `/`-separated segments of `[A-Za-z0-9._~-]` (no
+  empty, `.` or `..` segment, ≤ 1024 chars) and are URL-encoded per segment;
+  content types must be non-empty with no control characters.
+- **`put(key, bytes | string, contentType, { fetchImpl?, signal?, ttlMs?, now? })`**
+  — PUTs with a `content-type` header and resolves `{ key, bytes }`. A non-2xx
+  throws `McpToolError` (kind `'http'`, `status` set); a request that never
+  completes throws kind `'transport'`. Neither message carries the signed URL.
 
 ### `netguard` — SSRF guard for third-party URLs *(subpath, optional peer)*
 
