@@ -2593,7 +2593,12 @@ The mode is chosen by the install, not the caller:
   directory (exclusive, no-follow, `0600`), and every path returned is
   absolute. Resuming passes the cursor's `existingDir`, which is re-validated
   against the same roots (and must be an existing directory, not a root
-  itself) — a cursor is model-supplied text.
+  itself) — a cursor is model-supplied text. The roots are whole user
+  folders, so that is not enough on its own: every fresh export directory
+  also gets an `EXPORT_MARKER` file (`.mcp-export`, `{"exportId":…}`), and a
+  resume must name a directory with the export-name shape whose marker is a
+  regular file for the SAME `exportId` — only a directory this sink created
+  for this export. `addFile` refuses the marker's name.
 - **blob** (both `MCP_BLOB_BASE_URL` and `MCP_BLOB_SIGNING_KEY`, i.e. hosted on
   mcp-host): files are held in memory, zipped into ONE archive (DEFLATE for
   text — by `contentType` via `isCompressibleType`, else by extension — STORE

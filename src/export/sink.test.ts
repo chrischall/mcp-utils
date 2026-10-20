@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inflateRawSync } from 'node:zlib';
@@ -134,7 +134,64 @@ describe('openExportSink — disk mode', () => {
     await resumed.addFile(exportPartName(2, 'jsonl'), 'y\n');
     const loc = await resumed.finish();
     expect(loc.files.map((f) => f.name)).toEqual(['part-0002.jsonl']);
-    expect(readdirSync(first.dir!).sort()).toEqual(['part-0001.jsonl', 'part-0002.jsonl']);
+    expect(readdirSync(first.dir!).sort()).toEqual(['.mcp-export', 'part-0001.jsonl', 'part-0002.jsonl']);
+  });
+
+  // chrischall/mcp-utils#391: the roots alone are broad (~/Downloads, ~/Documents,
+  // ~/Desktop), so a forged cursor could aim `addFile(..., { overwrite: true })`
+  // at any folder in them. Resume is bound to folders this sink created.
+  it('refuses to resume into a folder the sink did not create, even inside the roots', async () => {
+    const victim = join(home, 'Documents', 'taxes');
+    mkdirSync(victim);
+    writeFileSync(join(victim, 'part-0002.jsonl'), 'precious');
+    await expect(
+      openExportSink({ ...base, env: {}, existingDir: victim, exportId: 'abcdefgh12345678', part: 2 }),
+    ).rejects.toBeInstanceOf(McpToolError);
+    expect(readFileSync(join(victim, 'part-0002.jsonl'), 'utf8')).toBe('precious');
+  });
+
+  it('refuses a folder named like an export but without the marker', async () => {
+    const lookalike = join(home, 'Downloads', 'outlook-mail-20261020-090807');
+    mkdirSync(lookalike);
+    await expect(
+      openExportSink({ ...base, env: {}, existingDir: lookalike, exportId: 'abcdefgh12345678', part: 2 }),
+    ).rejects.toBeInstanceOf(McpToolError);
+  });
+
+  it("refuses a real export dir resumed under another export's id", async () => {
+    const first = await openExportSink({ ...base, env: {} });
+    await first.finish();
+    await expect(
+      openExportSink({ ...base, env: {}, existingDir: first.dir!, exportId: 'zzzzzzzzzzzzzzzz', part: 2 }),
+    ).rejects.toBeInstanceOf(McpToolError);
+  });
+
+  it('refuses a marker that is a symlink, or a dir renamed off the export name shape', async () => {
+    const first = await openExportSink({ ...base, env: {} });
+    await first.finish();
+    const marker = join(first.dir!, '.mcp-export');
+    const copy = join(home, 'marker-copy');
+    writeFileSync(copy, readFileSync(marker));
+    rmSync(marker);
+    symlinkSync(copy, marker);
+    await expect(
+      openExportSink({ ...base, env: {}, existingDir: first.dir!, exportId: first.exportId, part: 2 }),
+    ).rejects.toBeInstanceOf(McpToolError);
+
+    const second = await openExportSink({ ...base, env: {} });
+    await second.finish();
+    const renamed = join(home, 'Downloads', 'renamed');
+    renameSync(second.dir!, renamed);
+    await expect(
+      openExportSink({ ...base, env: {}, existingDir: renamed, exportId: second.exportId, part: 2 }),
+    ).rejects.toBeInstanceOf(McpToolError);
+  });
+
+  it('never lets addFile write over the marker', async () => {
+    const sink = await openExportSink({ ...base, env: {} });
+    const before = readFileSync(join(sink.dir!, '.mcp-export'), 'utf8');
+    await expect(sink.addFile('.mcp-export', 'x', undefined, { overwrite: true })).rejects.toBeInstanceOf(McpToolError);
+    expect(readFileSync(join(sink.dir!, '.mcp-export'), 'utf8')).toBe(before);
   });
 
   it('refuses a resume dir outside the roots, missing, or a file — a cursor is never trusted', async () => {
