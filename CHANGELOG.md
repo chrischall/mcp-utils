@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.3.0](https://github.com/chrischall/mcp-utils/compare/v3.2.0...v3.3.0) (2026-10-20)
+
+
+### Features
+
+* **export:** shared bulk-export sink (local disk paths or hosted blob URLs) ([#390](https://github.com/chrischall/mcp-utils/issues/390)) ([50f0ba1](https://github.com/chrischall/mcp-utils/commit/50f0ba135be37f67be598c67ecdf1ac0db255e4f))
+
+
+### Bug Fixes
+
+* **export:** resume only into export folders this sink created ([#393](https://github.com/chrischall/mcp-utils/issues/393)) ([cd4cd82](https://github.com/chrischall/mcp-utils/commit/cd4cd829a925a222c66f78990e3ea48662730918)), closes [#391](https://github.com/chrischall/mcp-utils/issues/391)
+
 ## [3.2.0](https://github.com/chrischall/mcp-utils/compare/v3.1.0...v3.2.0) (2026-10-19)
 
 
