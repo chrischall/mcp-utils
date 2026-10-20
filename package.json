@@ -47,6 +47,10 @@
     "./netguard": {
       "import": "./dist/netguard/index.js",
       "types": "./dist/netguard/index.d.ts"
+    },
+    "./export": {
+      "import": "./dist/export/index.js",
+      "types": "./dist/export/index.d.ts"
     }
   },
   "files": [

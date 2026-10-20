@@ -30,6 +30,7 @@ The package exports a light **core barrel** plus heavier **subpath entries** so 
 | `@chrischall/mcp-utils/healthcheck` | `healthcheck` | credential-style healthcheck factory; ZERO optional peers, which is why it is not in `/fetchproxy` |
 | `@chrischall/mcp-utils/graphql` | `graphql` | GraphQL POST transport (`createGraphqlClient`) + operation-kind lexer (`isReadOnlyGraphqlDocument`); zero optional peers, a subpath only because few servers speak GraphQL |
 | `@chrischall/mcp-utils/netguard` | `netguard` | SSRF guard for third-party URLs (`isPublicAddress`, `createPublicOnlyDispatcher`, `fetchPublic`); needs optional peer `undici`, which is why it never enters the core barrel |
+| `@chrischall/mcp-utils/export` | `export` | bulk-export plumbing: `openExportSink` (disk mode — fresh exclusive dir, confined `dest`/resume dir, absolute paths — or blob mode — one STORE/DEFLATE zip PUT to the blob store, signed GET link), resume-cursor codec, `jsonlLine`, `buildZip`, and the mcp-host blob-store signer (`blobStoreFromEnv` / `createBlobStore` — signed GET/PUT URLs, gateway payloads byte for byte, and the PUT); zero optional peers, a subpath only because few servers export |
 | `@chrischall/mcp-utils/html` | `html` | HTML scraping helpers; needs optional peer `node-html-parser` |
 | `@chrischall/mcp-utils/scrape` | `scrape` | convenience alias; `scrape` is zero-dep and also in the core barrel |
 | `@chrischall/mcp-utils/test` | `test` | in-memory vitest harness; devtime-only, never imported by runtime code |
