@@ -3,8 +3,8 @@
  * server is installed, plus the small codecs every export tool needs
  * (resume cursor, JSONL line, part and attachment file names).
  *
- * A bulk export (office-outlook-mcp `outlook_export`, microsoft-teams-mcp
- * `teams_export`) pages an API server-side and writes thousands of records
+ * A bulk export (office-outlook-mcp `outlook_export_messages` / `outlook_export_events`, microsoft-teams-mcp
+ * `teams_export_messages`) pages an API server-side and writes thousands of records
  * to files so none of that content enters the model's context; the tool
  * returns only a small manifest. Where those files land depends on the
  * install, and both servers need exactly the same two answers, so the logic
@@ -29,15 +29,21 @@
  * Exports are resumable: a call that hits its item or time budget returns a
  * cursor ({@link encodeExportCursor}), and the next call re-opens the SAME
  * export — `exportId`, the next `part`, and on disk the `existingDir`, which
- * is re-validated against the roots because a cursor is model-supplied text
- * and never trusted.
+ * is re-validated because a cursor is model-supplied text and never trusted.
+ * The roots alone are too broad a check (they are whole user folders like
+ * ~/Documents), so a fresh export directory also gets a {@link EXPORT_MARKER}
+ * file naming its `exportId`, written exclusively and without following
+ * links. A resume must name a directory with the export-name shape AND a
+ * regular-file marker for the SAME `exportId` — i.e. one this sink created
+ * for this export — so a forged cursor cannot aim a write (or an
+ * `overwrite`) at any other folder (chrischall/mcp-utils#391).
  */
 
 import { randomBytes } from 'node:crypto';
-import { lstatSync, mkdirSync } from 'node:fs';
+import { closeSync, constants as fsConstants, lstatSync, mkdirSync, openSync, readSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { expandPath, readEnvVar, type EnvSource } from '../config/index.js';
 import { McpToolError } from '../errors/index.js';
 import { assertPathWithinRoots } from '../fs/confine.js';
@@ -45,6 +51,15 @@ import { resolveOutputDir } from '../fs/output.js';
 import { isSafeExtension, sanitizeBaseName, writeFileSafe } from '../fs/write.js';
 import { blobStoreFromEnv, type BlobStore } from './blob.js';
 import { buildZip, isCompressibleType } from './zip.js';
+
+/**
+ * The marker file at the top of every disk export directory: `{"exportId":…}`.
+ * Resume requires it (see the module header); `addFile` refuses the name.
+ */
+export const EXPORT_MARKER = '.mcp-export';
+
+/** A fresh export directory's name ends in its UTC stamp, then an optional `-n`. */
+const EXPORT_DIR_NAME = /-\d{8}-\d{6}(?:-\d+)?$/;
 
 /** Where an export is delivered: local files, or a signed link to a zip in the hosted blob store. */
 export type ExportMode = 'disk' | 'blob';
@@ -206,6 +221,8 @@ function checkRelPath(relPath: string): string[] {
   for (const seg of segs) {
     if (seg === '' || seg === '.' || seg === '..' || seg.length > MAX_SEGMENT) throw fail();
   }
+  // Case-insensitively: the default macOS volume would map `.MCP-EXPORT` onto it.
+  if (segs[0]!.toLowerCase() === EXPORT_MARKER) throw fail();
   return segs;
 }
 
@@ -257,7 +274,14 @@ export async function openExportSink(opts: OpenExportSinkOptions): Promise<Expor
   const now = opts.now;
   const store = blobStoreFromEnv(env);
   if (store) return openBlobSink(store, exportId, part, opts, now);
-  const dir = opts.existingDir !== undefined ? resumeDir(opts.existingDir, opts.envVar, env) : freshDir(opts, env, now);
+  if (opts.existingDir !== undefined) {
+    return openDiskSink(resumeDir(opts.existingDir, opts.envVar, env, exportId), exportId, part);
+  }
+  const dir = freshDir(opts, env, now);
+  await writeFileSafe(join(dir, EXPORT_MARKER), new TextEncoder().encode(JSON.stringify({ exportId })), {
+    allowedRoots: [dir],
+    mode: 0o600,
+  });
   return openDiskSink(dir, exportId, part);
 }
 
@@ -303,7 +327,35 @@ function freshDir(opts: OpenExportSinkOptions, env: EnvSource, now: number | und
   throw badInput('Could not create a fresh export directory (1000 names taken).');
 }
 
-function resumeDir(existingDir: string, envVar: string, env: EnvSource): string {
+function notThisExport(): McpToolError {
+  return badInput(
+    'The export directory to resume was not created by this export.',
+    'Pass the cursor exactly as returned, or start a new export without one.',
+  );
+}
+
+/** The `exportId` in `dir`'s marker, read without following a link; `undefined` if absent or not ours. */
+function readMarker(dir: string): string | undefined {
+  let fd: number;
+  try {
+    fd = openSync(join(dir, EXPORT_MARKER), fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  } catch {
+    return undefined;
+  }
+  try {
+    const buf = Buffer.alloc(256);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    const parsed: unknown = JSON.parse(buf.subarray(0, n).toString('utf8'));
+    const id = (parsed as { exportId?: unknown } | null)?.exportId;
+    return typeof id === 'string' ? id : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function resumeDir(existingDir: string, envVar: string, env: EnvSource, exportId: string): string {
   if (typeof existingDir !== 'string' || existingDir.length === 0) throw outsideRoots('export directory', envVar);
   const roots = exportAllowedRoots(envVar, env);
   const real = within(existingDir, roots, 'export directory', envVar);
@@ -322,6 +374,15 @@ function resumeDir(existingDir: string, envVar: string, env: EnvSource): string 
       'Start a new export without a cursor.',
     );
   }
+  if (!EXPORT_DIR_NAME.test(basename(real))) throw notThisExport();
+  // O_NOFOLLOW refuses a symlinked marker; the lstat refuses a FIFO or dir.
+  let markerIsFile = false;
+  try {
+    markerIsFile = lstatSync(join(real, EXPORT_MARKER)).isFile();
+  } catch {
+    markerIsFile = false;
+  }
+  if (!markerIsFile || readMarker(real) !== exportId) throw notThisExport();
   return real;
 }
 
