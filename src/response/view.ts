@@ -243,7 +243,9 @@ export function viewArg(
  *    honour — {@link resolveView}): `project(data)` when the tool has a
  *    projection, else `stripMediaUrls(data)`; minified. A projection that
  *    throws or returns `undefined` falls back to the unprojected `data`
- *    with a stderr warning ({@link projectOrRaw}).
+ *    (as-is: media URLs are not stripped, so it can be larger than a
+ *    projector-less tool's compact view) with a stderr warning
+ *    ({@link projectOrRaw}).
  *  - `full`: `data` untouched, minified. The projector never runs.
  *  - `raw`: `data` untouched, indented ({@link viewResult}).
  *

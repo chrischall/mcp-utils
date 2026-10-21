@@ -511,7 +511,7 @@ export function createGraphqlClient(opts: GraphqlClientOptions): GraphqlClient {
   const random = opts.random ?? Math.random;
   // Default: 30 s, but never below the policy's own delayMs — a plain fixed
   // RetryPolicy waits exactly what it asked for, as before.
-  const maxBackoffMs = retry.maxBackoffMs ?? Math.max(DEFAULT_MAX_BACKOFF_MS, retry.delayMs);
+  const maxBackoffMs = retry.maxBackoffMs ?? Math.max(DEFAULT_MAX_BACKOFF_MS, retry.delayMs ?? 0);
   if (typeof maxBackoffMs !== 'number' || Number.isNaN(maxBackoffMs) || maxBackoffMs < 0) {
     throw new TypeError(`createGraphqlClient: retry.maxBackoffMs must be a non-negative number, got ${String(maxBackoffMs)}.`);
   }
