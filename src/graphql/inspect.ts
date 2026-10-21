@@ -23,6 +23,8 @@
  * documents a model (or an injected instruction) wrote.
  */
 
+import { lexGraphql, type GraphqlToken } from './lexer.js';
+
 /** One operation of a document. */
 export interface GraphqlOperation {
   kind: 'query' | 'mutation' | 'subscription';
@@ -68,12 +70,11 @@ export class GraphqlDocumentError extends Error {
  */
 export const MAX_GRAPHQL_SELECTION_DEPTH = 64;
 
-type Token = { type: 'name'; value: string } | { type: 'punct'; value: string };
+// The lexer is shared with the operation-kind gate (./lexer.ts,
+// fleet-audit#1448), in its strict mode: an unknown character fails closed.
+// Strings and numbers are dropped — the grammar below never reads them.
+type Token = Extract<GraphqlToken, { kind: 'name' | 'punct' }>;
 
-const PUNCT = new Set(['!', '$', '&', '(', ')', ':', '=', '@', '[', ']', '{', '|', '}']);
-const NAME_START = /[_A-Za-z]/;
-const NAME_PART = /[_0-9A-Za-z]/;
-const NUMBER_PART = /[-+.0-9eE]/;
 const OPERATION_KINDS = new Set(['query', 'mutation', 'subscription']);
 
 function fail(message: string): never {
@@ -81,52 +82,9 @@ function fail(message: string): never {
 }
 
 function tokenize(doc: string): Token[] {
-  const tokens: Token[] = [];
-  let i = doc.charCodeAt(0) === 0xfeff ? 1 : 0;
-  const n = doc.length;
-  while (i < n) {
-    const c = doc[i]!;
-    if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === ',') {
-      i++;
-    } else if (c === '#') {
-      while (i < n && doc[i] !== '\n' && doc[i] !== '\r') i++;
-    } else if (doc.startsWith('"""', i)) {
-      i += 3;
-      for (;;) {
-        if (i >= n) fail('unterminated block string');
-        if (doc.startsWith('\\"""', i)) i += 4;
-        else if (doc.startsWith('"""', i)) {
-          i += 3;
-          break;
-        } else i++;
-      }
-    } else if (c === '"') {
-      i++;
-      for (;;) {
-        if (i >= n || doc[i] === '\n' || doc[i] === '\r') fail('unterminated string');
-        if (doc[i] === '\\') i += 2;
-        else if (doc[i] === '"') {
-          i++;
-          break;
-        } else i++;
-      }
-    } else if (doc.startsWith('...', i)) {
-      tokens.push({ type: 'punct', value: '...' });
-      i += 3;
-    } else if (PUNCT.has(c)) {
-      tokens.push({ type: 'punct', value: c });
-      i++;
-    } else if (NAME_START.test(c)) {
-      const start = i;
-      while (i < n && NAME_PART.test(doc[i]!)) i++;
-      tokens.push({ type: 'name', value: doc.slice(start, i) });
-    } else if (c === '-' || (c >= '0' && c <= '9')) {
-      while (i < n && NUMBER_PART.test(doc[i]!)) i++;
-    } else {
-      fail(`unexpected character ${JSON.stringify(c)} at offset ${i}`);
-    }
-  }
-  return tokens;
+  const { tokens, error } = lexGraphql(doc, { strict: true });
+  if (error !== undefined) fail(error);
+  return tokens.filter((t): t is Token => t.kind === 'name' || t.kind === 'punct');
 }
 
 /** A cursor over the token list with the few reads the grammar needs. */
@@ -141,10 +99,10 @@ class Cursor {
   }
   isPunct(value: string): boolean {
     const t = this.peek();
-    return t?.type === 'punct' && t.value === value;
+    return t?.kind === 'punct' && t.value === value;
   }
   isName(): boolean {
-    return this.peek()?.type === 'name';
+    return this.peek()?.kind === 'name';
   }
   next(): Token {
     const t = this.tokens[this.k++];
@@ -153,12 +111,12 @@ class Cursor {
   }
   name(): string {
     const t = this.next();
-    if (t.type !== 'name') fail(`expected a name, got ${JSON.stringify(t.value)}`);
+    if (t.kind !== 'name') fail(`expected a name, got ${JSON.stringify(t.value)}`);
     return t.value;
   }
   expect(value: string): void {
     const t = this.next();
-    if (t.type !== 'punct' || t.value !== value) fail(`expected ${value}, got ${JSON.stringify(t.value)}`);
+    if (t.kind !== 'punct' || t.value !== value) fail(`expected ${value}, got ${JSON.stringify(t.value)}`);
   }
   /** Skip a balanced `( … )` group (arguments, variable definitions) without reading it. Iterative. */
   skipGroup(): void {
@@ -166,7 +124,7 @@ class Cursor {
     const stack: string[] = [];
     do {
       const t = this.next();
-      if (t.type !== 'punct') continue;
+      if (t.kind !== 'punct') continue;
       const close = pairs[t.value];
       if (close !== undefined) stack.push(close);
       else if (t.value === ')' || t.value === ']' || t.value === '}') {
