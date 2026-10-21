@@ -1,5 +1,14 @@
 # Changelog
 
+## [3.3.1](https://github.com/chrischall/mcp-utils/compare/v3.3.0...v3.3.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **http:** guard redirect targets, cancel retry sleeps and redact api_token JSON keys ([#397](https://github.com/chrischall/mcp-utils/issues/397)) ([92435cb](https://github.com/chrischall/mcp-utils/commit/92435cb5c56fddf012d20a8dc42bb14181679c7d))
+* **http:** report a 5xx after a sent write as outcome-unknown, not a failure ([#394](https://github.com/chrischall/mcp-utils/issues/394)) ([48ab2bb](https://github.com/chrischall/mcp-utils/commit/48ab2bb49528715a4bc52fa3d75a6202671988a2))
+* **server:** stop batch planning on cancel and bound export memory and resume to the server's own folders ([#396](https://github.com/chrischall/mcp-utils/issues/396)) ([cc03f6b](https://github.com/chrischall/mcp-utils/commit/cc03f6b543331468372b92ab37c9344562b9bc86))
+
 ## [3.3.0](https://github.com/chrischall/mcp-utils/compare/v3.2.0...v3.3.0) (2026-10-20)
 
 
