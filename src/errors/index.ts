@@ -494,7 +494,7 @@ const AWS_SIGV4_RE =
 // `"authorization"`) are covered too: a request echo often serialises its
 // headers object.
 const JSON_SECRET_KEYS = [
-  '(?:access|refresh|id|auth|session|bearer|csrf|xsrf)[_-]?token',
+  '(?:access|refresh|id|auth|session|bearer|csrf|xsrf|api)[_-]?token', // api: fleet-audit#1444 (Pipedrive/Todoist-style, as in QUERY_SECRET_RE)
   'client[_-]?secret',
   'api[_-]?secret',
   '(?:x[_-])?api[_-]?key',
