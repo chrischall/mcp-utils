@@ -168,6 +168,12 @@ export interface ApiClientOptions {
    * write's re-send is the hook's decision, so only ask for one when the
    * first was refused outright (as a version mismatch is).
    *
+   * An `Error` returned here is thrown as is — it is never reclassified as
+   * {@link WriteOutcomeUnknownError}, even for a 5xx answering a sent write
+   * (see {@link writeOutcomeUnknown}). So this is also where a consumer
+   * whose API answers a 5xx only when nothing was committed keeps it a hard
+   * failure: `({ status }) => status === 503 ? new ApiError(503, '…') : undefined`.
+   *
    * **`body` is NOT redacted** — it is the upstream's own text (decoded, under
    * the response byte cap; `''` when over it or unreadable). Anything taken
    * from it into an error message must go through `truncateErrorMessage`
@@ -254,7 +260,14 @@ export interface ApiClientOptions {
    * while its response body was read throws {@link WriteOutcomeUnknownError}
    * instead of a plain {@link RequestTimeoutError} or `fetch`'s raw
    * `TypeError` — both of which read as "safe to retry", and the model
-   * re-sent the email or booking (fleet audit 2026-09, cluster 7). Mirrors
+   * re-sent the email or booking (fleet audit 2026-09, cluster 7). So does
+   * one answered with a 5xx (any but 501 / 505; after any configured
+   * {@link RetryPolicy.statuses} retries), with the {@link ApiError} as
+   * `cause`, so {@link writeOutcomeStatus} reads the status: a gateway that
+   * lost the origin's answer, or a backend that failed after committing, is
+   * no proof the write did not happen (fleet-audit#1405). A 4xx is still a
+   * plain {@link ApiError} — the server refused it. An error
+   * {@link onErrorResponse} returns is never reclassified. Mirrors
    * `createGraphqlClient`'s `outcomeUnknown`. Pass `false` to keep the plain
    * errors for every request; {@link RequestOptions.idempotent} does it for
    * one (a search sent as POST).
@@ -567,8 +580,9 @@ export const DEFAULT_WRITE_OUTCOME_HINT =
 
 /**
  * A write (a request whose method is not safe) was SENT, but no usable
- * response came back: it timed out, the connection dropped, or the response
- * body broke off. The server may already have committed it, so the outcome is
+ * response came back: it timed out, the connection dropped, the response
+ * body broke off, or the far side answered a 5xx (a gateway that lost the
+ * origin's answer). The server may already have committed it, so the outcome is
  * UNKNOWN, and re-sending it blindly can duplicate an email, a booking or a
  * payment (fleet audit 2026-09, cluster 7: opentable #632, honeybook #1023,
  * office-outlook #1073, vibo #1135, untappd #1132).
@@ -616,9 +630,10 @@ export class WriteOutcomeUnknownError extends McpToolError {
 
 /**
  * The HTTP status behind a {@link WriteOutcomeUnknownError} — set when the
- * write was sent and the far side then answered a 5xx (a hand-rolled client
- * chains the status-carrying error as `cause`, as microsoft-teams-mcp does) —
- * or `undefined` when it timed out or the connection dropped.
+ * write was sent and the far side then answered a 5xx ({@link createApiClient}
+ * chains its {@link ApiError} as `cause`; a hand-rolled client chains any
+ * status-carrying error, as microsoft-teams-mcp does) — or `undefined` when it
+ * timed out or the connection dropped.
  */
 export function writeOutcomeStatus(err: WriteOutcomeUnknownError): number | undefined {
   const status = (err.cause as { status?: unknown } | null | undefined)?.status;
@@ -651,7 +666,8 @@ export type WriteOrUnknownOutcome<T, R> = { ok: true; value: T } | { ok: false; 
 
 /**
  * Run a non-idempotent write; a {@link WriteOutcomeUnknownError} (the request
- * was sent, then timed out or dropped) becomes `{ ok: false, result }` —
+ * was sent, then timed out, dropped, or was answered with a 5xx) becomes
+ * `{ ok: false, result }` —
  * where `result` is whatever `onUnknown` builds, typically a non-error
  * `status: "unknown"` tool result — instead of an error. Any other failure is
  * a real failure and still throws.
@@ -692,6 +708,19 @@ export async function writeOrUnknown<T, R>(
 
 /** RFC 9110 safe methods: a request with one of these never writes. */
 const SAFE_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE']);
+
+/**
+ * Whether a 5xx answering a SENT write leaves its outcome unknown
+ * (fleet-audit#1405): every 5xx does — a gateway that lost or timed out the
+ * origin's answer (502 / 504, Cloudflare's 520-524), a backend that may have
+ * committed before it failed (500 / 503) — except the two that refuse the
+ * request as such before anything handles it: 501 Not Implemented and 505
+ * HTTP Version Not Supported. Matches microsoft-teams-mcp's
+ * `#checkWriteStatus`, the donor of {@link unknownOutcomeReason}.
+ */
+function isOutcomeUnknownStatus(status: number): boolean {
+  return status >= 500 && status <= 599 && status !== 501 && status !== 505;
+}
 
 /**
  * Thrown by {@link ApiClient.fetchJson} / {@link ApiClient.fetchHtml} for a
@@ -1076,6 +1105,13 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
    * outcome unknown.
    */
   const transportFailures = new WeakSet<object>();
+  /**
+   * The default {@link ApiError}s {@link errorFor} built for a 5xx that
+   * leaves a sent write's outcome unknown (fleet-audit#1405). Marked at the
+   * source, so an `ApiError` an `onErrorResponse` hook returns — the
+   * consumer's override — is never reclassified.
+   */
+  const answered5xx = new WeakSet<object>();
   const markTransportFailure = (err: unknown): void => {
     // A cancellation is not a failure: the caller's abort is rethrown untouched.
     if (typeof err === 'object' && err !== null && (err as { name?: unknown }).name !== 'AbortError') {
@@ -1475,10 +1511,13 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   }
 
   /**
-   * Run one client call, turning a SENT write's transport failure into
-   * {@link WriteOutcomeUnknownError}. Everything else — a read, an
-   * `idempotent` request, a failure before anything was sent, any HTTP
-   * response, a caller's cancellation — propagates exactly as before.
+   * Run one client call, turning a SENT write's transport failure — or the
+   * default {@link ApiError} for a 5xx it was answered with (see
+   * {@link isOutcomeUnknownStatus}) — into {@link WriteOutcomeUnknownError},
+   * with the original error as `cause`. Everything else — a read, an
+   * `idempotent` request, a failure before anything was sent, a 4xx, an
+   * {@link EdgeBlockedError}, an error {@link ApiClientOptions.onErrorResponse}
+   * returned, a caller's cancellation — propagates exactly as before.
    */
   async function guardWrite<T>(
     method: string,
@@ -1498,7 +1537,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
           hint: opts.writeOutcomeHint,
         });
       }
-      if (typeof err === 'object' && err !== null && transportFailures.has(err)) {
+      if (typeof err === 'object' && err !== null && (transportFailures.has(err) || answered5xx.has(err))) {
         throw new WriteOutcomeUnknownError(service, method, { cause: err, hint: opts.writeOutcomeHint });
       }
       throw err;
@@ -1524,7 +1563,10 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
    * The error an unsuccessful response (not 401 / 429) becomes, or `'retry'`.
    * A CDN/WAF refusal page is checked first, exactly as {@link httpError}
    * always has, so the hook never sees one; then
-   * {@link ApiClientOptions.onErrorResponse}; then the default.
+   * {@link ApiClientOptions.onErrorResponse}; then the default, which
+   * {@link guardWrite} reports as outcome-unknown when it is a 5xx answering
+   * a sent write (only the default: an error the hook returned is the
+   * consumer's decision and is thrown as is).
    */
   async function errorFor(res: Response, text: string, method: string, path: string, retried: boolean): Promise<Error | 'retry'> {
     const edge = detectEdgeBlock({ body: text, headers: res.headers, status: res.status });
@@ -1534,7 +1576,9 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
       if (decision instanceof Error) return decision;
       if (decision === 'retry' && !retried) return 'retry';
     }
-    return httpError(res, text, method, path, service);
+    const err = httpError(res, text, method, path, service);
+    if (isOutcomeUnknownStatus(res.status) && !(err instanceof EdgeBlockedError)) answered5xx.add(err);
+    return err;
   }
 
   const fetchJson = <T>(method: string, path: string, opt: RequestOptions = {}): Promise<T> => {

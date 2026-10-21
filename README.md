@@ -963,12 +963,33 @@ cluster 7). It is an `McpToolError` with `outcomeUnknown: true`,
 `retrySafe: false` (so `retryOnceOnTimeout` never replays it), `timedOut` /
 `timeoutMs`, `method`, the original error as `cause`, and the hint *"The write
 may have happened — check before retrying; do not resend blindly."* Name the
-tool that checks with `writeOutcomeHint`. Reads, failures before anything was
-sent (a token that would not mint, a refused path), any HTTP response, and a
-caller's cancellation are unchanged. A request that is safe to repeat although
-it is a POST (a search) passes `idempotent: true`; `writeOutcomeUnknown: false`
-turns the behaviour off for a whole client. `createGraphqlClient` has the same
-rule (`GraphqlTransportError.outcomeUnknown`).
+tool that checks with `writeOutcomeHint`.
+
+A **5xx answering a sent write is outcome-unknown too** (fleet-audit#1405): a
+`502` / `504` is a gateway that lost or timed out the origin's answer, a `500` /
+`503` a backend that may have committed before it failed, so the client throws
+`WriteOutcomeUnknownError` with the `ApiError` as `cause` (and
+`writeOutcomeStatus(err)` returns the status) instead of an `ApiError` that
+reads as "it failed, send it again". Every 5xx counts except `501` and `505`,
+which refuse the request before anything handles it; a configured
+`retry.statuses` retry still happens first. A 4xx stays a plain `ApiError` — the
+server refused the write. A CDN/WAF refusal page stays `EdgeBlockedError`. An
+API that answers a 5xx only when nothing was committed can keep it a hard
+failure from `onErrorResponse`, whose returned error is always thrown as is:
+
+```ts
+createApiClient({
+  // …
+  onErrorResponse: ({ status, body }) =>
+    status === 503 && body.includes('maintenance') ? new ApiError(503, 'Svc is down for maintenance; nothing was sent.') : undefined,
+});
+```
+
+Reads, failures before anything was sent (a token that would not mint, a
+refused path), a 4xx, and a caller's cancellation are unchanged. A request that
+is safe to repeat although it is a POST (a search) passes `idempotent: true`;
+`writeOutcomeUnknown: false` turns the behaviour off for a whole client.
+`createGraphqlClient` has the same rule (`GraphqlTransportError.outcomeUnknown`).
 
 ```ts
 try {
@@ -986,9 +1007,13 @@ try {
 `{ ok: false, result }` with whatever `onUnknown(err, reason)` builds
 (typically a non-error `status: "unknown"` tool result); every other failure
 still throws. `unknownOutcomeReason(err, { sent? })` is the clause for the
-warning (`it did not answer in time` / `it answered HTTP 502 after the post
-was sent` / `the connection dropped`), and `writeOutcomeStatus(err)` the 5xx
-behind one, if any (teams `send.ts` / outlook `writes.ts`, fleet-audit#1306):
+warning — `it did not answer in time` (a timeout), `it answered HTTP 502 after
+the request was sent` (a 5xx; `{ sent: 'the post' }` names what was sent), or
+`the connection dropped` — and `writeOutcomeStatus(err)` the 5xx behind one, if
+any (teams `send.ts` / outlook `writes.ts`, fleet-audit#1306). With
+`createApiClient` all three can occur, so an Outlook warning built on it reads
+*"Outlook did not confirm this write (it answered HTTP 503 after the request
+was sent); check Sent Items before retrying."*:
 
 ```ts
 const sent = await writeOrUnknown(() => client.sendMail(msg), (err) =>
