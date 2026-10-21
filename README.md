@@ -1054,7 +1054,9 @@ look), or `undefined` for the default `ApiError`. Pair it with a
 `baseHeaders` **function** (re-read per request) when the retry needs a
 changed header, and `idempotencyHeader: 'Idempotency-Key'` to send ONE random
 id per logical call on every attempt (429 retry, hook retry, 401 replay) — or
-a call's own `idempotencyKey`. honeybook-mcp's shape (fleet-audit#1380):
+a call's own `idempotencyKey`. The id is generated only for a write: a GET /
+HEAD / OPTIONS / TRACE or an `idempotent: true` request carries one only when
+the call supplies its own `idempotencyKey`. honeybook-mcp's shape (fleet-audit#1380):
 
 ```ts
 const api = createApiClient({

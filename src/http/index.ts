@@ -144,8 +144,11 @@ export interface ApiClientOptions {
    * a fresh id per attempt would let a retried POST create a second record
    * (fleet-audit#1380). A call can supply its own value with
    * {@link RequestOptions.idempotencyKey}; a per-request `headers` entry of
-   * the same name (any case) wins over both. Unset (the default), nothing is
-   * sent.
+   * the same name (any case) wins over both. No id is generated for a read
+   * (GET / HEAD / OPTIONS / TRACE) or a request marked
+   * {@link RequestOptions.idempotent} — nothing there can be created twice —
+   * though a caller-supplied `idempotencyKey` is still sent (fleet-audit#1465).
+   * Unset (the default), nothing is sent.
    */
   idempotencyHeader?: string;
   /**
@@ -1583,11 +1586,16 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
    * hook retry, 401 replay, redirect hop) re-sends the same id. A per-request
    * header of the same name, in any case, wins.
    */
-  function withIdempotency(opt: RequestOptions): RequestOptions {
+  function withIdempotency(method: string, opt: RequestOptions): RequestOptions {
     const name = opts.idempotencyHeader;
     if (name === undefined || name === '') return opt;
     const lower = name.toLowerCase();
     if (opt.headers && Object.keys(opt.headers).some((k) => k.toLowerCase() === lower)) return opt;
+    // Generated only for a request that could act twice: a read, or a request
+    // marked idempotent, carries none unless the caller supplied its own key
+    // (fleet-audit#1465).
+    const repeatable = opt.idempotent === true || SAFE_METHODS.has(method.toUpperCase());
+    if (opt.idempotencyKey === undefined && repeatable) return opt;
     const key = opt.idempotencyKey ?? globalThis.crypto.randomUUID();
     return { ...opt, headers: { ...opt.headers, [name]: key } };
   }
@@ -1615,15 +1623,15 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   }
 
   const fetchJson = <T>(method: string, path: string, opt: RequestOptions = {}): Promise<T> => {
-    const o = withIdempotency(opt);
+    const o = withIdempotency(method, opt);
     return guardWrite(method, o, (dispatch) => fetchJsonOnce<T>(method, path, o, dispatch));
   };
   const fetchHtml = (method: string, path: string, opt: RequestOptions = {}): Promise<string> => {
-    const o = withIdempotency(opt);
+    const o = withIdempotency(method, opt);
     return guardWrite(method, o, (dispatch) => fetchHtmlOnce(method, path, o, dispatch));
   };
   const fetchRaw = (method: string, path: string, opt: RequestOptions = {}): Promise<RawApiResponse> => {
-    const o = withIdempotency(opt);
+    const o = withIdempotency(method, opt);
     return guardWrite(method, o, (dispatch) => fetchRawOnce(method, path, o, dispatch));
   };
 
