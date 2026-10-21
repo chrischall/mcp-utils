@@ -2499,6 +2499,8 @@ past `MAX_GRAPHQL_SELECTION_DEPTH` (64), so a guard built on it fails closed
 fleet-audit#1261, #1223) configures the retry and the two error hooks:
 
 ```ts
+import { truncateErrorMessage } from '@chrischall/mcp-utils';
+
 const gql = createGraphqlClient({
   endpoint: 'https://www.hemnet.se/graphql',
   headers: { 'user-agent': USER_AGENT },
@@ -2511,8 +2513,9 @@ const gql = createGraphqlClient({
   },
   onEdgeBlocked: ({ status, vendor, headers }) =>
     new CloudflareChallengeError(`HTTP ${status} — ${vendor} bot challenge (${responseDiagnostics(headers)})`, status, vendor),
+  // `body` is RAW: truncateErrorMessage redacts it, then cuts it, before it is quoted.
   onErrorResponse: ({ status, headers, body }) =>
-    new Error(`HTTP ${status} (${responseDiagnostics(headers)}) — body starts: ${body.slice(0, 200)}`),
+    new Error(`HTTP ${status} (${responseDiagnostics(headers)}) — body starts: ${truncateErrorMessage(body, 200)}`),
 });
 ```
 
@@ -2527,7 +2530,9 @@ replaces the `EdgeBlockedError` — return a subclass so the direct-first
 fallback still fires; `responseDiagnostics(headers)` renders `server: …;
 cf-ray: …; cf-mitigated: …`. `onErrorResponse(ctx)` claims any 4xx/5xx (after
 retries, the edge check, `onRateLimited` and an auth replay) or a non-GraphQL
-2xx, on `execute()` too, with the RAW body — redact before surfacing it. An
+2xx, on `execute()` too, with the RAW body — pass anything you quote from it
+through `truncateErrorMessage` (redaction, then the cut), never a bare
+`body.slice()`. An
 error response whose body breaks off mid-read is treated as an empty body, not
 a transport failure: its status is the answer.
 

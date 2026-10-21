@@ -163,7 +163,12 @@ export interface GraphqlErrorResponseContext {
   status: number;
   /** The response headers. */
   headers: Headers;
-  /** The raw, UNREDACTED body (`''` when it could not be read). Redact before surfacing any of it. */
+  /**
+   * The raw, UNREDACTED body (`''` when it could not be read). Anything taken
+   * from it into an error message must go through `truncateErrorMessage`
+   * first (it redacts, then cuts) — never a bare `body.slice()`, which can
+   * quote a session id or password echoed in the first bytes.
+   */
   body: string;
   /** The parsed GraphQL envelope, when the body was one. */
   envelope: { data?: unknown; errors?: GraphqlError[]; extensions?: Record<string, unknown> } | undefined;
