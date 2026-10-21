@@ -187,6 +187,37 @@ describe('idempotencyHeader', () => {
     expect(Object.entries(h).filter(([k]) => k.toLowerCase() === 'idempotency-key')).toEqual([['idempotency-key', 'explicit']]);
   });
 
+  // fleet-audit#1465: a duplicate-call guard only matters for a request that
+  // could create something twice; a read carrying a fresh id per call is a
+  // wasted header that some guards log.
+  it.each(['GET', 'HEAD', 'OPTIONS', 'get'])('does not generate one for a %s', async (method) => {
+    const fetchImpl = vi.fn(async () => json(200, {}));
+    const c = client(fetchImpl as unknown as typeof fetch, { idempotencyHeader: 'Idempotency-Key' });
+    await c.fetchRaw(method, '/x');
+    expect(Object.keys(headersOf(fetchImpl.mock.calls[0]!)).map((k) => k.toLowerCase())).not.toContain('idempotency-key');
+  });
+
+  it('does not generate one for a request marked idempotent (a search sent as POST)', async () => {
+    const fetchImpl = vi.fn(async () => json(200, {}));
+    const c = client(fetchImpl as unknown as typeof fetch, { idempotencyHeader: 'Idempotency-Key' });
+    await c.fetchJson('POST', '/search', { body: {}, idempotent: true });
+    expect(Object.keys(headersOf(fetchImpl.mock.calls[0]!)).map((k) => k.toLowerCase())).not.toContain('idempotency-key');
+  });
+
+  it.each(['POST', 'PUT', 'PATCH', 'DELETE'])('still generates one for a %s', async (method) => {
+    const fetchImpl = vi.fn(async () => json(200, {}));
+    const c = client(fetchImpl as unknown as typeof fetch, { idempotencyHeader: 'Idempotency-Key' });
+    await c.fetchRaw(method, '/x');
+    expect(headersOf(fetchImpl.mock.calls[0]!)['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('still sends a caller-supplied key on a read (an explicit choice, as honeybook-mcp makes)', async () => {
+    const fetchImpl = vi.fn(async () => json(200, {}));
+    const c = client(fetchImpl as unknown as typeof fetch, { idempotencyHeader: 'idempotency-key' });
+    await c.fetchJson('GET', '/x', { idempotencyKey: 'mine-2' });
+    expect(headersOf(fetchImpl.mock.calls[0]!)['idempotency-key']).toBe('mine-2');
+  });
+
   it('sends nothing when not configured', async () => {
     const fetchImpl = vi.fn(async () => json(200, {}));
     await client(fetchImpl as unknown as typeof fetch).fetchJson('POST', '/x', { idempotencyKey: 'ignored' });

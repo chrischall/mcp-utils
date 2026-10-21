@@ -51,6 +51,7 @@ import {
 } from '../http/index.js';
 import { readBytesCapped } from '../http/body-limit.js';
 import { retryAfterToMs } from '../internal/retry-after.js';
+import { cancellableSleep } from '../internal/sleep.js';
 import { isReadOnlyGraphqlDocument } from './operation-kind.js';
 
 /** One entry of a GraphQL response's `errors[]`. */
@@ -127,6 +128,17 @@ export interface GraphqlRetryPolicy extends RetryPolicy {
    * (the historical replace-it behaviour).
    */
   retryAfterAsFloor?: boolean;
+  /**
+   * The longest one backoff wait may be, jitter included — an
+   * `'exponential'` backoff otherwise doubles without bound (`count: 6,
+   * delayMs: 2000` would reach 64 s). Default 30 000 (30 s, like
+   * `maxRetryAfterMs`) or `delayMs` if that is larger, so a fixed delay is
+   * never cut short. A `Retry-After` is bounded by `maxRetryAfterMs`
+   * instead. Must be a non-negative number (a `TypeError` otherwise).
+   * Every wait also ends early, rejecting with the abort, when the tool call
+   * is cancelled (fleet-audit#1443).
+   */
+  maxBackoffMs?: number;
 }
 
 /** What {@link GraphqlClientOptions.onEdgeBlocked} is shown. */
@@ -151,7 +163,12 @@ export interface GraphqlErrorResponseContext {
   status: number;
   /** The response headers. */
   headers: Headers;
-  /** The raw, UNREDACTED body (`''` when it could not be read). Redact before surfacing any of it. */
+  /**
+   * The raw, UNREDACTED body (`''` when it could not be read). Anything taken
+   * from it into an error message must go through `truncateErrorMessage`
+   * first (it redacts, then cuts) — never a bare `body.slice()`, which can
+   * quote a session id or password echoed in the first bytes.
+   */
   body: string;
   /** The parsed GraphQL envelope, when the body was one. */
   envelope: { data?: unknown; errors?: GraphqlError[]; extensions?: Record<string, unknown> } | undefined;
@@ -282,7 +299,7 @@ export interface GraphqlClientOptions {
   maxResponseBytes?: number;
   /** Injectable fetch. Defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
-  /** Injectable sleep for retries (tests). */
+  /** Injectable sleep for retries (tests). Raced against the tool call's cancellation either way. */
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -398,7 +415,8 @@ export const GRAPHQL_DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_RETRY: GraphqlRetryPolicy = { count: 1, delayMs: 2000 };
-const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+/** Default ceiling on one exponential/jittered backoff wait (fleet-audit#1443). */
+const DEFAULT_MAX_BACKOFF_MS = 30_000;
 
 /** Validate {@link GraphqlClientOptions.maxResponseBytes}; `undefined` = no cap. */
 function checkMaxBytes(value: number | undefined): number | undefined {
@@ -485,17 +503,25 @@ export function createGraphqlClient(opts: GraphqlClientOptions): GraphqlClient {
   const service = opts.serviceName ?? hostOf(opts.endpoint);
   const path = pathOf(opts.endpoint);
   const doFetch = opts.fetchImpl ?? fetch;
-  const sleep = opts.sleep ?? defaultSleep;
+  // A retry's wait stops when the tool call is cancelled (fleet-audit#1443).
+  const sleep = (ms: number): Promise<void> => cancellableSleep(ms, opts.sleep);
   const timeoutMs = opts.timeout ?? DEFAULT_TIMEOUT_MS;
   const retry = opts.retry ?? DEFAULT_RETRY;
   const retryStatuses = retry.statuses ?? [429];
   const random = opts.random ?? Math.random;
+  // Default: 30 s, but never below the policy's own delayMs — a plain fixed
+  // RetryPolicy waits exactly what it asked for, as before.
+  const maxBackoffMs = retry.maxBackoffMs ?? Math.max(DEFAULT_MAX_BACKOFF_MS, retry.delayMs ?? 0);
+  if (typeof maxBackoffMs !== 'number' || Number.isNaN(maxBackoffMs) || maxBackoffMs < 0) {
+    throw new TypeError(`createGraphqlClient: retry.maxBackoffMs must be a non-negative number, got ${String(maxBackoffMs)}.`);
+  }
 
   /** The wait before retry number `n` (1-based), before any Retry-After. */
   function backoffMs(n: number): number {
     const base = retry.backoff === 'exponential' ? retry.delayMs * 2 ** (n - 1) : retry.delayMs;
     const jitter = retry.jitter ?? 0;
-    return jitter > 0 ? Math.floor(base + random() * base * jitter) : base;
+    const wait = jitter > 0 ? Math.floor(base + random() * base * jitter) : base;
+    return Math.min(wait, maxBackoffMs);
   }
 
   /** The wait before retry `n` after a retryable RESPONSE (Retry-After applies). */

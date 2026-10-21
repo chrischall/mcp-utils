@@ -27,80 +27,12 @@
  * which matters because it runs on caller-supplied documents.
  */
 
-type Token =
-  | { kind: 'name'; value: string }
-  | { kind: 'punct'; value: string }
-  | { kind: 'string' };
+import { lexGraphql, type GraphqlToken } from './lexer.js';
 
-interface Lexed {
-  tokens: Token[];
-  /** An unterminated string or block string was hit. */
-  unterminated: boolean;
-}
-
-const NAME_START = /[_A-Za-z]/;
-const NAME_CONTINUE = /[_0-9A-Za-z]/;
-
-/** Tokenize per the GraphQL lexical grammar, keeping only what the top level needs. */
-function lex(src: string): Lexed {
-  const tokens: Token[] = [];
-  const n = src.length;
-  let i = 0;
-  while (i < n) {
-    const c = src[i]!;
-    // Ignored tokens: BOM, whitespace, line terminators, commas.
-    if (c === '﻿' || c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === ',') {
-      i++;
-      continue;
-    }
-    if (c === '#') {
-      while (i < n && src[i] !== '\n' && src[i] !== '\r') i++;
-      continue;
-    }
-    if (c === '"') {
-      if (src.startsWith('"""', i)) {
-        // Block string: ends at the first `"""` that is not the `\"""` escape.
-        i += 3;
-        for (;;) {
-          if (i >= n) return { tokens, unterminated: true };
-          if (src[i] === '\\' && src.startsWith('"""', i + 1)) {
-            i += 4;
-          } else if (src.startsWith('"""', i)) {
-            i += 3;
-            break;
-          } else {
-            i++;
-          }
-        }
-      } else {
-        i++;
-        for (;;) {
-          if (i >= n || src[i] === '\n' || src[i] === '\r') return { tokens, unterminated: true };
-          if (src[i] === '\\') {
-            i += 2;
-          } else if (src[i] === '"') {
-            i++;
-            break;
-          } else {
-            i++;
-          }
-        }
-      }
-      tokens.push({ kind: 'string' });
-      continue;
-    }
-    if (NAME_START.test(c)) {
-      const start = i;
-      i++;
-      while (i < n && NAME_CONTINUE.test(src[i]!)) i++;
-      tokens.push({ kind: 'name', value: src.slice(start, i) });
-      continue;
-    }
-    tokens.push({ kind: 'punct', value: c });
-    i++;
-  }
-  return { tokens, unterminated: false };
-}
+// The lexer is shared with the inspector (./lexer.ts, fleet-audit#1448);
+// lenient here: an unexpected character is a punct token the grammar below
+// marks not well-formed.
+type Token = GraphqlToken;
 
 const OPEN = new Set(['{', '(', '[']);
 const CLOSE = new Set(['}', ')', ']']);
@@ -113,9 +45,9 @@ interface Summary {
 
 /** Read the top-level definitions of a document. */
 function summarize(document: string): Summary {
-  const { tokens, unterminated } = lex(document);
+  const { tokens, error } = lexGraphql(document);
   const kinds: string[] = [];
-  let wellFormed = !unterminated;
+  let wellFormed = error === undefined;
   let i = 0;
 
   const peek = (): Token | undefined => tokens[i];

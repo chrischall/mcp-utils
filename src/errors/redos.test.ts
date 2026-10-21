@@ -34,6 +34,13 @@ describe('redactSecrets ReDoS resistance', () => {
     expect(elapsedMs(() => redactSecrets(evil))).toBeLessThan(100);
   });
 
+  it('is linear on 200 KB of quoted `"api_` JSON-key prefixes (fleet-audit#1444)', () => {
+    const evil = '"api_'.repeat(40_000);
+    expect(elapsedMs(() => redactSecrets(evil))).toBeLessThan(100);
+    const evil2 = '"api_token":"'.repeat(15_000);
+    expect(elapsedMs(() => redactSecrets(evil2))).toBeLessThan(100);
+  });
+
   it.each([
     ['a-', 'a-'.repeat(100_000)], // a base64url run with no `.`: the JWT scan must start once per run, not per `\\b`
     ['sk-', 'sk-'.repeat(66_000)],

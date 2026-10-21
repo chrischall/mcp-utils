@@ -481,6 +481,43 @@ describe('createApiClient tokenHeader + default redirect (fleet-audit#1302)', ()
     expect(loop.calls).toHaveLength(21);
   });
 
+  // fleet-audit#1450: the manual loop is the one place the library can cheaply
+  // refuse a hop that an open redirect or a compromised upstream steers at
+  // the cloud metadata service, loopback (the fetchproxy bridge, a local
+  // admin UI) or a private network.
+  it.each([
+    ['link-local metadata', 'http://169.254.169.254/latest/meta-data/'],
+    ['loopback', 'http://127.0.0.1:8787/admin'],
+    ['loopback (decimal shorthand, normalised by URL)', 'http://2130706433/'],
+    ['RFC 1918', 'https://10.0.0.5/x'],
+    ['IPv6 loopback', 'http://[::1]:9000/'],
+    ['IPv4-mapped IPv6 loopback', 'http://[::ffff:127.0.0.1]/'],
+    ['ULA (Fly 6PN)', 'http://[fdaa::3]/'],
+    ['localhost', 'http://localhost:11434/api/tags'],
+    ['a *.localhost name', 'http://bridge.localhost/'],
+  ])('refuses an off-origin hop to a non-public address (%s) and sends nothing there', async (_label, target) => {
+    const { fn, calls } = stubFetch([redirect('https://api.example.com:8443/x'), redirect(target), jsonResponse({ meta: true })]);
+    const client = createApiClient({ baseUrl: 'https://api.example.com', tokenHeader: 'x-api-key', getToken: () => 'K', fetchImpl: fn });
+    const err = await client.fetchJson('GET', '/x').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RedirectRefusedError);
+    expect(String((err as Error).message)).toMatch(/not a public address/);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('still follows an off-origin hop to a public address', async () => {
+    const { fn, calls } = stubFetch([redirect('https://93.184.216.34/x'), jsonResponse({ ok: 1 })]);
+    const client = createApiClient({ baseUrl: 'https://api.example.com', tokenHeader: 'x-k', getToken: () => 'K', fetchImpl: fn });
+    await expect(client.fetchJson('GET', '/x')).resolves.toEqual({ ok: 1 });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('a client whose own base is a private address (a LAN device) is not stopped by the check', async () => {
+    const { fn, calls } = stubFetch([redirect('http://192.168.1.10:8443/x'), jsonResponse({ ok: 1 })]);
+    const client = createApiClient({ baseUrl: 'http://192.168.1.10:8123', tokenHeader: 'x-k', getToken: () => 'K', fetchImpl: fn });
+    await expect(client.fetchJson('GET', '/x')).resolves.toEqual({ ok: 1 });
+    expect(calls).toHaveLength(2);
+  });
+
   it("leaves a client without tokenHeader on fetch's own redirect handling", async () => {
     const { fn, calls } = stubFetch([jsonResponse({})]);
     await createApiClient({ baseUrl: 'https://api.example.com', getToken: () => 'T', fetchImpl: fn }).fetchJson('GET', '/');

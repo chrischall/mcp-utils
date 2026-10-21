@@ -18,6 +18,17 @@ describe('redactSecrets — JSON-valued secret keys', () => {
     }
   });
 
+  it('redacts api_token / apiToken / api-token as JSON keys, as it already does as query keys (fleet-audit#1444)', () => {
+    for (const key of ['api_token', 'apiToken', 'api-token', 'APIToken']) {
+      const body = `{"${key}":"abcdef1234567890abcdef","x":1}`;
+      const out = redactSecrets(body);
+      expect(out, key).not.toContain('abcdef1234567890abcdef');
+      expect(out, key).toBe(`{"${key}":"[REDACTED]","x":1}`);
+    }
+    expect(redactSecrets(`{'api_token':'abcdef1234567890abcdef'}`)).not.toContain('abcdef1234567890abcdef');
+    expect(redactSecrets('{"apiToken":12345678901234}')).not.toContain('12345678901234');
+  });
+
   it('tolerates whitespace and single quotes around the colon/value', () => {
     expect(redactSecrets(`{ "refresh_token" : "abc123def456ghi" }`)).not.toContain('abc123def456ghi');
     expect(redactSecrets(`{'password':'hunter2hunter2'}`)).not.toContain('hunter2hunter2');

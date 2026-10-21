@@ -614,6 +614,7 @@ import { createViewKit } from '@chrischall/mcp-utils';
 
 export const { viewArg, viewResponse } = createViewKit(['compact', 'full'], {
   note: 'compact strips image URLs; "full" returns the payload untouched.',
+  label: 'viator-mcp', // names the stderr warning when a projection fails
 });
 
 // a tool with no projection: compact media-strips
@@ -622,8 +623,12 @@ return viewResponse(args.view, data);
 return viewResponse(args.view, data, compactProducts);
 ```
 
-`viewResponse(view, data, { views, project? })` and `viewArg(views, note?)` are
-the same two helpers unbound. The rule they encode is the one each donor
+`viewResponse(view, data, { views, project?, label?, context? })` and
+`viewArg(views, note?)` are the same two helpers unbound. The projection runs
+through `projectOrRaw`: one that throws, or returns `undefined` because
+upstream renamed the field it reads, hands back the unprojected payload with
+a stderr warning instead of failing the call or answering with an empty
+block. The rule they encode is the one each donor
 re-explained: **a hand-written projection is NOT then media-stripped** — it
 was written with knowledge of the API and may keep an image on purpose
 (viator's `compactProduct` keeps `coverImageUrl`). `full` returns the data
@@ -1049,7 +1054,9 @@ look), or `undefined` for the default `ApiError`. Pair it with a
 `baseHeaders` **function** (re-read per request) when the retry needs a
 changed header, and `idempotencyHeader: 'Idempotency-Key'` to send ONE random
 id per logical call on every attempt (429 retry, hook retry, 401 replay) — or
-a call's own `idempotencyKey`. honeybook-mcp's shape (fleet-audit#1380):
+a call's own `idempotencyKey`. The id is generated only for a write: a GET /
+HEAD / OPTIONS / TRACE or an `idempotent: true` request carries one only when
+the call supplies its own `idempotencyKey`. honeybook-mcp's shape (fleet-audit#1380):
 
 ```ts
 const api = createApiClient({
@@ -1145,7 +1152,12 @@ would follow the `Location` to any host. A client with `tokenHeader` and no
 `redirect` option therefore follows redirects itself (like `fetch`, up to 20
 hops, 303 / POST-after-301/302 becoming a GET) and drops the `tokenHeader`,
 `Authorization`, `Cookie` and `Proxy-Authorization` headers from the first hop
-that leaves the base origin onward. Pass `redirect: 'same-origin'` to have
+that leaves the base origin onward. It also refuses (`RedirectRefusedError`,
+nothing sent) an off-origin hop to a literal non-public host — loopback,
+link-local (the cloud metadata service at `169.254.169.254`), a private
+network, `localhost` — unless the base itself is one (a LAN device); a
+hostname is not resolved, so when that matters pass a `fetchImpl` that
+dials through netguard's `createPublicOnlyDispatcher`. Pass `redirect: 'same-origin'` to have
 the client follow them itself: each `Location` is checked against the base
 origin before anything is re-sent, and a hop to another origin, a scheme
 downgrade or a hop that adds userinfo throws `RedirectRefusedError`.
@@ -2489,6 +2501,8 @@ past `MAX_GRAPHQL_SELECTION_DEPTH` (64), so a guard built on it fails closed
 fleet-audit#1261, #1223) configures the retry and the two error hooks:
 
 ```ts
+import { truncateErrorMessage } from '@chrischall/mcp-utils';
+
 const gql = createGraphqlClient({
   endpoint: 'https://www.hemnet.se/graphql',
   headers: { 'user-agent': USER_AGENT },
@@ -2501,20 +2515,26 @@ const gql = createGraphqlClient({
   },
   onEdgeBlocked: ({ status, vendor, headers }) =>
     new CloudflareChallengeError(`HTTP ${status} — ${vendor} bot challenge (${responseDiagnostics(headers)})`, status, vendor),
+  // `body` is RAW: truncateErrorMessage redacts it, then cuts it, before it is quoted.
   onErrorResponse: ({ status, headers, body }) =>
-    new Error(`HTTP ${status} (${responseDiagnostics(headers)}) — body starts: ${body.slice(0, 200)}`),
+    new Error(`HTTP ${status} (${responseDiagnostics(headers)}) — body starts: ${truncateErrorMessage(body, 200)}`),
 });
 ```
 
 `GraphqlRetryPolicy`'s new fields are all off by default, so a plain
-`RetryPolicy` behaves as before. A refusal page is checked BEFORE any status
+`RetryPolicy` behaves as before. One backoff wait is capped at `maxBackoffMs`
+(default 30 s, or `delayMs` if larger), so an exponential backoff cannot
+double without bound; and in both clients every retry wait ends at once,
+rejecting with the abort, when the tool call is cancelled. A refusal page is checked BEFORE any status
 retry (Cloudflare serves blocks as 429 and its legacy challenge as 503), and a
 mutation is never re-sent after a transport error. `onEdgeBlocked(ctx)`
 replaces the `EdgeBlockedError` — return a subclass so the direct-first
 fallback still fires; `responseDiagnostics(headers)` renders `server: …;
 cf-ray: …; cf-mitigated: …`. `onErrorResponse(ctx)` claims any 4xx/5xx (after
 retries, the edge check, `onRateLimited` and an auth replay) or a non-GraphQL
-2xx, on `execute()` too, with the RAW body — redact before surfacing it. An
+2xx, on `execute()` too, with the RAW body — pass anything you quote from it
+through `truncateErrorMessage` (redaction, then the cut), never a bare
+`body.slice()`. An
 error response whose body breaks off mid-read is treated as an empty body, not
 a transport failure: its status is the answer.
 
