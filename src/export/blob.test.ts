@@ -192,6 +192,16 @@ describe('put', () => {
     expect(new TextDecoder().decode(new Uint8Array(init.body as ArrayBuffer))).toBe('hé');
   });
 
+  // fleet-audit#1441: an archive is the whole part; copying it again to PUT
+  // it doubled peak memory for nothing when the view already IS its buffer.
+  it('PUTs a view that spans its whole buffer without copying it', async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    await store.put('whole.bin', bytes, 'application/octet-stream', { fetchImpl });
+    const init = (fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(init.body).toBe(bytes.buffer);
+  });
+
   it('PUTs a Uint8Array view at its own offset only', async () => {
     const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
     const backing = new Uint8Array([9, 9, 1, 2, 9]);

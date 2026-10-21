@@ -435,7 +435,13 @@ ops run in order, and the batch stops at the first failure — no rollback; the
 result names what was applied, what failed and what never ran. There is no cap
 on the number of ops unless one is set: `maxOps` on `registerBatchTool`, or
 `MCP_BATCH_MAX_OPS` (a positive whole number) for an operator who cannot change
-the code; the option wins over the variable. Spec:
+the code; the option wins over the variable. `MCP_BATCH_MAX_OPS=0` turns batches
+off (the tool refuses every call), and any other value that is not a positive
+whole number refuses every batch too, naming the bad value — a set variable
+never widens to "no cap". Planning stops (and no token is minted) once the
+caller cancels; with no cap, keep each `plan` cheap — it runs once per op
+before anything is previewed. An op with refs must plan to the batch's
+account, or it fails at that op. Spec:
 [`docs/CONFIRM-TOKEN.md` §14](docs/CONFIRM-TOKEN.md#14-batch).
 
 #### Full-replace updates: `prepareMergedUpdate`
@@ -2620,17 +2626,23 @@ The mode is chosen by the install, not the caller:
   against the same roots (and must be an existing directory, not a root
   itself) — a cursor is model-supplied text. The roots are whole user
   folders, so that is not enough on its own: every fresh export directory
-  also gets an `EXPORT_MARKER` file (`.mcp-export`, `{"exportId":…}`), and a
-  resume must name a directory with the export-name shape whose marker is a
-  regular file for the SAME `exportId` — only a directory this sink created
-  for this export. `addFile` refuses the marker's name.
+  also gets an `EXPORT_MARKER` file (`.mcp-export`, `{"exportId":…,"name":…}`),
+  and a resume must name a directory with the export-name shape whose marker
+  is a regular file for the SAME `exportId` AND server `name` — only a
+  directory this sink created for this export on this server (the id is in
+  every result, so it cannot tell one server's export from another's). A
+  marker with no `name` (written by 3.3.0) is refused; start that export
+  afresh. `addFile` refuses the marker's name.
 - **blob** (both `MCP_BLOB_BASE_URL` and `MCP_BLOB_SIGNING_KEY`, i.e. hosted on
   mcp-host): files are held in memory, zipped into ONE archive (DEFLATE for
   text — by `contentType` via `isCompressibleType`, else by extension — STORE
   for media), PUT to `exp/<exportId>/part-<NNNN>.zip`, and `location` is a
   signed GET URL (`ttlMs` default 1h, max 24h, checked at open). Always a zip,
   even for one file, so consumers handle one shape. `dest`/`existingDir` are
-  ignored.
+  ignored. A part is bounded by `maxBytes` (uncompressed, summed; default
+  `EXPORT_BLOB_MAX_BYTES`, 256 MiB): an `addFile` past it throws
+  `McpToolError` (`kind: 'too_large'`) — finish the part and return the
+  resume cursor. Disk mode ignores `maxBytes`.
 
 `addFile(relPath, data, contentType?, { overwrite? })` refuses (`McpToolError`)
 an absolute, `.`/`..`/empty-segmented, backslashed or control-character path, a

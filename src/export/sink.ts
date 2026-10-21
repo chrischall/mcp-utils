@@ -24,7 +24,10 @@
  *    `exp/<exportId>/part-<NNNN>.zip`, and the result carries a signed GET URL
  *    (1h by default, 24h at most). A hosted child has no user-visible disk,
  *    so a link is the only deliverable. Always a zip, even for a single
- *    file, so a consumer handles one shape.
+ *    file, so a consumer handles one shape. Because a part lives in memory
+ *    until `finish`, it is bounded: `addFile` past `maxBytes` (default
+ *    {@link EXPORT_BLOB_MAX_BYTES}) throws, and the caller finishes the part
+ *    and resumes in the next (fleet-audit#1441).
  *
  * Exports are resumable: a call that hits its item or time budget returns a
  * cursor ({@link encodeExportCursor}), and the next call re-opens the SAME
@@ -32,11 +35,14 @@
  * is re-validated because a cursor is model-supplied text and never trusted.
  * The roots alone are too broad a check (they are whole user folders like
  * ~/Documents), so a fresh export directory also gets a {@link EXPORT_MARKER}
- * file naming its `exportId`, written exclusively and without following
- * links. A resume must name a directory with the export-name shape AND a
- * regular-file marker for the SAME `exportId` — i.e. one this sink created
- * for this export — so a forged cursor cannot aim a write (or an
- * `overwrite`) at any other folder (chrischall/mcp-utils#391).
+ * file naming its `exportId` and the server `name`, written exclusively and
+ * without following links. A resume must name a directory with the
+ * export-name shape AND a regular-file marker for the SAME `exportId` and
+ * `name` — i.e. one this sink created for this export, on this server — so a
+ * forged cursor cannot aim a write (or an `overwrite`) at any other folder
+ * (chrischall/mcp-utils#391), including another fleet server's export, whose
+ * id every result shows (fleet-audit#1452). A marker that names no server
+ * (written by 3.3.0) is refused: start that export afresh.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -53,13 +59,20 @@ import { blobStoreFromEnv, type BlobStore } from './blob.js';
 import { buildZip, isCompressibleType } from './zip.js';
 
 /**
- * The marker file at the top of every disk export directory: `{"exportId":…}`.
+ * The marker file at the top of every disk export directory: `{"exportId":…,"name":…}`.
  * Resume requires it (see the module header); `addFile` refuses the name.
  */
 export const EXPORT_MARKER = '.mcp-export';
 
 /** A fresh export directory's name ends in its UTC stamp, then an optional `-n`. */
 const EXPORT_DIR_NAME = /-\d{8}-\d{6}(?:-\d+)?$/;
+
+/**
+ * Default bound on one blob-mode part's files, summed uncompressed: 256 MiB.
+ * The part is held in memory, zipped, then uploaded, so peak use is a
+ * multiple of it.
+ */
+export const EXPORT_BLOB_MAX_BYTES = 256 * 1024 * 1024;
 
 /** Where an export is delivered: local files, or a signed link to a zip in the hosted blob store. */
 export type ExportMode = 'disk' | 'blob';
@@ -90,6 +103,15 @@ export interface OpenExportSinkOptions {
   ttlMs?: number;
   /** Cancels the blob upload. */
   signal?: AbortSignal;
+  /**
+   * Blob mode: most bytes (uncompressed, summed over the part's files) one
+   * part may hold — every file is kept in memory until `finish`. An
+   * `addFile` past it throws {@link McpToolError} (`kind: 'too_large'`);
+   * finish the part and resume in the next. Default
+   * {@link EXPORT_BLOB_MAX_BYTES}. Disk mode writes each file as it comes and
+   * ignores it.
+   */
+  maxBytes?: number;
 }
 
 /** Options for {@link ExportSink.addFile}. */
@@ -272,13 +294,16 @@ export async function openExportSink(opts: OpenExportSinkOptions): Promise<Expor
   const part = checkPart(opts.part ?? 1);
   const exportId = checkExportId(opts.exportId);
   const now = opts.now;
+  if (opts.maxBytes !== undefined && !(Number.isSafeInteger(opts.maxBytes) && opts.maxBytes > 0)) {
+    throw new TypeError(`openExportSink: maxBytes must be a positive whole number, got ${opts.maxBytes}.`);
+  }
   const store = blobStoreFromEnv(env);
   if (store) return openBlobSink(store, exportId, part, opts, now);
   if (opts.existingDir !== undefined) {
-    return openDiskSink(resumeDir(opts.existingDir, opts.envVar, env, exportId), exportId, part);
+    return openDiskSink(resumeDir(opts.existingDir, opts.envVar, env, exportId, opts.name), exportId, part);
   }
   const dir = freshDir(opts, env, now);
-  await writeFileSafe(join(dir, EXPORT_MARKER), new TextEncoder().encode(JSON.stringify({ exportId })), {
+  await writeFileSafe(join(dir, EXPORT_MARKER), new TextEncoder().encode(JSON.stringify({ exportId, name: opts.name })), {
     allowedRoots: [dir],
     mode: 0o600,
   });
@@ -334,8 +359,11 @@ function notThisExport(): McpToolError {
   );
 }
 
-/** The `exportId` in `dir`'s marker, read without following a link; `undefined` if absent or not ours. */
-function readMarker(dir: string): string | undefined {
+/** Longest marker {@link readMarker} reads: a 64-char id plus a server name, with room to spare. */
+const MAX_MARKER = 4096;
+
+/** `dir`'s marker, read without following a link; `undefined` if absent or malformed. */
+function readMarker(dir: string): { exportId: string; name: string | undefined } | undefined {
   let fd: number;
   try {
     fd = openSync(join(dir, EXPORT_MARKER), fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
@@ -343,11 +371,13 @@ function readMarker(dir: string): string | undefined {
     return undefined;
   }
   try {
-    const buf = Buffer.alloc(256);
+    const buf = Buffer.alloc(MAX_MARKER);
     const n = readSync(fd, buf, 0, buf.length, 0);
-    const parsed: unknown = JSON.parse(buf.subarray(0, n).toString('utf8'));
-    const id = (parsed as { exportId?: unknown } | null)?.exportId;
-    return typeof id === 'string' ? id : undefined;
+    const parsed = JSON.parse(buf.subarray(0, n).toString('utf8')) as { exportId?: unknown; name?: unknown } | null;
+    const id = parsed?.exportId;
+    const name = parsed?.name;
+    if (typeof id !== 'string') return undefined;
+    return { exportId: id, name: typeof name === 'string' ? name : undefined };
   } catch {
     return undefined;
   } finally {
@@ -355,7 +385,7 @@ function readMarker(dir: string): string | undefined {
   }
 }
 
-function resumeDir(existingDir: string, envVar: string, env: EnvSource, exportId: string): string {
+function resumeDir(existingDir: string, envVar: string, env: EnvSource, exportId: string, name: string): string {
   if (typeof existingDir !== 'string' || existingDir.length === 0) throw outsideRoots('export directory', envVar);
   const roots = exportAllowedRoots(envVar, env);
   const real = within(existingDir, roots, 'export directory', envVar);
@@ -382,7 +412,11 @@ function resumeDir(existingDir: string, envVar: string, env: EnvSource, exportId
   } catch {
     markerIsFile = false;
   }
-  if (!markerIsFile || readMarker(real) !== exportId) throw notThisExport();
+  if (!markerIsFile) throw notThisExport();
+  const marker = readMarker(real);
+  // Both, exactly: the id is in every result, so only the server name says
+  // whose folder this is. A marker with no name (3.3.0) cannot say.
+  if (!marker || marker.exportId !== exportId || marker.name !== name) throw notThisExport();
   return real;
 }
 
@@ -443,6 +477,8 @@ function openBlobSink(
   // Validate the key and TTL now, before the caller does an export's worth of work.
   store.signGetUrl(key, { ...signOpts, now: now ?? Date.now() });
   const entries = new Map<string, { bytes: Uint8Array; compress: boolean }>();
+  const maxBytes = opts.maxBytes ?? EXPORT_BLOB_MAX_BYTES;
+  let held = 0;
   let finished = false;
   return {
     mode: 'blob',
@@ -453,6 +489,20 @@ function openBlobSink(
       checkRelPath(relPath);
       if (entries.has(relPath) && !o.overwrite) throw badInput(`Export file ${relPath} was already written.`);
       const bytes = toBytes(data);
+      const replaced = entries.get(relPath)?.bytes.byteLength ?? 0;
+      if (bytes.byteLength > maxBytes) {
+        throw new McpToolError(`Export file ${relPath} alone is ${bytes.byteLength} bytes, over the ${maxBytes}-byte part limit.`, {
+          kind: 'too_large',
+          hint: 'No export part can hold this file: skip it, or raise the part limit (maxBytes).',
+        });
+      }
+      if (held - replaced + bytes.byteLength > maxBytes) {
+        throw new McpToolError(`This export part would exceed its ${maxBytes}-byte limit with ${relPath}.`, {
+          kind: 'too_large',
+          hint: 'Finish this part and continue the export in the next one (return the resume cursor).',
+        });
+      }
+      held += bytes.byteLength - replaced;
       entries.delete(relPath);
       entries.set(relPath, { bytes, compress: shouldCompress(relPath, contentType) });
       return { name: relPath, bytes: bytes.byteLength };
