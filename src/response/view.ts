@@ -212,6 +212,13 @@ export interface ViewResponseOptions {
    * ({@link stripMediaUrls}) and keeps every other field.
    */
   project?: ViewProjector;
+  /**
+   * The MCP's own name, for the stderr warning when {@link project} throws or
+   * returns `undefined` ({@link projectOrRaw}). Defaults to `'mcp'`.
+   */
+  label?: string;
+  /** Which call produced `data`, for the same warning. Defaults to `'the compact view'`. */
+  context?: string;
 }
 
 /**
@@ -234,7 +241,9 @@ export function viewArg(
  *
  *  - `compact` (the default, and the fallback for a rung the tool does not
  *    honour — {@link resolveView}): `project(data)` when the tool has a
- *    projection, else `stripMediaUrls(data)`; minified.
+ *    projection, else `stripMediaUrls(data)`; minified. A projection that
+ *    throws or returns `undefined` falls back to the unprojected `data`
+ *    with a stderr warning ({@link projectOrRaw}).
  *  - `full`: `data` untouched, minified. The projector never runs.
  *  - `raw`: `data` untouched, indented ({@link viewResult}).
  *
@@ -244,7 +253,14 @@ export function viewArg(
 export function viewResponse(view: string | undefined, data: unknown, opts: ViewResponseOptions): CallToolResult {
   const rung = resolveView(view, opts.views);
   if (rung !== 'compact') return viewResult(rung, data);
-  return minifiedResult(opts.project ? opts.project(data) : stripMediaUrls(data));
+  if (!opts.project) return minifiedResult(stripMediaUrls(data));
+  // projectOrRaw, not a bare call: a projector that throws or returns
+  // `undefined` (upstream renamed the key it reads) would otherwise take the
+  // call down or emit a content block with no `text` — so it hands back the
+  // unprojected payload and says why on stderr (fleet-audit#1442).
+  return minifiedResult(
+    projectOrRaw(data, opts.project, { label: opts.label ?? 'mcp', context: opts.context ?? 'the compact view' }),
+  );
 }
 
 /** What {@link createViewKit} returns: the two helpers, bound to one rung list. */
@@ -270,13 +286,17 @@ export interface ViewKit {
  * The rung list is validated at construction ({@link viewParam}'s rules), so a
  * server cannot boot advertising a `view` it cannot honour.
  */
-export function createViewKit(views: readonly View[], opts: { note?: string } = {}): ViewKit {
+export function createViewKit(views: readonly View[], opts: { note?: string; label?: string } = {}): ViewKit {
   viewParam(views); // validate once, at construction
   const fixed = [...views];
   return {
     views: fixed,
     viewArg: (note = opts.note) => viewArg(fixed, note),
     viewResponse: (view, data, project) =>
-      viewResponse(view, data, { views: fixed, ...(project !== undefined ? { project } : {}) }),
+      viewResponse(view, data, {
+        views: fixed,
+        ...(project !== undefined ? { project } : {}),
+        ...(opts.label !== undefined ? { label: opts.label } : {}),
+      }),
   };
 }

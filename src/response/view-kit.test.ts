@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createViewKit, viewArg, viewResponse } from './view.js';
 
 // fleet-audit#1348: viator-mcp `src/view.ts` (the reference — an optional
@@ -44,6 +44,37 @@ describe('viewResponse', () => {
   it('raw stays indented, as viewResult does', () => {
     const out = text(viewResponse('raw', { a: 1 }, { views: ['compact', 'full', 'raw'] }));
     expect(out).toBe('{\n  "a": 1\n}');
+  });
+
+  describe('a projector that loses its footing falls back to the unprojected payload (fleet-audit#1442)', () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it('a projector returning undefined never yields a text-less block — it returns the payload and warns', () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const out = viewResponse('compact', record, { views: VIEWS, project: () => undefined, label: 'demo-mcp', context: 'GET /tours' });
+      expect(typeof out.content[0]!.text).toBe('string');
+      expect(JSON.parse(text(out))).toEqual(record);
+      expect(err).toHaveBeenCalledWith(expect.stringMatching(/^\[demo-mcp\] WARNING: could not project GET \/tours \(the projection produced nothing\)/));
+    });
+
+    it('a throwing projector does not take the call down — it returns the payload and warns', () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const out = viewResponse('compact', record, {
+        views: VIEWS,
+        project: () => {
+          throw new TypeError("Cannot read properties of undefined (reading 'items')");
+        },
+      });
+      expect(JSON.parse(text(out))).toEqual(record);
+      expect(err).toHaveBeenCalledWith(expect.stringContaining("reading 'items'"));
+    });
+
+    it('the kit passes its label through to the warning', () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const kit = createViewKit(VIEWS, { label: 'kit-mcp' });
+      expect(JSON.parse(text(kit.viewResponse('compact', record, () => undefined)))).toEqual(record);
+      expect(err).toHaveBeenCalledWith(expect.stringMatching(/^\[kit-mcp\]/));
+    });
   });
 
   it('a rung the tool does not honour falls back to compact, like resolveView', () => {

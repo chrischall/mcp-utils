@@ -614,6 +614,7 @@ import { createViewKit } from '@chrischall/mcp-utils';
 
 export const { viewArg, viewResponse } = createViewKit(['compact', 'full'], {
   note: 'compact strips image URLs; "full" returns the payload untouched.',
+  label: 'viator-mcp', // names the stderr warning when a projection fails
 });
 
 // a tool with no projection: compact media-strips
@@ -622,8 +623,12 @@ return viewResponse(args.view, data);
 return viewResponse(args.view, data, compactProducts);
 ```
 
-`viewResponse(view, data, { views, project? })` and `viewArg(views, note?)` are
-the same two helpers unbound. The rule they encode is the one each donor
+`viewResponse(view, data, { views, project?, label?, context? })` and
+`viewArg(views, note?)` are the same two helpers unbound. The projection runs
+through `projectOrRaw`: one that throws, or returns `undefined` because
+upstream renamed the field it reads, hands back the unprojected payload with
+a stderr warning instead of failing the call or answering with an empty
+block. The rule they encode is the one each donor
 re-explained: **a hand-written projection is NOT then media-stripped** — it
 was written with knowledge of the API and may keep an image on purpose
 (viator's `compactProduct` keeps `coverImageUrl`). `full` returns the data
