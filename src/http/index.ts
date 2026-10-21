@@ -44,6 +44,7 @@ import { parseRetryAfterMs } from './net-atoms.js';
 import { RedirectRefusedError, findPathHazard } from './url-safety.js';
 import { isPublicAddress } from '../netguard/address.js';
 import { retryAfterToMs } from '../internal/retry-after.js';
+import { cancellableSleep } from '../internal/sleep.js';
 
 // ---------------------------------------------------------------------------
 // createApiClient
@@ -208,7 +209,11 @@ export interface ApiClientOptions {
   onRateLimited?: (ctx: RateLimitContext) => Error;
   /** Injectable fetch (for tests). Defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
-  /** Injectable sleep (for tests). Defaults to `setTimeout`. */
+  /**
+   * Injectable sleep (for tests). Defaults to `setTimeout`. Either way the
+   * wait ends at once, rejecting with the abort, when the running tool call
+   * is cancelled (fleet-audit#1443).
+   */
   sleep?: (ms: number) => Promise<void>;
   /**
    * Per-attempt request timeout in milliseconds. When set (> 0), each fetch is
@@ -465,7 +470,6 @@ export interface RawApiResponse {
 
 const DEFAULT_RETRY: RetryPolicy = { count: 1, delayMs: 2000 };
 
-const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
  * The per-attempt timeout {@link createApiClient} (and {@link fetchBounded})
@@ -1050,7 +1054,8 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   const retry = opts.retry ?? DEFAULT_RETRY;
   const service = opts.serviceName ?? hostOf(opts.baseUrl);
   const doFetch = opts.fetchImpl ?? fetch;
-  const sleep = opts.sleep ?? defaultSleep;
+  // A retry's wait stops when the tool call is cancelled (fleet-audit#1443).
+  const sleep = (ms: number): Promise<void> => cancellableSleep(ms, opts.sleep);
   const unauthorized = (): Error => (opts.onUnauthorized ? opts.onUnauthorized() : new UnauthorizedError(service));
   const retryStatuses = retry.statuses ?? [429];
   const timeoutMs = opts.timeout === false ? 0 : (opts.timeout ?? DEFAULT_REQUEST_TIMEOUT_MS);

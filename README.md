@@ -2517,7 +2517,10 @@ const gql = createGraphqlClient({
 ```
 
 `GraphqlRetryPolicy`'s new fields are all off by default, so a plain
-`RetryPolicy` behaves as before. A refusal page is checked BEFORE any status
+`RetryPolicy` behaves as before. One backoff wait is capped at `maxBackoffMs`
+(default 30 s, or `delayMs` if larger), so an exponential backoff cannot
+double without bound; and in both clients every retry wait ends at once,
+rejecting with the abort, when the tool call is cancelled. A refusal page is checked BEFORE any status
 retry (Cloudflare serves blocks as 429 and its legacy challenge as 503), and a
 mutation is never re-sent after a transport error. `onEdgeBlocked(ctx)`
 replaces the `EdgeBlockedError` — return a subclass so the direct-first
