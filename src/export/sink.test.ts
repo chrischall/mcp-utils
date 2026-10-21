@@ -372,6 +372,17 @@ describe('openExportSink — blob mode', () => {
     expect(loc.files).toEqual([{ name: 'a.txt', bytes: 10 }]);
   });
 
+  it('says a file bigger than the whole part limit cannot fit any part', async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const sink = await openExportSink({ ...base, env: BLOB_ENV, fetchImpl, maxBytes: 4 });
+    const err = await sink.addFile('big.bin', '12345').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpToolError);
+    expect((err as McpToolError).kind).toBe('too_large');
+    expect((err as McpToolError).message).toMatch(/alone/i);
+    expect((err as McpToolError).hint).not.toMatch(/next one/i);
+    expect((err as McpToolError).hint).toMatch(/skip|raise/i);
+  });
+
   it('bounds a blob part at 256 MiB by default, and refuses a nonsense maxBytes', async () => {
     expect(EXPORT_BLOB_MAX_BYTES).toBe(256 * 1024 * 1024);
     for (const maxBytes of [0, -1, 1.5, Number.NaN]) {

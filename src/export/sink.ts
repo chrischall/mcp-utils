@@ -490,6 +490,12 @@ function openBlobSink(
       if (entries.has(relPath) && !o.overwrite) throw badInput(`Export file ${relPath} was already written.`);
       const bytes = toBytes(data);
       const replaced = entries.get(relPath)?.bytes.byteLength ?? 0;
+      if (bytes.byteLength > maxBytes) {
+        throw new McpToolError(`Export file ${relPath} alone is ${bytes.byteLength} bytes, over the ${maxBytes}-byte part limit.`, {
+          kind: 'too_large',
+          hint: 'No export part can hold this file: skip it, or raise the part limit (maxBytes).',
+        });
+      }
       if (held - replaced + bytes.byteLength > maxBytes) {
         throw new McpToolError(`This export part would exceed its ${maxBytes}-byte limit with ${relPath}.`, {
           kind: 'too_large',
