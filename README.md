@@ -1150,7 +1150,12 @@ would follow the `Location` to any host. A client with `tokenHeader` and no
 `redirect` option therefore follows redirects itself (like `fetch`, up to 20
 hops, 303 / POST-after-301/302 becoming a GET) and drops the `tokenHeader`,
 `Authorization`, `Cookie` and `Proxy-Authorization` headers from the first hop
-that leaves the base origin onward. Pass `redirect: 'same-origin'` to have
+that leaves the base origin onward. It also refuses (`RedirectRefusedError`,
+nothing sent) an off-origin hop to a literal non-public host — loopback,
+link-local (the cloud metadata service at `169.254.169.254`), a private
+network, `localhost` — unless the base itself is one (a LAN device); a
+hostname is not resolved, so when that matters pass a `fetchImpl` that
+dials through netguard's `createPublicOnlyDispatcher`. Pass `redirect: 'same-origin'` to have
 the client follow them itself: each `Location` is checked against the base
 origin before anything is re-sent, and a hop to another origin, a scheme
 downgrade or a hop that adds userinfo throws `RedirectRefusedError`.

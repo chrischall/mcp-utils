@@ -42,6 +42,7 @@ export * from './transport-failure.js';
 import { readBytesCapped, ResponseTooLargeError } from './body-limit.js';
 import { parseRetryAfterMs } from './net-atoms.js';
 import { RedirectRefusedError, findPathHazard } from './url-safety.js';
+import { isPublicAddress } from '../netguard/address.js';
 import { retryAfterToMs } from '../internal/retry-after.js';
 
 // ---------------------------------------------------------------------------
@@ -235,7 +236,10 @@ export interface ApiClientOptions {
    * redirects itself (as fetch would, up to 20 hops) and drops the
    * `tokenHeader`, `Authorization`, `Cookie` and `Proxy-Authorization`
    * headers from the first hop that leaves the base origin onward
-   * (fleet-audit#1302). `'manual'` and `'error'` are passed straight to
+   * (fleet-audit#1302). It refuses an off-origin hop to a literal
+   * non-public host (loopback, link-local, private network, `localhost`)
+   * with {@link RedirectRefusedError} unless the base is itself one
+   * (fleet-audit#1450). `'manual'` and `'error'` are passed straight to
    * `fetch`.
    *
    * `'same-origin'` follows redirects itself (`fetch` is called with
@@ -1259,10 +1263,10 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   // The base's own origin and userinfo. A baseUrl may legitimately carry
   // userinfo (`https://u:pw@host`); a resolved URL must then carry exactly
   // that userinfo, never a different or newly-introduced one.
-  const baseParts = ((): { origin: string; username: string; password: string } | undefined => {
+  const baseParts = ((): { origin: string; hostname: string; username: string; password: string } | undefined => {
     try {
       const u = new URL(base);
-      return { origin: u.origin, username: u.username, password: u.password };
+      return { origin: u.origin, hostname: u.hostname, username: u.username, password: u.password };
     } catch {
       return undefined;
     }
@@ -1338,6 +1342,23 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     );
   }
 
+  /**
+   * A literal non-public host — an IP outside the public internet
+   * ({@link isPublicAddress}: loopback, link-local incl. the cloud metadata
+   * service, RFC 1918, ULA, …) or `localhost` / `*.localhost`. A hostname is
+   * not resolved here (that needs netguard's DNS-pinning connector); this
+   * stops the cheap, literal steer an open redirect makes (fleet-audit#1450).
+   */
+  function isNonPublicLiteralHost(hostname: string): boolean {
+    const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+    if (host === 'localhost' || host.endsWith('.localhost')) return true;
+    if (/^[\d.]+$/.test(host) || host.includes(':')) return !isPublicAddress(host);
+    return false;
+  }
+  // A client whose own base is a LAN/loopback address talks to private hosts
+  // by design; the check is for a public base being steered inward.
+  const baseIsPublic = baseParts !== undefined && !isNonPublicLiteralHost(baseParts.hostname);
+
   function sameOriginHop(location: string, from: string): string {
     const href = resolveLocation(location, from);
     const next = new URL(href);
@@ -1403,9 +1424,16 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
         }
         if (stripCrossOrigin) {
           hopUrl = resolveLocation(location, hopUrl);
+          const offOrigin = !onBaseOrigin(hopUrl);
+          if (offOrigin && baseIsPublic && isNonPublicLiteralHost(new URL(hopUrl).hostname)) {
+            throw new RedirectRefusedError(
+              `Refusing redirect from ${service} to ${new URL(hopUrl).origin}: it is not a public address ` +
+                '(loopback, link-local or a private network), so nothing is sent there.',
+            );
+          }
           // Sticky: once the request has left the base origin, nothing it is
           // redirected to later is trusted with the credential.
-          if (credentialed && !onBaseOrigin(hopUrl)) credentialed = false;
+          if (credentialed && offOrigin) credentialed = false;
         } else {
           hopUrl = sameOriginHop(location, hopUrl);
         }
