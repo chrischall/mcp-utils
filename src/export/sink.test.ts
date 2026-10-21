@@ -6,7 +6,9 @@ import { inflateRawSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { McpToolError } from '../errors/index.js';
 import {
+  EXPORT_BLOB_MAX_BYTES,
   EXPORT_CURSOR_MAX_LENGTH,
+  EXPORT_MARKER,
   decodeExportCursor,
   encodeExportCursor,
   exportAllowedRoots,
@@ -163,6 +165,32 @@ describe('openExportSink — disk mode', () => {
     await first.finish();
     await expect(
       openExportSink({ ...base, env: {}, existingDir: first.dir!, exportId: 'zzzzzzzzzzzzzzzz', part: 2 }),
+    ).rejects.toBeInstanceOf(McpToolError);
+  });
+
+  // fleet-audit#1452: exportId is shown in every result, so it alone does not
+  // say whose folder it is. Another fleet server's export (same roots) must
+  // not resume into this one.
+  it("refuses another server's export dir even with that export's own id", async () => {
+    const teams = await openExportSink({ ...base, name: 'microsoft-teams-mcp', baseName: 'teams-messages', env: {}, dest: join(home, 'Downloads') });
+    await teams.finish();
+    await expect(
+      openExportSink({ ...base, env: {}, existingDir: teams.dir!, exportId: teams.exportId, part: 2 }),
+    ).rejects.toBeInstanceOf(McpToolError);
+    // ...and the owning server still resumes it.
+    const again = await openExportSink({ ...base, name: 'microsoft-teams-mcp', baseName: 'teams-messages', env: {}, existingDir: teams.dir!, exportId: teams.exportId, part: 2 });
+    expect(again.dir).toBe(teams.dir);
+  });
+
+  it('writes the server name into the marker, and refuses a marker without one', async () => {
+    const first = await openExportSink({ ...base, env: {} });
+    await first.finish();
+    const marker = join(first.dir!, EXPORT_MARKER);
+    expect(JSON.parse(readFileSync(marker, 'utf8'))).toEqual({ exportId: first.exportId, name: 'office-outlook-mcp' });
+    // A 3.3.0 marker named only the id: it cannot say which server owns the folder.
+    writeFileSync(marker, JSON.stringify({ exportId: first.exportId }));
+    await expect(
+      openExportSink({ ...base, env: {}, existingDir: first.dir!, exportId: first.exportId, part: 2 }),
     ).rejects.toBeInstanceOf(McpToolError);
   });
 
@@ -325,6 +353,36 @@ describe('openExportSink — blob mode', () => {
     expect(loc.files).toEqual([{ name: 'manifest.json', bytes: 7 }]);
     const zip = new Uint8Array((fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1].body as ArrayBuffer);
     expect(unzip(zip).get('manifest.json')).toBe('{"a":1}');
+  });
+
+  // fleet-audit#1441: blob mode holds every file in memory until finish, so
+  // it is bounded — a hosted child's memory is not the caller's budget.
+  it('refuses a file that would take the part past maxBytes, naming the way out', async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const sink = await openExportSink({ ...base, env: BLOB_ENV, fetchImpl, maxBytes: 10 });
+    await sink.addFile('a.txt', '123456');
+    const err = await sink.addFile('b.txt', '12345').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpToolError);
+    expect((err as McpToolError).kind).toBe('too_large');
+    expect((err as McpToolError).hint).toMatch(/finish/i);
+    // An overwrite counts the replacement, not both copies.
+    await sink.addFile('a.txt', '1234567890', undefined, { overwrite: true });
+    await expect(sink.addFile('c.txt', 'x')).rejects.toBeInstanceOf(McpToolError);
+    const loc = await sink.finish();
+    expect(loc.files).toEqual([{ name: 'a.txt', bytes: 10 }]);
+  });
+
+  it('bounds a blob part at 256 MiB by default, and refuses a nonsense maxBytes', async () => {
+    expect(EXPORT_BLOB_MAX_BYTES).toBe(256 * 1024 * 1024);
+    for (const maxBytes of [0, -1, 1.5, Number.NaN]) {
+      await expect(openExportSink({ ...base, env: BLOB_ENV, maxBytes })).rejects.toThrow(/maxBytes/);
+    }
+  });
+
+  it('does not bound disk mode, which streams each file to disk', async () => {
+    const sink = await openExportSink({ ...base, env: {}, maxBytes: 4 });
+    await sink.addFile('a.txt', '12345678');
+    expect((await sink.finish()).bytes).toBe(8);
   });
 
   it('ignores dest/existingDir in blob mode (nothing touches disk)', async () => {

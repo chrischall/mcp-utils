@@ -167,8 +167,14 @@ function expiry(opts: BlobSignOptions | undefined): number {
   return Math.floor((opts?.now ?? Date.now()) + ttl);
 }
 
-/** A standalone ArrayBuffer holding exactly the view's bytes. */
+/**
+ * An ArrayBuffer holding exactly the view's bytes: the view's own buffer when
+ * it spans all of it (a built zip, an encoded string — no second copy of a
+ * whole archive, fleet-audit#1441), else a copy of just its range.
+ */
 function toArrayBuffer(view: Uint8Array): ArrayBuffer {
+  const buf = view.buffer;
+  if (buf instanceof ArrayBuffer && view.byteOffset === 0 && view.byteLength === buf.byteLength) return buf;
   return view.slice().buffer as ArrayBuffer;
 }
 

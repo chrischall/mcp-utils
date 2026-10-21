@@ -2626,17 +2626,23 @@ The mode is chosen by the install, not the caller:
   against the same roots (and must be an existing directory, not a root
   itself) — a cursor is model-supplied text. The roots are whole user
   folders, so that is not enough on its own: every fresh export directory
-  also gets an `EXPORT_MARKER` file (`.mcp-export`, `{"exportId":…}`), and a
-  resume must name a directory with the export-name shape whose marker is a
-  regular file for the SAME `exportId` — only a directory this sink created
-  for this export. `addFile` refuses the marker's name.
+  also gets an `EXPORT_MARKER` file (`.mcp-export`, `{"exportId":…,"name":…}`),
+  and a resume must name a directory with the export-name shape whose marker
+  is a regular file for the SAME `exportId` AND server `name` — only a
+  directory this sink created for this export on this server (the id is in
+  every result, so it cannot tell one server's export from another's). A
+  marker with no `name` (written by 3.3.0) is refused; start that export
+  afresh. `addFile` refuses the marker's name.
 - **blob** (both `MCP_BLOB_BASE_URL` and `MCP_BLOB_SIGNING_KEY`, i.e. hosted on
   mcp-host): files are held in memory, zipped into ONE archive (DEFLATE for
   text — by `contentType` via `isCompressibleType`, else by extension — STORE
   for media), PUT to `exp/<exportId>/part-<NNNN>.zip`, and `location` is a
   signed GET URL (`ttlMs` default 1h, max 24h, checked at open). Always a zip,
   even for one file, so consumers handle one shape. `dest`/`existingDir` are
-  ignored.
+  ignored. A part is bounded by `maxBytes` (uncompressed, summed; default
+  `EXPORT_BLOB_MAX_BYTES`, 256 MiB): an `addFile` past it throws
+  `McpToolError` (`kind: 'too_large'`) — finish the part and return the
+  resume cursor. Disk mode ignores `maxBytes`.
 
 `addFile(relPath, data, contentType?, { overwrite? })` refuses (`McpToolError`)
 an absolute, `.`/`..`/empty-segmented, backslashed or control-character path, a
