@@ -554,7 +554,11 @@ describe the gate; no side effects) and `execute` — under ONE gate:
    refused whole.
 2. Ops without refs are planned now and shown and bound by their gates. An op
    with refs is shown and bound by its arguments, each ref as
-   `<output from op N>`; it is planned when it runs.
+   `<output from op N>`; it is planned when it runs, and its gate must name
+   the batch's account or that op fails (status `partial`/`failed`) without
+   running. Refs name OWN keys only: `toString`, `constructor`, `__proto__`
+   are refused in step 1 like any unknown argument or output. Planning stops
+   once the caller cancels, before a token is minted.
 3. One `confirmWrite` with `tool` = the batch tool and `action` =
    `batch.write`: one elicitation prompt, or one phase-1 preview whose
    `willSend` lists every op. All planned ops must run as one account. The
@@ -573,5 +577,7 @@ describe the gate; no side effects) and `execute` — under ONE gate:
 ```
 
 `partial` and `failed` are `isError: true`. A batch has no op cap unless the
-server sets one (`maxOps`, or the operator's environment — see the README). A batch is confirmable through the
+server sets one (`maxOps`, or the operator's environment — see the README,
+where a zero turns batches off and an unparseable value refuses every batch
+rather than meaning "no cap"). A batch is confirmable through the
 confirm tool of §13 like any other gated write.

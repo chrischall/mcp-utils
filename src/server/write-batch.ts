@@ -29,7 +29,11 @@
  *    bound. An op with refs cannot be planned yet (its target does not exist
  *    until the op it depends on runs), so it is shown — and bound — by its
  *    arguments, with each ref as `<output from op N>`; its own checks run when
- *    it executes.
+ *    it executes, and its gate must name the batch's account (a mismatch
+ *    fails that op, fleet-audit#1451). Planning stops, and no token is
+ *    minted, once the caller cancels (fleet-audit#1449). Under an uncapped
+ *    batch `plan` runs once per op before anything is previewed, so keep it
+ *    cheap: an advisory read, not a crawl.
  * 3. One `confirmWrite` for the whole list: one elicitation prompt, or one
  *    phase-1 preview + token. The token binds every op, so it cannot be spent
  *    on a different batch, and it is bound to the BATCH tool, so it never acts
@@ -143,7 +147,8 @@ export interface BatchToolOptions {
   /**
    * Most ops in one batch. Default: `MCP_BATCH_MAX_OPS` when the operator set
    * it, else no cap — one approval covers the whole list either way, and every
-   * op is in its preview.
+   * op is in its preview. `MCP_BATCH_MAX_OPS=0` turns batches off; see
+   * {@link maxOpsFromEnv}.
    */
   maxOps?: number;
   /** Environment to read `MCP_BATCH_MAX_OPS` from; default `process.env`. */
@@ -154,21 +159,31 @@ export interface BatchToolOptions {
 
 const warnedMaxOps = new Set<string>();
 
+/** The batch cap, or why every batch is refused. */
+type MaxOps = { cap: number | undefined } | { off: string };
+
 /**
  * `MCP_BATCH_MAX_OPS`: a positive whole number caps every batch tool in the
- * process; absent means no cap. An unparseable value warns once on stderr and
- * leaves the default (no cap) — it cannot widen anything, since uncapped IS
- * the default.
+ * process; absent (or empty) means no cap — the owner's default (#387).
+ *
+ * `0` turns batches OFF: the tool stays listed (so a model that reaches for it
+ * learns why) but refuses every call. Anything else — a negative, a fraction,
+ * a typo — is a configuration error, and it FAILS CLOSED the same way, with a
+ * message naming the value, and a one-time stderr warning: an operator who
+ * set the variable meant to restrict batches, and "no cap" is the one reading
+ * guaranteed to be wrong (fleet-audit#1447).
  */
-function maxOpsFromEnv(env: EnvSource): number | undefined {
+function maxOpsFromEnv(env: EnvSource): MaxOps {
   const raw = readEnvVar('MCP_BATCH_MAX_OPS', { env })?.trim();
-  if (!raw) return undefined;
-  if (/^[1-9]\d*$/.test(raw)) return Number(raw);
+  if (!raw) return { cap: undefined };
+  if (/^[1-9]\d*$/.test(raw)) return { cap: Number(raw) };
+  if (/^0+$/.test(raw)) return { off: 'Batches are turned off on this server (MCP_BATCH_MAX_OPS=0).' };
+  const off = `MCP_BATCH_MAX_OPS="${raw}" is not a whole number, so every batch is refused until the operator fixes it.`;
   if (!warnedMaxOps.has(raw)) {
     warnedMaxOps.add(raw);
-    process.stderr.write(`MCP_BATCH_MAX_OPS="${raw}" is not a positive whole number; batches are not capped.\n`);
+    process.stderr.write(`${off}\n`);
   }
-  return undefined;
+  return { off };
 }
 
 const REF = /^(\d+)\.([A-Za-z_][A-Za-z0-9_]*)$/;
@@ -200,11 +215,15 @@ function prepare(ops: Array<{ tool: string; args: Record<string, unknown>; refs?
       if (!m) refuse(`${at}: ref ${arg}: "${ref}" is not "<op index>.<output>"`);
       const from = Number(m[1]);
       const output = m[2]!;
-      if (!(arg in shape)) refuse(`${at}: ref ${arg}: ${op.tool} has no argument ${arg}`);
-      if (arg in op.args) refuse(`${at}: ${arg} is given both in args and in refs — pass one`);
+      // Own keys only (fleet-audit#1445): `in` and a bare lookup consult the
+      // prototype chain, so `toString` / `constructor` / `__proto__` passed
+      // here and failed only at execute time.
+      if (!Object.hasOwn(shape, arg)) refuse(`${at}: ref ${arg}: ${op.tool} has no argument ${arg}`);
+      if (Object.hasOwn(op.args, arg)) refuse(`${at}: ${arg} is given both in args and in refs — pass one`);
       if (from >= index) refuse(`${at}: ref ${arg} must name an earlier op (got op ${from})`);
       const producer = prepared[from]!.def;
-      if (!producer.produces?.[output]) {
+      const produces = producer.produces ?? {};
+      if (!Object.hasOwn(produces, output) || typeof produces[output] !== 'function') {
         const offered = Object.keys(producer.produces ?? {});
         refuse(`${at}: ref ${arg}: op ${from} (${producer.name}) produces no ${output}${offered.length ? ` (it produces ${offered.join(', ')})` : ''}`);
       }
@@ -272,7 +291,9 @@ export function registerBatchTool(server: McpServer, options: BatchToolOptions):
   if (options.maxOps !== undefined && !(Number.isInteger(options.maxOps) && options.maxOps > 0)) {
     throw new RangeError(`registerBatchTool: maxOps must be a positive whole number (got ${options.maxOps}).`);
   }
-  const maxOps = options.maxOps ?? maxOpsFromEnv(options.env ?? process.env);
+  const limit: MaxOps = options.maxOps !== undefined ? { cap: options.maxOps } : maxOpsFromEnv(options.env ?? process.env);
+  const maxOps = 'cap' in limit ? limit.cap : undefined;
+  const off = 'off' in limit ? limit.off : undefined;
   const registry = writes.get(server) ?? new Map<string, AnyWrite>();
   writes.set(server, registry);
 
@@ -285,6 +306,7 @@ export function registerBatchTool(server: McpServer, options: BatchToolOptions):
 
   const description =
     `${options.description ? `${options.description} ` : ''}`
+    + (off ? `${off} ` : '')
     + `Run ${maxOps === undefined ? 'several' : `up to ${maxOps}`} writes with ONE preview and ONE approval, in order, stopping at the first failure (no rollback: `
     + 'the result says which ops were applied). Each op is {tool, args, refs?}; args are exactly what that tool takes '
     + '(without confirmToken). refs feeds an earlier op\'s output into an argument, e.g. '
@@ -314,11 +336,15 @@ export function registerBatchTool(server: McpServer, options: BatchToolOptions):
       }),
     },
     async (input, ctx) => {
+      if (off) refuse(off);
       const prepared = prepare(input.ops, registry);
 
-      // Plan what can be planned now: every op with no refs.
+      // Plan what can be planned now: every op with no refs. Each plan may do
+      // a fresh read, so a cancelled call stops here — before any more reads,
+      // and before a token is minted that nobody would receive.
       const plans = new Map<number, WritePlan<unknown>>();
       for (const op of prepared) {
+        if (currentCallSignal()?.aborted) refuse(`Cancelled while planning op ${op.index}; nothing was previewed or run.`);
         if (op.refs.length === 0) {
           try {
             plans.set(op.index, await op.def.plan(op.args, ctx));
@@ -330,6 +356,7 @@ export function registerBatchTool(server: McpServer, options: BatchToolOptions):
       const accounts = new Set([...plans.values()].map((p) => p.gate.account));
       if (accounts.size > 1) refuse('A batch runs as one account; these ops would run as several. Split it.');
       const account = accounts.values().next().value;
+      if (currentCallSignal()?.aborted) refuse('Cancelled while planning; nothing was previewed or run.');
 
       const previews = prepared.map((op) => opPreview(op, plans.get(op.index)?.gate));
       const summaries = prepared.map((op) => plans.get(op.index)?.gate.summary ?? `${op.def.name} (after op ${op.refs[0]!.from})`);
@@ -356,16 +383,24 @@ export function registerBatchTool(server: McpServer, options: BatchToolOptions):
         }
         try {
           let plan = plans.get(op.index);
+          let action: string | undefined;
           if (!plan) {
-            const args: Record<string, unknown> = { ...op.args };
+            // Null prototype: a ref named `__proto__` is an ordinary key here.
+            const args: Record<string, unknown> = Object.assign(Object.create(null) as Record<string, unknown>, op.args);
             for (const r of op.refs) {
               args[r.arg] = prepared[r.from]!.def.produces![r.output]!(outputs.get(r.from));
             }
             plan = await op.def.plan(op.def.inputSchema.parse(args), ctx);
+            // Its gate was not in the approval, but the batch's account was:
+            // an op that would act as anyone else does not run (fleet-audit#1451).
+            if (plan.gate.account !== account) {
+              throw new Error('A batch runs as one account; this op would run as another, so it was not run.');
+            }
+            action = plan.gate.summary;
           }
           const result = await op.def.execute(plan.state, ctx);
           outputs.set(op.index, result);
-          results.push({ index: op.index, tool: op.def.name, applied: true, result });
+          results.push({ index: op.index, tool: op.def.name, ...(action === undefined ? {} : { action }), applied: true, result });
         } catch (err) {
           failedAt = op.index;
           results.push({ index: op.index, tool: op.def.name, applied: false, error: redactSecrets(messageOf(err)) });

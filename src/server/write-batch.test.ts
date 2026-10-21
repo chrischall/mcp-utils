@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { createTestHarness } from '../test/index.js';
 import { processPendingCalls } from './confirm-pending.js';
 import { registerConfirmTool } from './confirm-replay.js';
+import { currentCallSignal } from '../cancel/index.js';
 import { defineWrite, registerBatchTool, registerWrite } from './write-batch.js';
 
 // Several writes, one preview, one approval: "create the expense, comment on
@@ -293,18 +294,146 @@ describe('registerBatchTool', () => {
     vi.unstubAllEnvs();
   });
 
-  it('warns about an unparseable MCP_BATCH_MAX_OPS and stays uncapped', async () => {
-    vi.stubEnv('MCP_BATCH_MAX_OPS', 'ten');
+  // fleet-audit#1447: the one value an operator sets to turn batches OFF
+  // must not widen them to unlimited. Unset stays uncapped (#387); 0 refuses
+  // every batch; anything unparseable (a negative, a typo) is a config error
+  // that refuses every batch with a message naming it, rather than guessing.
+  it.each([
+    ['0', /turned off/],
+    ['-5', /MCP_BATCH_MAX_OPS=\\?"-5\\?" is not a whole number/],
+    ['ten', /MCP_BATCH_MAX_OPS=\\?"ten\\?" is not a whole number/],
+  ])('MCP_BATCH_MAX_OPS=%s refuses every batch instead of meaning "no cap"', async (raw, message) => {
+    vi.stubEnv('MCP_BATCH_MAX_OPS', raw);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const h = await createTestHarness((s) => {
+      registerWrite(s, thingCreate);
+      registerBatchTool(s, { name: 'thing_batch' });
+    });
+    const tool = (await h.client.listTools()).tools.find((t) => t.name === 'thing_batch')!;
+    expect(tool.description).toMatch(message);
+    const result = await h.callTool('thing_batch', { ops: [{ tool: 'thing_create', args: { name: 'a' } }] });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(message);
+    expect(created).not.toHaveBeenCalled();
+    await h.close();
+    vi.unstubAllEnvs();
+  });
+
+  it('warns once on stderr about an unparseable MCP_BATCH_MAX_OPS', async () => {
+    vi.stubEnv('MCP_BATCH_MAX_OPS', 'eleven');
     const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const h = await createTestHarness((s) => {
       registerWrite(s, thingCreate);
       registerBatchTool(s, { name: 'thing_batch' });
     });
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('MCP_BATCH_MAX_OPS="ten"'));
-    const op = { tool: 'thing_create', args: { name: 'a' } };
-    expect(json(await h.callTool('thing_batch', { ops: Array(12).fill(op) })).status).toBe('confirmation-required');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('MCP_BATCH_MAX_OPS="eleven"'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('refused'));
     await h.close();
     vi.unstubAllEnvs();
+  });
+
+  // fleet-audit#1449: the plan loop runs fresh reads before anything is
+  // previewed; a cancelled call must stop there and mint no token.
+  it('stops planning and mints no token once the call is cancelled', async () => {
+    const controller = new AbortController();
+    const planned = vi.fn();
+    const h = await createTestHarness((s) => {
+      registerWrite(s, defineWrite({
+        name: 'thing_slow',
+        description: 'x',
+        inputSchema: z.object({ n: z.number() }),
+        // A swallow-style plan: its advisory read fails on cancel and it
+        // carries on, as splitwise's `readExpense().catch(() => undefined)` does.
+        plan: async (args) => {
+          planned(args.n);
+          if (args.n === 0) {
+            controller.abort(new Error('caller went away'));
+            await vi.waitFor(() => expect(currentCallSignal()?.aborted).toBe(true));
+          }
+          return { gate: { action: 'thing.slow', account: undefined, payload: args }, state: args };
+        },
+        execute: async () => ({}),
+      }));
+      registerBatchTool(s, { name: 'thing_batch' });
+      registerConfirmTool(s, { name: 'thing_confirm' });
+    });
+    const ops = [0, 1, 2].map((n) => ({ tool: 'thing_slow', args: { n } }));
+    const call = h.client.callTool({ name: 'thing_batch', arguments: { ops } }, { signal: controller.signal });
+    await expect(call).rejects.toThrow(/caller went away/);
+    // Let the handler finish what it was doing when the cancel landed.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(planned).toHaveBeenCalledTimes(1);
+    expect(processPendingCalls().size, 'a phase-1 token was minted for a cancelled call').toBe(0);
+    await h.close();
+  });
+
+  // fleet-audit#1451: an op with refs is planned when it runs; its gate must
+  // still obey the batch's one-account rule rather than being thrown away.
+  it('fails a ref\'d op whose plan runs as a different account than the batch', async () => {
+    account = 'me';
+    const executed = vi.fn(async () => ({}));
+    const h = await createTestHarness((s) => {
+      registerWrite(s, thingCreate);
+      registerWrite(s, defineWrite({
+        name: 'thing_elsewhere',
+        description: 'x',
+        inputSchema: z.object({ thing_id: z.number() }),
+        // The account comes from inside plan, not from the previewed args.
+        plan: (args) => ({ gate: { action: 'thing.elsewhere', account: 'someone-else', target: args.thing_id, payload: args }, state: args }),
+        execute: executed,
+      }));
+      registerBatchTool(s, { name: 'thing_batch' });
+    });
+    const { result } = await confirmBatch(h, [
+      { tool: 'thing_create', args: { name: 'a' } },
+      { tool: 'thing_elsewhere', args: {}, refs: { thing_id: '0.thing_id' } },
+    ]);
+    expect(result.isError).toBe(true);
+    expect(json(result)).toMatchObject({
+      status: 'partial',
+      results: [{ index: 0, applied: true }, { index: 1, applied: false, error: expect.stringMatching(/account/) }],
+    });
+    expect(executed).not.toHaveBeenCalled();
+    await h.close();
+  });
+
+  it('reports the action a ref\'d op\'s own gate described when it ran', async () => {
+    const h = await createTestHarness(register);
+    const { result } = await confirmBatch(h, [
+      { tool: 'thing_create', args: { name: 'a' } },
+      { tool: 'thing_comment', args: { text: 'x' }, refs: { thing_id: '0.thing_id' } },
+    ]);
+    expect(json(result)).toMatchObject({ status: 'ok', results: [{ index: 0 }, { index: 1, action: 'Comment on thing 100' }] });
+    await h.close();
+  });
+
+  // fleet-audit#1445: prototype-chain names must be refused up front like any
+  // other unknown argument or output, not discovered at execute time.
+  it.each([
+    [{ toString: '0.thing_id' }, /ops\[1\].*no argument toString/],
+    [{ constructor: '0.thing_id' }, /ops\[1\].*no argument constructor/],
+    [{ thing_id: '0.toString' }, /ops\[1\].*produces no toString/],
+    [{ thing_id: '0.constructor' }, /ops\[1\].*produces no constructor/],
+    [{ thing_id: '0.hasOwnProperty' }, /ops\[1\].*produces no hasOwnProperty/],
+  ])('refuses a ref that names a prototype member before anything is previewed: %j', async (refs, message) => {
+    const h = await createTestHarness(register);
+    const result = await h.callTool('thing_batch', {
+      ops: [{ tool: 'thing_create', args: { name: 'a' } }, { tool: 'thing_comment', args: { text: 'x' }, refs }],
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(message);
+    expect(created).not.toHaveBeenCalled();
+    await h.close();
+  });
+
+  it('refuses a __proto__ ref before anything is previewed', async () => {
+    const h = await createTestHarness(register);
+    // JSON.parse makes __proto__ an OWN key, the way it arrives on the wire.
+    const ops = JSON.parse('[{"tool":"thing_create","args":{"name":"a"}},{"tool":"thing_comment","args":{"text":"x"},"refs":{"__proto__":"0.thing_id"}}]') as unknown[];
+    const result = await h.callTool('thing_batch', { ops });
+    expect(result.isError).toBe(true);
+    expect(created).not.toHaveBeenCalled();
+    await h.close();
   });
 
   it('refuses a maxOps option that is not a positive whole number', () => {

@@ -435,7 +435,13 @@ ops run in order, and the batch stops at the first failure — no rollback; the
 result names what was applied, what failed and what never ran. There is no cap
 on the number of ops unless one is set: `maxOps` on `registerBatchTool`, or
 `MCP_BATCH_MAX_OPS` (a positive whole number) for an operator who cannot change
-the code; the option wins over the variable. Spec:
+the code; the option wins over the variable. `MCP_BATCH_MAX_OPS=0` turns batches
+off (the tool refuses every call), and any other value that is not a positive
+whole number refuses every batch too, naming the bad value — a set variable
+never widens to "no cap". Planning stops (and no token is minted) once the
+caller cancels; with no cap, keep each `plan` cheap — it runs once per op
+before anything is previewed. An op with refs must plan to the batch's
+account, or it fails at that op. Spec:
 [`docs/CONFIRM-TOKEN.md` §14](docs/CONFIRM-TOKEN.md#14-batch).
 
 #### Full-replace updates: `prepareMergedUpdate`
