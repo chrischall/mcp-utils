@@ -266,4 +266,94 @@ describe('findRawFsWrites', () => {
   it('ignores a file that never imports node:fs', () => {
     expect(findRawFsWrites('function writeFileSync(p) {}\nwriteFileSync(p);')).toEqual([]);
   });
+
+  // fleet-audit#1464: the raw-write warning followed only `import`
+  // declarations and seven functions, so require() / dynamic import() and
+  // open / copyFile / rename / symlink writes were invisible.
+  it('follows require() and dynamic import(), destructured (with renames) or as a namespace', () => {
+    const src = [
+      "const fs = require('node:fs');",
+      "const { writeFileSync: w, mkdirSync } = require('fs');",
+      "const fsp = await import('node:fs/promises');",
+      "const { appendFile } = await import('fs/promises');",
+      'fs.writeFileSync(p, d);',
+      'w(p, d);',
+      'mkdirSync(p);',
+      'await fsp.writeFile(p, d);',
+      'await appendFile(p, d);',
+      "require('fs').writeFileSync(p, d);",
+      "(await import('node:fs/promises')).mkdir(p);",
+    ].join('\n');
+    expect(fnLines(findRawFsWrites(src))).toEqual([
+      '5:1 writeFileSync',
+      '6:1 writeFileSync',
+      '7:1 mkdirSync',
+      '8:7 writeFile',
+      '9:7 appendFile',
+      '10:1 writeFileSync',
+      '11:1 mkdir',
+    ]);
+  });
+
+  it('flags copy / rename / link calls by their DESTINATION, the second argument', () => {
+    const src = [
+      "import { copyFileSync, renameSync, symlink, linkSync, cpSync } from 'node:fs';",
+      "import * as fsp from 'node:fs/promises';",
+      'copyFileSync(src, dest);',
+      'renameSync(tmp, join(dir, name));',
+      'await symlink(target, where);',
+      'linkSync(a, b);',
+      'cpSync(from, to, { recursive: true });',
+      'await fsp.copyFile(a, b);',
+      'await fsp.rename(a, b);',
+      'await fsp.cp(a, b);',
+      "copyFileSync(userPath, '/tmp/fixed');",
+      "renameSync(p, `out.json`);",
+    ].join('\n');
+    expect(fnLines(findRawFsWrites(src))).toEqual([
+      '3:1 copyFileSync',
+      '4:1 renameSync',
+      '5:7 symlink',
+      '6:1 linkSync',
+      '7:1 cpSync',
+      '8:7 copyFile',
+      '9:7 rename',
+      '10:7 cp',
+    ]);
+  });
+
+  it('flags open / openSync only when the flags can write', () => {
+    const src = [
+      "import { openSync, constants } from 'node:fs';",
+      "import { open } from 'node:fs/promises';",
+      "openSync(p, 'w');",
+      'openSync(p, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL);',
+      "await open(p, 'a+');",
+      'openSync(p, flags);',
+      "openSync(p, 'r+');",
+      'openSync(p);',
+      "openSync(p, 'r');",
+      "await open(p, 'rs');",
+      'openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW);',
+      "openSync('/tmp/fixed', 'w');",
+    ].join('\n');
+    expect(fnLines(findRawFsWrites(src))).toEqual([
+      '3:1 openSync',
+      '4:1 openSync',
+      '5:7 open',
+      '6:1 openSync',
+      '7:1 openSync',
+    ]);
+  });
+
+  it('ignores require() of other modules and reads through a required fs', () => {
+    const src = [
+      "const fs = require('./local-fs');",
+      "const real = require('node:fs');",
+      'fs.writeFileSync(p, d);',
+      'real.readFileSync(p);',
+      "real.openSync(p, 'r');",
+    ].join('\n');
+    expect(findRawFsWrites(src)).toEqual([]);
+  });
 });

@@ -25,9 +25,11 @@
  *   `conditional`: the call is unconfined whenever the condition is falsy, so
  *   the CLI warns on it (an error under `--strict`).
  * - {@link findRawFsWrites} covers what the helper check cannot see: a
- *   `node:fs` write / append / mkdir / write-stream call whose path is not a
- *   literal. The CLI reports those as warnings (errors under `--strict`): many
- *   are an operator-configured path, but one fed by a tool argument is the
+ *   `node:fs` write / append / mkdir / write-stream / copy / rename / link /
+ *   writing-open call — reached through `import`, `require()` or
+ *   `await import()` — whose path (or destination) is not a literal. The
+ *   CLI reports those as warnings (errors under `--strict`): many are an
+ *   operator-configured path, but one fed by a tool argument is the
  *   same hole as an unconfined helper, and should be `writeFileSafe` /
  *   `writeUniqueFile` with `allowedRoots`.
  * - `resolveOutputDir(undefined, …)` is exempt: with no per-call directory it
@@ -344,10 +346,20 @@ export function findUnconfinedFsCalls(source) {
     .map(({ confined: _confined, conditional: _conditional, ...call }) => call);
 }
 
-/** The `node:fs` calls {@link findRawFsWrites} checks: each creates or writes at its first argument. */
+/** The `node:fs` calls {@link findRawFsWrites} checks by their FIRST argument: each creates or writes there. */
 export const RAW_FS_WRITES = Object.freeze([
   'writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'mkdir', 'mkdirSync', 'createWriteStream',
 ]);
+
+/** The `node:fs` calls {@link findRawFsWrites} checks by their SECOND argument, the destination. */
+export const RAW_FS_DEST_WRITES = Object.freeze([
+  'copyFile', 'copyFileSync', 'cp', 'cpSync', 'rename', 'renameSync', 'symlink', 'symlinkSync', 'link', 'linkSync',
+]);
+
+/** The `node:fs` opens {@link findRawFsWrites} checks: by the path, when the flags (2nd argument) can write. */
+export const RAW_FS_OPENS = Object.freeze(['open', 'openSync']);
+
+const RAW_FS_ALL = Object.freeze([...RAW_FS_WRITES, ...RAW_FS_DEST_WRITES, ...RAW_FS_OPENS]);
 
 const FS_MODULE = /^(?:node:)?fs(?:\/promises)?$/;
 
@@ -370,20 +382,56 @@ function positioner(source) {
  * @typedef {{ fn: string, local: string, line: number, column: number, text: string }} RawFsWrite
  */
 
+/** Each top-level argument of the (masked) call whose `(` is at `open` and `)` at `close`: [start, end) offsets. */
+function argumentSpans(code, open, close) {
+  const spans = [];
+  let depth = 0;
+  let from = open + 1;
+  for (let k = open + 1; k < close; k++) {
+    const c = code[k];
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') depth--;
+    else if (c === ',' && depth === 0) { spans.push([from, k]); from = k + 1; }
+  }
+  if (code.slice(from, close).trim() !== '') spans.push([from, close]);
+  return spans;
+}
+
+/** Masked, a plain string literal is its quotes around blanks; a template with no `${…}` is backticks around blanks. */
+const isLiteral = (masked) => /^(["'`])\s*\1$/.test(masked.trim());
+
 /**
- * Every `node:fs` (or `fs`, `fs/promises`) write / append / mkdir /
- * write-stream call in `source` whose path — the first argument — is not a
- * plain string literal. Follows named imports (and `as` aliases), `* as ns`
- * namespaces, default imports, and `ns.promises.writeFile`. Line and column
- * point at the callee.
- *
- * @param {string} source
- * @returns {RawFsWrite[]}
+ * Whether `open`/`openSync` flags can create or write. No flags is `'r'`. A
+ * string literal writes when it has `w`, `a`, `x` or `+`; a flags expression
+ * reads only when it names `O_RDONLY` and none of the writing constants.
+ * Anything else (a variable) is assumed to write: this is a warning.
  */
-export function findRawFsWrites(source) {
-  const { code, strings } = mask(source);
+function openFlagsWrite(code, strings, span) {
+  if (!span) return false;
+  const masked = code.slice(span[0], span[1]);
+  const lead = span[0] + (masked.length - masked.trimStart().length);
+  if (/^["']\s*["']$/.test(masked.trim())) {
+    const value = strings.get(lead);
+    return value === undefined || /[wax+]/.test(value);
+  }
+  if (/\bO_RDONLY\b/.test(masked) && !/\bO_(?:WRONLY|RDWR|CREAT|APPEND|TRUNC)\b/.test(masked)) return false;
+  return true;
+}
+
+/** Local bindings for node:fs from `import` declarations, `require()` and `await import()`. */
+function fsBindings(code, strings) {
   const named = new Map();
   const namespaces = new Set();
+  const destructured = (body) => {
+    for (const part of body.split(',')) {
+      const p = part.trim();
+      if (!p || /^type\s/.test(p)) continue;
+      const m = /^([\w$]+)(?:\s*(?:\bas\b|:)\s*([\w$]+))?(?:\s*=.*)?$/.exec(p);
+      if (!m) continue;
+      const [, imported, local] = m;
+      if (RAW_FS_ALL.includes(imported)) named.set(local ?? imported, imported);
+    }
+  };
   const importRe = /\bimport\s+(?!type\s*[{*]|type\s+[\w$]+\s*(?:,|\bfrom\b))([^;]*?)\s*\bfrom\s*(?=["'])/g;
   for (const m of code.matchAll(importRe)) {
     const spec = strings.get(m.index + m[0].length);
@@ -394,42 +442,85 @@ export function findRawFsWrites(source) {
     const def = /^\s*([\w$]+)\s*(?:,|$)/.exec(clause);
     if (def && def[1] !== 'type') namespaces.add(def[1]);
     const braces = /\{([^}]*)\}/.exec(clause);
-    if (!braces) continue;
-    for (const part of braces[1].split(',')) {
-      const p = part.trim();
-      if (!p || /^type\s/.test(p)) continue;
-      const as = /^([\w$]+)(?:\s+as\s+([\w$]+))?$/.exec(p);
-      if (!as) continue;
-      const [, imported, local] = as;
-      if (RAW_FS_WRITES.includes(imported)) named.set(local ?? imported, imported);
+    if (braces) destructured(braces[1]);
+  }
+  // `const fs = require('fs')`, `const { a: b } = await import('node:fs/promises')`.
+  const requireRe = /\b(?:const|let|var)\s+([\w$]+|\{[^}]*\})\s*=\s*(?:await\s+)?(?:require|import)\s*\(\s*(?=["'])/g;
+  for (const m of code.matchAll(requireRe)) {
+    const spec = strings.get(m.index + m[0].length);
+    if (spec === undefined || !FS_MODULE.test(spec)) continue;
+    if (m[1].startsWith('{')) destructured(m[1].slice(1, -1));
+    else namespaces.add(m[1]);
+  }
+  return { named, namespaces };
+}
+
+/**
+ * Every `node:fs` (or `fs`, `fs/promises`) call in `source` that writes at a
+ * path that is not a plain string literal: write / append / mkdir /
+ * write-stream by their first argument; copy / cp / rename / symlink / link
+ * by their destination (second argument); open / openSync by their path when
+ * the flags can write. Follows named imports (and `as` aliases), `* as ns`
+ * namespaces, default imports, `ns.promises.writeFile`, `require()` and
+ * `await import()` (bound to a name, destructured with renames, or called
+ * inline: `require('fs').writeFileSync(…)`). Line and column point at the
+ * callee. The CLI reports these as warnings unless `--strict`.
+ *
+ * @param {string} source
+ * @returns {RawFsWrite[]}
+ */
+export function findRawFsWrites(source) {
+  const { code, strings } = mask(source);
+  const { named, namespaces } = fsBindings(code, strings);
+  const esc = (s) => s.replace(/[$]/g, '\\$');
+  const member = `\\s*\\.\\s*(?:promises\\s*\\.\\s*)?(${RAW_FS_ALL.join('|')})`;
+
+  /** @type {Array<{ at: number, fn: string, open: number }>} */
+  const calls = [];
+  if (named.size > 0 || namespaces.size > 0) {
+    const alts = [];
+    for (const local of named.keys()) alts.push(esc(local));
+    for (const ns of namespaces) alts.push(`${esc(ns)}${member}`);
+    const callRe = new RegExp(`(?<![\\w$.])(?:${alts.join('|')})\\s*\\(`, 'g');
+    for (const m of code.matchAll(callRe)) {
+      const before = code.slice(Math.max(0, m.index - 12), m.index);
+      if (/\bfunction\s*\*?\s*$/.test(before)) continue;
+      const callee = m[0].slice(0, -1).trim();
+      const fn = named.get(callee) ?? callee.replace(/^.*\.\s*/, '');
+      calls.push({ at: m.index, fn, open: m.index + m[0].length - 1 });
     }
   }
-  if (named.size === 0 && namespaces.size === 0) return [];
+  // Inline: `require('fs').x(…)` and `(await import('fs')).x(…)`.
+  const inlineRe = /(?<![\w$.])(\(\s*await\s+import|require|import)\s*\(\s*(?=["'])/g;
+  for (const m of code.matchAll(inlineRe)) {
+    const quote = m.index + m[0].length;
+    const spec = strings.get(quote);
+    if (spec === undefined || !FS_MODULE.test(spec)) continue;
+    let end = closingParen(code, m.index + m[0].lastIndexOf('('));
+    if (end === -1) continue;
+    if (m[1].startsWith('(')) {
+      end = closingParen(code, m.index);
+      if (end === -1) continue;
+    }
+    const rest = new RegExp(`^${member}\\s*\\(`).exec(code.slice(end + 1));
+    if (!rest) continue;
+    calls.push({ at: m.index, fn: rest[1], open: end + rest[0].length });
+  }
 
-  const esc = (s) => s.replace(/[$]/g, '\\$');
-  const alts = [];
-  for (const local of named.keys()) alts.push(esc(local));
-  for (const ns of namespaces) alts.push(`${esc(ns)}\\s*\\.\\s*(?:promises\\s*\\.\\s*)?(?:${RAW_FS_WRITES.join('|')})`);
-  const callRe = new RegExp(`(?<![\\w$.])(${alts.join('|')})\\s*\\(`, 'g');
   const position = positioner(source);
   const found = [];
-  for (const m of code.matchAll(callRe)) {
-    const before = code.slice(Math.max(0, m.index - 12), m.index);
-    if (/\bfunction\s*\*?\s*$/.test(before)) continue;
-    const callee = m[1];
-    const fn = named.get(callee) ?? callee.replace(/^.*\.\s*/, '');
-    const open = m.index + m[0].length - 1;
+  for (const { at, fn, open } of calls.sort((a, b) => a.at - b.at)) {
     const close = closingParen(code, open);
     if (close === -1) continue;
-    const first = firstArgument(code.slice(open + 1, close)).trim();
-    // Masked, a plain string literal is its quotes around blanks; a template
-    // with no `${…}` is backticks around blanks. Anything else is computed.
-    if (/^(["'`])\s*\1$/.test(first)) continue;
+    const args = argumentSpans(code, open, close);
+    const pathArg = RAW_FS_DEST_WRITES.includes(fn) ? args[1] : args[0];
+    if (!pathArg || isLiteral(code.slice(pathArg[0], pathArg[1]))) continue;
+    if (RAW_FS_OPENS.includes(fn) && !openFlagsWrite(code, strings, args[1])) continue;
     found.push({
       fn,
-      local: callee.replace(/\s+/g, ''),
-      ...position(m.index),
-      text: source.slice(m.index, close + 1).replace(/\s+/g, ' ').trim(),
+      local: source.slice(at, open).replace(/\s+/g, ''),
+      ...position(at),
+      text: source.slice(at, close + 1).replace(/\s+/g, ' ').trim(),
     });
   }
   return found;
