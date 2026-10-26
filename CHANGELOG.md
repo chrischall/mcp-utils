@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.3.2](https://github.com/chrischall/mcp-utils/compare/v3.3.1...v3.3.2) (2026-10-26)
+
+
+### Bug Fixes
+
+* **fetchproxy:** give the bridge healthcheck a hint for an approval wait or a refused hello ([#398](https://github.com/chrischall/mcp-utils/issues/398)) ([84c42fd](https://github.com/chrischall/mcp-utils/commit/84c42fdd78fe551e307e9144e16635679bfba3c5))
+
 ## [3.3.1](https://github.com/chrischall/mcp-utils/compare/v3.3.0...v3.3.1) (2026-10-21)
 
 
