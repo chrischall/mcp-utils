@@ -31,7 +31,7 @@ import {
   FetchproxySessionNotReadyError,
   type FetchproxyTransport,
 } from './index.js';
-import type { BridgeProbeResult } from '@fetchproxy/server';
+import { FetchproxyHelloRejectedError, type BridgeProbeResult } from '@fetchproxy/server';
 import { createTestHarness, parseToolResult } from '../test/index.js';
 
 let identityDir: string;
@@ -1218,6 +1218,69 @@ describe('registerBridgeHealthcheckTool — `path` for direct-first consumers', 
     expect(body.error?.kind).toBe('session_not_ready');
     expect(body.bridge?.session_state).toBe('no_session');
     expect(body.hint).toMatch(/never confirmed a session for hemnet-mcp/);
+  });
+
+  /** A healthcheck over the path-aware route whose probe throws `err` against a `state` snapshot. */
+  async function probeThrowing(err: Error, hints?: Record<string, string>) {
+    const harness = await createTestHarness((server) =>
+      registerBridgeHealthcheckTool({
+        server,
+        prefix: 'toast',
+        probePath: '/graphql',
+        hostLabel: 'ws-api.toasttab.com',
+        transport: () => fakeBridge('no_session'),
+        path: () => ({ transport: 'fetchproxy', mode: 'auto' }),
+        ...(hints ? { hints } : {}),
+        probeFn: async () => {
+          throw err;
+        },
+      }),
+    );
+    const body = parseToolResult<Body>(await harness.callTool('toast_healthcheck', {}));
+    await harness.close();
+    return body;
+  }
+
+  it('awaiting approval: tells the person to approve in the popup, never "Unexpected error"', async () => {
+    // Live on a hosted toasttab-mcp: the extension queued an approval card and
+    // the healthcheck said only "Unexpected error — see the error.message field".
+    const body = await probeThrowing(
+      new FetchproxyHelloRejectedError({ mcpId: 'toast-mcp:1.0.0:abc', reason: 'awaiting-approval: approve toast-mcp in Chrome' }),
+    );
+    expect(body.error?.kind).toBe('awaiting_approval');
+    expect(body.hint).not.toMatch(/Unexpected error/);
+    expect(body.hint).toMatch(/approve toast-mcp/i);
+    expect(body.hint).toMatch(/then retry/);
+  });
+
+  it('a hello the extension refused: names the refusal and says retrying unchanged will not help', async () => {
+    const body = await probeThrowing(
+      new FetchproxyHelloRejectedError({ mcpId: 'toast-mcp:1.0.0:abc', reason: 'denied: the user rejected this MCP' }),
+    );
+    expect(body.error?.kind).toBe('hello_rejected');
+    expect(body.hint).not.toMatch(/Unexpected error/);
+    expect(body.hint).toContain('denied: the user rejected this MCP');
+    expect(body.hint).toMatch(/retrying unchanged/i);
+  });
+
+  it('per-arm overrides reach the new arms', async () => {
+    const body = await probeThrowing(
+      new FetchproxyHelloRejectedError({ mcpId: 'toast-mcp:1.0.0:abc', reason: 'awaiting-approval: approve it' }),
+      { awaiting_approval: 'custom approval copy' },
+    );
+    expect(body.hint).toBe('custom approval copy');
+  });
+
+  it('a hello refused for a missing browser capability stays capability_unavailable', async () => {
+    const body = await probeThrowing(
+      new FetchproxyHelloRejectedError({
+        mcpId: 'toast-mcp:1.0.0:abc',
+        reason: 'unsupported-capability: read_cookies (not available in this browser)',
+        platform: 'safari',
+      }),
+    );
+    expect(body.error?.kind).toBe('capability_unavailable');
+    expect(body.hint).not.toMatch(/final answer/);
   });
 
   it('direct path: redacts and truncates the thrown message before it reaches the result', async () => {
