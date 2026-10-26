@@ -50,6 +50,7 @@ import {
   FetchproxyServer,
   FetchproxyBridgeDownError,
   FetchproxySessionNotReadyError,
+  FetchproxyHelloRejectedError,
   classifyBridgeError as classifyBridgeErrorKind,
   classifyFetchError as classifyFetchErrorKind,
   FetchproxyTimeoutError as FetchproxyTimeoutErrorClass,
@@ -1062,6 +1063,8 @@ export interface BridgeHealthcheckResult {
 export type HealthcheckHintArm =
   | 'ok'
   | 'session_not_ready'
+  | 'awaiting_approval'
+  | 'hello_rejected'
   | 'bridge_down'
   | 'no_role'
   | 'timeout'
@@ -1171,6 +1174,8 @@ function healthcheckHint(args: {
   bridgeHint?: string;
   /** 2.5.0 session snapshot (when the server reports one), plus the thrown error's pair code. */
   session?: { state?: string; pairCode: string | null };
+  /** The extension's own words, when it refused the hello (`hello_rejected`). */
+  rejection?: string;
   /** Set when the probe rode a direct fetch with no bridge in play. */
   direct?: boolean;
   /** The browser gap, when the probe failed with `capability_unavailable`. */
@@ -1200,6 +1205,13 @@ function healthcheckHint(args: {
       return `${hostLabel} refused the probe at ${edge} before it reached the site, so the session was never evaluated — signing in again will not help. The probe rode the direct fetch, and this is usually a block on this host's IP address or request fingerprint: route through ContextMint Bridge (pin the consumer's transport env var to the bridge) so the request leaves from your browser instead.`;
     }
     return `${hostLabel} refused the probe at ${edge} before it reached the site, so the session was never evaluated — signing in again or re-pairing will not help. The bridge itself worked: the request rode your browser and came back with the edge's refusal page. This is usually a block on that browser's IP address or fingerprint (a VPN, a flagged network, a challenge the tab has not passed): open ${hostLabel} in the tab and clear any challenge, or retry later from a different network.`;
+  }
+  if (args.errorKind === 'awaiting_approval') {
+    return `ContextMint Bridge is holding an approval request for ${prefix}-mcp. Open the ContextMint Bridge popup, approve ${prefix}-mcp, then retry. Nothing is wrong with the MCP or your sign-in.`;
+  }
+  if (args.errorKind === 'hello_rejected') {
+    const why = args.rejection ? `: "${args.rejection}"` : '';
+    return `ContextMint Bridge refused ${prefix}-mcp${why}. That is the extension's final answer, so retrying unchanged will be refused the same way. Open the ContextMint Bridge popup and check ${prefix}-mcp's entry; if its declared scope changed, revoke it and pair again.`;
   }
   if (args.errorKind === 'session_not_ready') {
     const s = args.session;
@@ -1429,6 +1441,7 @@ export async function runBridgeHealthcheck(
   let customHint: string | undefined;
   let customDetail: Record<string, unknown> | undefined;
   let capabilityGap: CapabilityGap | undefined;
+  let rejection: string | undefined;
   let edge: { vendor: string } | null = null;
   // The typed cause classified in place of a wrapping error, when there was one.
   let pairCodeSource: unknown = thrown;
@@ -1461,6 +1474,10 @@ export async function runBridgeHealthcheck(
         capabilityGap = gap;
       } else if (isCapabilityDenied(subject)) {
         kind = 'capability_denied';
+      } else if (subject instanceof FetchproxyHelloRejectedError && kind === 'hello_rejected') {
+        // Any other refusal: the extension said why, and the ladder quotes it.
+        // (An awaiting-approval refusal is classified 'awaiting_approval'.)
+        rejection = truncateErrorMessage(subject.reason);
       }
     }
     // A CDN/WAF refusal page that came back through the probe — on a
@@ -1505,7 +1522,11 @@ export async function runBridgeHealthcheck(
   // so per-arm `hints` overrides land on the same arm the default copy would.
   const arm: HealthcheckHintArm = ok
     ? 'ok'
-    : error?.kind === 'capability_unavailable' || error?.kind === 'capability_denied' || error?.kind === 'edge_blocked'
+    : error?.kind === 'capability_unavailable' ||
+        error?.kind === 'capability_denied' ||
+        error?.kind === 'edge_blocked' ||
+        error?.kind === 'awaiting_approval' ||
+        error?.kind === 'hello_rejected'
       ? error.kind
       : error?.kind === 'session_not_ready'
       ? 'session_not_ready'
@@ -1537,6 +1558,7 @@ export async function runBridgeHealthcheck(
         bridge?.pending_pair_code ??
         (pairCodeSource instanceof FetchproxySessionNotReadyError ? pairCodeSource.pairCode : null),
     },
+    ...(rejection !== undefined ? { rejection } : {}),
     direct,
     ...(edge !== null ? { edgeVendor: edge.vendor } : {}),
     ...(capabilityGap

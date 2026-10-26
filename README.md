@@ -2161,6 +2161,15 @@ bridge produces when the relay dials the child before it binds. With
 `@fetchproxy/server` 2.5.0+ the `bridge` block also carries `session_state`,
 `pending_pair_code` and `extension_connected` from `bridgeHealth().session`.
 
+When the extension answers the hello with a refusal
+(`FetchproxyHelloRejectedError`), the kind is the server's own:
+`awaiting_approval` (an approval card is waiting in the popup; the hint says
+to approve `<prefix>-mcp` and retry) or `hello_rejected` (any other refusal;
+the hint quotes the extension's reason and says retrying unchanged will be
+refused the same way). A refusal for a capability the browser lacks is still
+`capability_unavailable`. `hints.awaiting_approval` and `hints.hello_rejected`
+override the copy.
+
 **When the browser can't serve a verb.** `@fetchproxy/server` 3.3+ tells a
 browser gap (`capability_unavailable` — e.g. Safari has no downloads; the MCP
 isn't at fault, and the fix is a browser that supports it, such as Chrome)
