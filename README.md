@@ -528,6 +528,30 @@ a caller that picks its own whitespace (`viewResult`). Constants:
 `UNTRUSTED_CONTENT_NOTE` (the default note), `UNTRUSTED_CONTENT_RULE` (its
 instruction half, Teams' wording verbatim), `UNTRUSTED_DESCRIPTION_SUFFIX`.
 
+#### Fail-closed field filter: `stripUrlishKeys`
+
+`stripUrlishKeys(record, { extraWords? })` returns a shallow copy of a record
+without any key whose **name** contains `path`, `url`, `uri`, `src`, `source`,
+`link`, `href`, `token`, `secret`, `key`, `sas` or `signature` — for a row that
+carries a session-authorized fetch URL or credential beside the metadata the
+model actually wants (insync-mcp's portal attachments).
+
+```ts
+import { stripUrlishKeys } from '@chrischall/mcp-utils';
+
+stripUrlishKeys({ FileName: 'labs.pdf', Size: 1024, FILEPATH: '/srv/a.pdf', Thumbnailurl: 'https://…?sig=…' });
+// → { FileName: 'labs.pdf', Size: 1024 }
+```
+
+It is a case-insensitive **substring** match, deliberately not a word-segment
+one: a segmenter has nothing to split in `FILEPATH`, `filepath`, `Thumbnailurl`
+or `TOKENVALUE`, so insync-mcp's first version kept exactly the URLs it existed
+to hide (#4 → #5 → #6). Dropping an ordinary word that contains a token
+(`Monkey`, `Keyboard`, `Pathway`) is the accepted, harmless cost. **One level
+only** — nested objects pass through untouched — and anything that is not a
+plain object (array, `null`, primitive) yields `{}`. `extraWords` adds
+service-specific substrings; there is no way to re-admit a built-in word.
+
 #### The `view` vocabulary — read tools answer in the cheap shape by default
 
 `VIEWS`, `DEFAULT_VIEW`, `View`, `viewParam`, `resolveView`, `viewResult`,
