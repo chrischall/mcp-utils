@@ -117,3 +117,4 @@ export function toArray<T>(value: T | T[] | null | undefined): T[] {
 export * from './view.js';
 export * from './media.js';
 export * from './untrusted.js';
+export * from './urlish.js';
