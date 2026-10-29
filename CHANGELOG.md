@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.4.0](https://github.com/chrischall/mcp-utils/compare/v3.3.2...v3.4.0) (2026-10-28)
+
+
+### Features
+
+* **response:** add stripUrlishKeys, a fail-closed filter for URL/secret-shaped key names ([#406](https://github.com/chrischall/mcp-utils/issues/406)) ([e6e04f3](https://github.com/chrischall/mcp-utils/commit/e6e04f3690a9703b8fc5ecae620613d8e76ac5e0))
+
+
+### Documentation
+
+* **fleet-builder:** a scrubbed value must never be a test fixture ([#401](https://github.com/chrischall/mcp-utils/issues/401)) ([6001eb1](https://github.com/chrischall/mcp-utils/commit/6001eb1485d39915fa3ed8fff6bd17f713468cd3))
+* **skill:** add gated-write and live-send lessons from the insync write build ([#404](https://github.com/chrischall/mcp-utils/issues/404)) ([f2bb48c](https://github.com/chrischall/mcp-utils/commit/f2bb48c3d167761f85d498b6ba90a8c90ad18bb7))
+* **skill:** add legacy-portal recon and fpx lessons from the insync build ([#402](https://github.com/chrischall/mcp-utils/issues/402)) ([2e72db9](https://github.com/chrischall/mcp-utils/commit/2e72db90019d889b94909027286cb63dbfedcaaa))
+* **skill:** point cookie-session repos at CookieJar/same-origin and record the insync audit lessons ([#405](https://github.com/chrischall/mcp-utils/issues/405)) ([5da5b51](https://github.com/chrischall/mcp-utils/commit/5da5b51dc58bd12e463d43661aec8f0a7f56d5cc))
+
 ## [3.3.2](https://github.com/chrischall/mcp-utils/compare/v3.3.1...v3.3.2) (2026-10-26)
 
 
