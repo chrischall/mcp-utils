@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.4.1](https://github.com/chrischall/mcp-utils/compare/v3.4.0...v3.4.1) (2026-11-04)
+
+
+### Documentation
+
+* **skill:** a new MCP is born with context-group hints ([#410](https://github.com/chrischall/mcp-utils/issues/410)) ([13e1c35](https://github.com/chrischall/mcp-utils/commit/13e1c3548219121fe5c090dc921d9cbe931a22dd))
+* **skill:** fleet-builder lessons from the workvivo-mcp build ([#408](https://github.com/chrischall/mcp-utils/issues/408)) ([882fae4](https://github.com/chrischall/mcp-utils/commit/882fae4570ac39fa9053946ea93f458f1e236833))
+
 ## [3.4.0](https://github.com/chrischall/mcp-utils/compare/v3.3.2...v3.4.0) (2026-10-28)
 
 
