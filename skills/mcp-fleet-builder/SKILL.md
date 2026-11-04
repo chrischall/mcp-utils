@@ -603,6 +603,96 @@ things to drift. What follows is only what it means for building one.
   SILENT (see the doc); a server-side unit test cannot tell a delivered
   notification from a dropped one.
 
+## Context-group hints are part of the skeleton
+
+mcp-host folds the fleet into a few spoken groups (school, home, …) and
+answers "what's due at school?" with one intent call that fans out to every
+member's canonical read. A tool joins a group only through `_meta.mint` on
+its `registerTool` config: an unhinted tool is in the host's `all` connector
+and nowhere else. Phase 1 found three of ~45 group members hinted, so every
+group but three spoke for nobody. Inert to any other client — one extra
+`_meta` key.
+
+The contract (mcp-host core `mintHintSchema`; restate the type locally, never
+import mcp-host):
+
+```ts
+{ domain?: 'school'|'home'|'work'|'family'|'health'|'money'|'travel'|'food',
+  intent?: 'whats-new'|'whats-due'|'whats-on'|'lookup'|'turn-on-off'|'send'|'change'|'other',
+  canonical?: true,              // only on a read with readOnlyHint: true
+  subject?: string,              // argument name taking the person's subject
+  when?: { start: string; end: string },   // argument names for the range
+  aliases?: string[] }           // ≤ 8, each ≤ 40 chars, lowercase
+```
+
+`subject` and `when` are THIS tool's argument NAMES (the host fills them),
+never values. The rules a reviewer holds:
+
+- **Every tool except `*_healthcheck` carries `domain` and `intent`.** The
+  healthcheck is registered by mcp-utils, takes no `_meta`, and joins no group.
+- **`canonical: true` on at most one read per `whats-new` / `whats-due` /
+  `whats-on` the MCP genuinely answers**, and only where the tool is
+  `readOnlyHint: true`. Writes are never canonical; `lookup`/`other` reads
+  are never canonical. Nothing answers a what's-new/due/on question? Ship
+  `lookup` and write hints only — a valid outcome, not a gap to paper over.
+- **A canonical read gains `view: 'brief'`** — one line per item, ≤ 120
+  chars, `title — <ISO date | no date> — <status>` (truncate the title, never
+  the tail) — and `when: { start, end }` where it takes a range.
+- **`subject` only where the MCP has a LISTABLE set** (children, properties,
+  systems, accounts). The subject argument then publishes the LABELS as a
+  JSON Schema `enum` built at start from what the MCP can list: bounded
+  (≤ 5 s — it holds up `initialize`), never an empty enum (a miss falls back
+  to a plain string), never a partial one (a partial enum REFUSES whoever it
+  left out — any failure means no enum), and the handler accepts label OR
+  id (any case, trimmed; a Canvas-style passthrough for raw ids, so a child
+  linked after start is still reachable). Two people with one name each
+  carry their id in the label. No listable subjects → no `subject`.
+- **`aliases` are the words a person says** ("hot tub", "homework"), ≤ 8,
+  lowercase — not tool names, not the description again.
+
+Read before writing one (fetch `origin/main`): canvas-parent-mcp
+`src/tools/_shared.ts` (`schoolMeta`) + `tests/tools/mint-hints.test.ts`
+(also the observee directory in `src/tools/observees.ts`, `briefLine` in
+`src/tools/planner.ts`); iaqualink-mcp `src/tools/hints.ts` +
+`tests/hints.test.ts` (the system-label enum); infinitecampus-mcp
+`src/tools/assignments.ts` (district × student labels, all-or-nothing).
+
+**The hints test asserts against the SERVED list**, so a new tool cannot skip
+the decision — an intent table is the assertion:
+
+```ts
+const EXPECTED: Record<string, string> = { x_list_items: 'whats-due', x_get_item: 'lookup' /* every tool */ };
+it('every served tool but the healthcheck is hinted per the contract', async () => {
+  const h = await createTestHarness((s) => registerAll(s, fakeClient));
+  const { tools } = await h.client.listTools(); await h.close();
+  const hinted = tools.filter((t) => t.name !== 'x_healthcheck');
+  expect(hinted.map((t) => t.name).sort()).toEqual(Object.keys(EXPECTED).sort());
+  for (const t of hinted) {
+    const m = (t._meta as any)?.mint;
+    expect(Object.keys(m).every((k) => KEYS.includes(k)), t.name).toBe(true);
+    expect(m.domain, t.name).toBe('home');
+    expect(m.intent, t.name).toBe(EXPECTED[t.name]);
+    if (m.canonical) {
+      expect(t.annotations?.readOnlyHint, t.name).toBe(true);
+      expect(['whats-new', 'whats-due', 'whats-on']).toContain(m.intent);
+      expect(t.inputSchema.properties, t.name).toHaveProperty('view');
+    }
+    if (m.subject) expect(t.inputSchema.properties, t.name).toHaveProperty(m.subject);
+    for (const a of m.aliases ?? []) expect(a, t.name).toBe(a.toLowerCase());
+    expect((m.aliases ?? []).length).toBeLessThanOrEqual(8);
+  }
+});
+```
+
+Add one test per canonical read that it is the only one for its intent, and
+one that the subject enum is the labels (no raw ids) with a fake listing.
+
+**Every MCP's `skills/<name>/SKILL.md` ships an "In context groups"
+section**, short: the group; each canonical read and its subject; what a
+compound ask looks like ("…and anything due at school?" reaches this MCP
+through the group's intent call, not by name); and — browser-bridged MCPs —
+that the group answers "needs your browser open" when the tab is not.
+
 ## Conventions (how chris likes them)
 
 - **TDD, always.** Failing test → minimal code → green. Especially for write tools.
@@ -716,5 +806,5 @@ A new fleet repo isn't done until ALL of this exists. Each line below was a real
 2. Copy a same-archetype sibling's skeleton (splitwise for bearer, redfin for fetchproxy) — packaging, tsconfig, vitest from a local clone is fine, but **pull `.github/workflows/*.yml` from a freshly-updated sibling's `origin/main`, not the local tree** (see Workflows above — a stale local clone hands you the old self-contained workflows). Then do the full **Repo bootstrap** (workflows, labels incl. `release-ready`, rulesets with the `ci-gated` status check, secrets + **Claude GitHub App install**, release-please extra-files, publish scaffold, `.mcpbignore`) — it's the part that's easy to half-do. Expect the genesis push to `main` to be direct (it puts the workflows on the default branch so PRs can run); creating the **public** repo triggers an explicit auth confirmation from the user — ask before `gh repo create --public`.
 3. Add `"@chrischall/mcp-utils"` (published `^x` once available; `file:../mcp-utils/<tarball>` pre-publish).
 4. Write `client.ts` (deferred-config-error + one central `write()`), `tools/*.ts` (`registerTool` + `minifiedResult`, `view` on every read tool, writes gated by `confirmToken: confirmTokenParam` + `confirmWrite(ctx, { tool, action, account, request, confirmToken, … })` — see *Confirm-gated writes*; never `schemaConfirm`; `untrustedResult` on reads that return third-party text; `vetUploadFile` / `writeFileSafe` + `allowedRoots` on any tool-argument path), wire `index.ts` with `runMcp`. TDD; verify endpoints from a capture before coding writes.
-5. Tests with `createTestHarness` + `versionSyncTest`; mock the network. Keep them green.
+5. Tests with `createTestHarness` + `versionSyncTest`; mock the network. Keep them green. **A new MCP is born hinted:** `_meta.mint` on every tool but the healthcheck, its canonical reads with `view: 'brief'`, the served-list hints test and the SKILL.md "In context groups" section — see *Context-group hints are part of the skeleton*. Retrofitting is a fleet sweep; it was 42 repos.
 6. `npm run build && npm test`. Branch + PR; let auto-merge ship it (never merge it yourself). Ship the **fpx skill** alongside (it's the minimum deliverable — never skipped, even for a full MCP).
