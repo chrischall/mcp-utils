@@ -40,7 +40,7 @@ import light:
 | `@chrischall/mcp-utils/healthcheck` | credential-style healthcheck factory (no fetchproxy peer needed) |
 | `@chrischall/mcp-utils/graphql` | GraphQL POST transport + operation-kind lexer (no optional peers) |
 | `@chrischall/mcp-utils/netguard` | SSRF guard for fetching third-party URLs: public-address table, DNS-pinning undici dispatcher, redirect-checked `fetchPublic` (needs `undici`) |
-| `@chrischall/mcp-utils/export` | bulk-export plumbing: export sink (local disk with absolute paths, or one zip in the mcp-host blob store behind a signed link), resume-cursor codec, zip writer, and the blob-store signer — signed GET/PUT URLs and the PUT (no optional peers) |
+| `@chrischall/mcp-utils/export` | bulk-export plumbing: export sink (local disk with absolute paths, or one zip in the mcp-host blob store behind a signed link), resume-cursor codec, zip writer, and the blob-store client — signed GET/PUT/DELETE URLs, PUT, GET, DELETE, and `consume` (read a caller's upload, delete it once handled) (no optional peers) |
 | `@chrischall/mcp-utils/html` | opt-in HTML scraping helpers (needs `node-html-parser`) |
 | `@chrischall/mcp-utils/scrape` | convenience alias for the zero-dep `scrape` module (also in the core barrel) |
 | `@chrischall/mcp-utils/test` | in-memory test harness for tool registration |
@@ -2642,6 +2642,31 @@ mcp-host hands each hosted child `MCP_BLOB_BASE_URL`
   — PUTs with a `content-type` header and resolves `{ key, bytes }`. A non-2xx
   throws `McpToolError` (kind `'http'`, `status` set); a request that never
   completes throws kind `'transport'`. Neither message carries the signed URL.
+- **`signDeleteUrl(key, { ttlMs?, now? })`** — signs the gateway's DELETE payload
+  `del\0<prefix>/<key>\0<exp>`. Every verb has its own payload shape, so no
+  signature verifies as another verb's: a read link can never delete.
+- **`get(key, { maxBytes?, timeoutMs?, fetchImpl?, signal?, ttlMs?, now? })`** —
+  resolves `{ key, bytes, contentType? }`. Bounded by `fetchBounded` (30 s
+  default timeout covering the body, caller + ambient cancellation) and capped
+  at `maxBytes`, default `BLOB_MAX_OBJECT_BYTES` (100 MiB, the gateway's own
+  cap) — over it, `ResponseTooLargeError`. A 404 (never uploaded, expired, or
+  already consumed) or other non-2xx throws kind `'http'` with `status`.
+- **`delete(key, opts?)`** — idempotent at the gateway (an absent object is a
+  204), errors as `get`.
+- **`consume(key, use, opts?)`** — the inbound-upload primitive. A hosted server
+  mints a `signPutUrl` for the caller, the caller `curl -X PUT --data-binary @file`
+  to it, and the server calls `consume`: read the object, `await use(object)`,
+  then delete it. If the read fails, `use` never runs. If `use` throws, the
+  object is **kept** (so the caller can retry) and the error propagates. If the
+  delete fails after `use` succeeded, it resolves `{ result, deleted: false,
+  deleteError }` rather than throwing — `use`'s side effect has happened, and an
+  error would invite a retry that duplicates it; the retention prune reclaims
+  the object. Otherwise `{ result, deleted: true }`.
+
+  ```ts
+  const { result, deleted } = await store.consume(`uploads/${slot}/${name}`, async ({ bytes }) =>
+    uploadToUpstream(bytes), { maxBytes: 25 * 1024 * 1024 });
+  ```
 
 #### Export sink — local disk or a hosted download link
 
