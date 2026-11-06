@@ -40,7 +40,7 @@ import light:
 | `@chrischall/mcp-utils/healthcheck` | credential-style healthcheck factory (no fetchproxy peer needed) |
 | `@chrischall/mcp-utils/graphql` | GraphQL POST transport + operation-kind lexer (no optional peers) |
 | `@chrischall/mcp-utils/netguard` | SSRF guard for fetching third-party URLs: public-address table, DNS-pinning undici dispatcher, redirect-checked `fetchPublic` (needs `undici`) |
-| `@chrischall/mcp-utils/export` | bulk-export plumbing: export sink (local disk with absolute paths, or one zip in the mcp-host blob store behind a signed link), resume-cursor codec, zip writer, and the blob-store client — signed GET/PUT/DELETE URLs, PUT, GET, DELETE, and `consume` (read a caller's upload, delete it once handled) (no optional peers) |
+| `@chrischall/mcp-utils/export` | bulk-export plumbing: export sink (local disk with absolute paths, or one zip in the mcp-host blob store behind a signed link), resume-cursor codec, zip writer, and the blob-store client — signed GET/PUT/DELETE URLs, PUT, GET, DELETE, and `consume` (read a caller's upload, delete it once handled), plus inbound-upload helpers: `mintUploadSlot`, `uploadFileNameFromKey`, strict base64, and filename/MIME rules (no optional peers) |
 | `@chrischall/mcp-utils/html` | opt-in HTML scraping helpers (needs `node-html-parser`) |
 | `@chrischall/mcp-utils/scrape` | convenience alias for the zero-dep `scrape` module (also in the core barrel) |
 | `@chrischall/mcp-utils/test` | in-memory test harness for tool registration |
@@ -2667,6 +2667,40 @@ mcp-host hands each hosted child `MCP_BLOB_BASE_URL`
   const { result, deleted } = await store.consume(`uploads/${slot}/${name}`, async ({ bytes }) =>
     uploadToUpstream(bytes), { maxBytes: 25 * 1024 * 1024 });
   ```
+
+#### Uploads — a caller's file into a hosted server
+
+```ts
+import {
+  blobStoreFromEnv, mintUploadSlot, uploadFileNameFromKey, inlineFileSchema, uploadSlotRequestSchema,
+  decodeBase64Strict, resolveUploadMime, sanitizeUploadFilename, checkUploadSize, MAX_UPLOAD_FILES,
+} from '@chrischall/mcp-utils/export';
+
+// 1. tool call: uploadSlots:[{filename}] → signed PUT slots (caller curls each file)
+const slots = args.uploadSlots.map((req) => mintUploadSlot(store, req)); // { blobKey, uploadUrl, curl, expiresAt, … }
+
+// 2. tool call: blobKeys:[…] → read each, use it, delete it
+for (const key of args.blobKeys) {
+  const name = uploadFileNameFromKey(key);               // refuses any key not minted by mintUploadSlot
+  const { result, deleted } = await store.consume(key, async ({ bytes, contentType }) => {
+    checkUploadSize(name, bytes.length, 25 * 1024 * 1024);
+    return uploadUpstream(name, bytes, contentType);
+  }, { maxBytes: 25 * 1024 * 1024 });
+}
+
+// or, for a small file on any deployment: inline base64
+const bytes = decodeBase64Strict(file.contentBase64, { fileName: sanitizeUploadFilename(file.filename), maxBytes });
+```
+
+A hosted server has no filesystem in common with its caller, so a `path` input cannot work there.
+
+- **`mintUploadSlot(store, {filename, mimeType?}, {prefix?, ttlMs?, now?})`** — validates the filename and MIME type, builds a fresh `<prefix>/<uuid>/<base64url(filename)>` key (default prefix `uploads`), and signs a PUT committed to that MIME type. TTL defaults to 30 minutes. It resolves `{filename, mimeType, blobKey, method: 'PUT', uploadUrl, expiresAtMs, expiresAt, curl}`; the `curl` sends the signed `Content-Type` and uses `--fail`.
+- **`uploadFileNameFromKey(key, {prefix?})`** — the original filename, lossless even with spaces. It refuses any key not of that exact shape, so an upload input cannot be aimed at another object in the store, such as an export zip.
+- **`decodeBase64Strict(content, {fileName, maxBytes})`** — standard alphabet only, with a `data:` prefix and whitespace tolerated. It checks the size from the encoded length before allocating anything, and refuses non-canonical spellings by round-trip. `Buffer.from(…, 'base64')` silently drops bad characters, which is exactly what this guards against.
+- **`sanitizeUploadFilename`** (a bare, non-hidden name of at most 200 characters, with no control characters), **`resolveUploadMime(name, mimeType?)`** / **`mimeFromFileName`** (extension table; explicit types stripped to a bare `type/subtype`), **`checkUploadSize(name, size, maxBytes)`** (refuses empty or over-limit files; the limit is named, floored, in MiB and bytes).
+- **`inlineFileSchema`** / **`uploadSlotRequestSchema`** (zod) and **`MAX_UPLOAD_FILES`** (10 per call).
+
+Errors are tool-agnostic. The refusal that names a tool ("call `x_upload` with `uploadSlots`…") belongs to the server.
 
 #### Export sink — local disk or a hosted download link
 

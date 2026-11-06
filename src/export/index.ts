@@ -9,7 +9,10 @@
  *  - {@link blobStoreFromEnv} / {@link createBlobStore} — mcp-host's shared
  *    blob store: signed GET/PUT/DELETE URLs (gateway payloads byte for byte),
  *    the requests themselves, and `consume` (read an inbound upload, delete
- *    it once handled). Consolidates splitwise-mcp `_blob.ts` and gemini-mcp
+ *    it once handled).
+ *  - {@link mintUploadSlot} / {@link uploadFileNameFromKey} and friends — the
+ *    inbound half: signed upload slots a caller PUTs a file into, strict
+ *    base64 for small inline files, filename and MIME rules. Consolidates splitwise-mcp `_blob.ts` and gemini-mcp
  *    `blob-store.ts`; consumed by office-outlook-mcp and microsoft-teams-mcp
  *    bulk export.
  *  - {@link openExportSink} — where an export's files go: a fresh local
@@ -23,3 +26,4 @@
 export * from './blob.js';
 export * from './sink.js';
 export * from './zip.js';
+export * from './upload.js';
