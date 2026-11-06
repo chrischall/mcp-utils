@@ -150,7 +150,7 @@ describe('mintUploadSlot / uploadFileNameFromKey', () => {
   });
 
   it('shell-quotes a filename containing a single quote in the curl placeholder', () => {
-    expect(mintUploadSlot(STORE, { filename: "Finn's sheet.jpg" }).curl).toContain(`@'<path to Finn'\\''s sheet.jpg>'`);
+    expect(mintUploadSlot(STORE, { filename: "Sam's sheet.jpg" }).curl).toContain(`@'<path to Sam'\\''s sheet.jpg>'`);
   });
 
   it('honours a custom prefix and TTL', () => {
