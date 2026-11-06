@@ -40,7 +40,7 @@ import light:
 | `@chrischall/mcp-utils/healthcheck` | credential-style healthcheck factory (no fetchproxy peer needed) |
 | `@chrischall/mcp-utils/graphql` | GraphQL POST transport + operation-kind lexer (no optional peers) |
 | `@chrischall/mcp-utils/netguard` | SSRF guard for fetching third-party URLs: public-address table, DNS-pinning undici dispatcher, redirect-checked `fetchPublic` (needs `undici`) |
-| `@chrischall/mcp-utils/export` | bulk-export plumbing: export sink (local disk with absolute paths, or one zip in the mcp-host blob store behind a signed link), resume-cursor codec, zip writer, and the blob-store client — signed GET/PUT/DELETE URLs, PUT, GET, DELETE, and `consume` (read a caller's upload, delete it once handled), plus inbound-upload helpers: `mintUploadSlot`, `uploadFileNameFromKey`, strict base64, and filename/MIME rules (no optional peers) |
+| `@chrischall/mcp-utils/export` | bulk-export plumbing: export sink (local disk with absolute paths, or one zip in the mcp-host blob store behind a signed link), resume-cursor codec, zip writer, and the blob-store client — signed GET/PUT/DELETE URLs, PUT, GET, DELETE, and `consume` (read a caller's upload, delete it once handled), plus inbound-upload helpers: `mintUploadSlot`, `uploadFileNameFromKey`, strict base64, filename/MIME rules, and the two per-tool entry points `deliverFile` (inline → link → disk) and `resolveUploadSource` (path / inline / blobKey) (no optional peers) |
 | `@chrischall/mcp-utils/html` | opt-in HTML scraping helpers (needs `node-html-parser`) |
 | `@chrischall/mcp-utils/scrape` | convenience alias for the zero-dep `scrape` module (also in the core barrel) |
 | `@chrischall/mcp-utils/test` | in-memory test harness for tool registration |
@@ -2701,6 +2701,43 @@ A hosted server has no filesystem in common with its caller, so a `path` input c
 - **`inlineFileSchema`** / **`uploadSlotRequestSchema`** (zod) and **`MAX_UPLOAD_FILES`** (10 per call).
 
 Errors are tool-agnostic. The refusal that names a tool ("call `x_upload` with `uploadSlots`…") belongs to the server.
+
+#### Delivering a file, and accepting one: `deliverFile` / `resolveUploadSource`
+
+These are the two halves most file-moving tools need. Each handles every deployment, so a tool doesn't hand-roll a hosted check.
+
+```ts
+import { deliverFile, resolveUploadSource } from '@chrischall/mcp-utils/export';
+
+// DOWNLOAD — inline if it fits, else a signed link (hosted), else a disk file (local)
+const out = await deliverFile({ bytes, fileName, mimeType, disk: { dir: outputDir } });
+return { content: [...out.content, { type: 'text', text: JSON.stringify({ via: out.via, url: out.url, path: out.path, note: out.note }) }] };
+
+// UPLOAD — exactly one of path | inline | blobKey, validated the same way
+const src = await resolveUploadSource({ path: args.path, inline: args.inline, blobKey: args.blobKey }, {
+  maxBytes: 25 * 1024 * 1024,
+  allowedMimeTypes: ['application/pdf', 'image/jpeg', 'image/png'],
+  path: { mimeByExt: { pdf: 'application/pdf', jpg: 'image/jpeg', png: 'image/png' }, allowedRoots: [uploadDir] },
+  names: { slotTool: 'x_upload_slots' },
+});
+// bind src.sha256 into a confirmation; after the upstream write succeeds:
+const released = await src.release(); // { deleted: true } | { deleted: false, error } | { deleted: null }
+```
+
+- **`deliverFile({bytes, fileName, mimeType?, prefer?, store?, keyPrefix?, linkTtlMs?, inlineMaxBytes?, disk?})`** walks a ladder.
+  1. **Inline**, when the file is at most `inlineMaxBytes` (default `INLINE_DELIVERY_MAX_BYTES`, 10 MiB raw, about 13.3 MiB as base64, so under mcp-host's 14 MiB result cap). PNG, JPEG, GIF and WebP come back as `ImageContent`; anything else as an `EmbeddedResource` blob.
+  2. **Link**, when there's a blob store: a PUT under `files/<uuid>/<name>`, plus a signed, expiring GET URL.
+  3. **Disk**, when `disk.dir` is set (local installs): `writeUniqueFile`, which never overwrites.
+  4. Otherwise a `too_large` `McpToolError` naming the size, the cap and the missing routes.
+
+  `prefer` reorders the ladder but never picks a route the caller can't reach. `'disk'` on a hosted server becomes a link, with a `note` saying why. The type is sniffed from the bytes for images and stripped of `;charset`-style parameters.
+- **`resolveUploadSource({path | inline | blobKey}, opts)`** returns `{origin, fileName, mimeType, bytes, sizeBytes, sha256, blobKey?, release()}`.
+  - **`path`** goes through `vetUploadFile`, and is refused outright on a hosted deployment (`opts.hosted`, default `isHostedEnv()`) with a message pointing to the slot tool or `inline`.
+  - **`inline`** is decoded with `decodeBase64Strict`.
+  - **`blobKey`** must be a key `mintUploadSlot` minted. It's read with `store.get`, capped at `maxBytes`.
+  - `allowedMimeTypes` applies to every route, and the bytes must match the type (`bytesMatchMime`, which fails closed).
+  - **Reading never deletes.** `release()` deletes a blob upload and reports a failed delete instead of throwing. A 404 counts as deleted.
+  - `names` adapts messages to the tool's own parameter spellings, such as `file_path` and `blob_key`.
 
 #### Export sink — local disk or a hosted download link
 

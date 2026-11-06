@@ -12,7 +12,10 @@
  *    it once handled).
  *  - {@link mintUploadSlot} / {@link uploadFileNameFromKey} and friends — the
  *    inbound half: signed upload slots a caller PUTs a file into, strict
- *    base64 for small inline files, filename and MIME rules. Consolidates splitwise-mcp `_blob.ts` and gemini-mcp
+ *    base64 for small inline files, filename and MIME rules; and the two
+ *    per-tool entry points {@link deliverFile} (hand a file back: inline →
+ *    signed link → disk) and {@link resolveUploadSource} (take a file in:
+ *    path / inline / blobKey, validated once). Consolidates splitwise-mcp `_blob.ts` and gemini-mcp
  *    `blob-store.ts`; consumed by office-outlook-mcp and microsoft-teams-mcp
  *    bulk export.
  *  - {@link openExportSink} — where an export's files go: a fresh local
@@ -27,3 +30,5 @@ export * from './blob.js';
 export * from './sink.js';
 export * from './zip.js';
 export * from './upload.js';
+export * from './upload-source.js';
+export * from './deliver.js';
