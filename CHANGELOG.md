@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.5.0](https://github.com/chrischall/mcp-utils/compare/v3.4.1...v3.5.0) (2026-11-06)
+
+
+### Features
+
+* **export:** read, delete and consume blob-store objects ([#411](https://github.com/chrischall/mcp-utils/issues/411)) ([51c7d68](https://github.com/chrischall/mcp-utils/commit/51c7d68aa52905519d6c1cd58ff9c5bfd21b5305))
+
 ## [3.4.1](https://github.com/chrischall/mcp-utils/compare/v3.4.0...v3.4.1) (2026-11-04)
 
 
