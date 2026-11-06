@@ -2730,7 +2730,7 @@ const released = await src.release(); // { deleted: true } | { deleted: false, e
   3. **Disk**, when `disk.dir` is set (local installs): `writeUniqueFile`, which never overwrites. Pass `disk.mode` (e.g. `0o600`) for personal documents; it's applied when the file is created, not by a later chmod.
   4. Otherwise a `too_large` `McpToolError` naming the size, the cap and the missing routes.
 
-  `prefer` reorders the ladder but never picks a route the caller can't reach. `'disk'` on a hosted server becomes a link, with a `note` saying why. The type is sniffed from the bytes for images and stripped of `;charset`-style parameters.
+  With a blob store, `'auto'` sends anything that isn't a renderable image as a link, because hosted clients such as claude.ai render only images inline and reject every other `EmbeddedResource`. Pass `prefer: 'inline'` to get the resource anyway. `prefer` reorders the ladder but never picks a route the caller can't reach. `'disk'` on a hosted server becomes a link, with a `note` saying why. The type is sniffed from the bytes for images and stripped of `;charset`-style parameters.
 - **`resolveUploadSource({path | inline | blobKey}, opts)`** returns `{origin, fileName, mimeType, bytes, sizeBytes, sha256, blobKey?, release()}`.
   - **`path`** goes through `vetUploadFile`, and is refused outright on a hosted deployment (`opts.hosted`, default `isHostedEnv()`) with a message pointing to the slot tool or `inline`.
   - **`inline`** is decoded with `decodeBase64Strict`.
