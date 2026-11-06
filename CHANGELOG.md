@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.7.0](https://github.com/chrischall/mcp-utils/compare/v3.6.0...v3.7.0) (2026-11-06)
+
+
+### Features
+
+* **export:** deliverFile and resolveUploadSource, the per-tool file entry points ([#416](https://github.com/chrischall/mcp-utils/issues/416)) ([0a4c9e9](https://github.com/chrischall/mcp-utils/commit/0a4c9e945f614598225334e3b1e6a76cdf72f5b4))
+
 ## [3.6.0](https://github.com/chrischall/mcp-utils/compare/v3.5.0...v3.6.0) (2026-11-06)
 
 
