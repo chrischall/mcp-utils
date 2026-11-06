@@ -7,8 +7,9 @@
  * hosted files need it.
  *
  *  - {@link blobStoreFromEnv} / {@link createBlobStore} — mcp-host's shared
- *    blob store: signed GET/PUT URLs (gateway payloads byte for byte) and the
- *    PUT itself. Consolidates splitwise-mcp `_blob.ts` and gemini-mcp
+ *    blob store: signed GET/PUT/DELETE URLs (gateway payloads byte for byte),
+ *    the requests themselves, and `consume` (read an inbound upload, delete
+ *    it once handled). Consolidates splitwise-mcp `_blob.ts` and gemini-mcp
  *    `blob-store.ts`; consumed by office-outlook-mcp and microsoft-teams-mcp
  *    bulk export.
  *  - {@link openExportSink} — where an export's files go: a fresh local

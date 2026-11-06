@@ -1,7 +1,14 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { McpToolError } from '../errors/index.js';
-import { blobStoreFromEnv, createBlobStore, BLOB_DEFAULT_TTL_MS, BLOB_MAX_TTL_MS } from './blob.js';
+import {
+  blobStoreFromEnv,
+  createBlobStore,
+  BLOB_DEFAULT_TTL_MS,
+  BLOB_MAX_OBJECT_BYTES,
+  BLOB_MAX_TTL_MS,
+} from './blob.js';
+import { ResponseTooLargeError } from '../http/index.js';
 
 const BASE = 'https://mcp.example.com/b/reg-1234';
 const KEY = 'test-signing-key-0123456789';
@@ -254,5 +261,204 @@ describe('put', () => {
     await store.put('k.txt', 'x', 'text/plain', { fetchImpl, signal: ac.signal });
     const init = (fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1];
     expect(init.signal).toBe(ac.signal);
+  });
+});
+
+describe('signDeleteUrl', () => {
+  const store = createBlobStore({ baseUrl: BASE, signingKey: KEY });
+
+  it('signs `del\\0<prefix>/<key>\\0<exp>` (the gateway deletePayload shape)', () => {
+    const { url, expiresAtMs } = store.signDeleteUrl('up/abc/photo.jpg', { now: NOW });
+    const { u, exp, sig } = parse(url);
+    expect(expiresAtMs).toBe(1_767_225_600_000);
+    expect(u.origin + u.pathname).toBe(`${BASE}/up/abc/photo.jpg`);
+    expect(sig).toBe(hmac(`del\x00reg-1234/up/abc/photo.jpg\x00${exp}`));
+  });
+
+  it('never verifies as a read or a write signature, and vice versa', () => {
+    const del = parse(store.signDeleteUrl('k.bin', { now: NOW }).url).sig;
+    const get = parse(store.signGetUrl('k.bin', { now: NOW }).url).sig;
+    const put = parse(store.signPutUrl('k.bin', 'application/octet-stream', { now: NOW }).url).sig;
+    expect(new Set([del, get, put]).size).toBe(3);
+  });
+
+  it('validates the key and TTL like the other verbs', () => {
+    expect(() => store.signDeleteUrl('../x')).toThrow(McpToolError);
+    expect(() => store.signDeleteUrl('x', { ttlMs: BLOB_MAX_TTL_MS + 1 })).toThrow(McpToolError);
+  });
+});
+
+describe('delete', () => {
+  const store = createBlobStore({ baseUrl: BASE, signingKey: KEY });
+
+  it('sends DELETE to a delete-signed URL and resolves on 204', async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 204 }));
+    await store.delete('up/abc/photo.jpg', { fetchImpl, now: NOW });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(init.method).toBe('DELETE');
+    const { sig, exp } = parse(url);
+    expect(sig).toBe(hmac(`del\x00reg-1234/up/abc/photo.jpg\x00${exp}`));
+  });
+
+  it('throws an http McpToolError on a non-2xx without the signature', async () => {
+    const fetchImpl = vi.fn(async () => new Response('{"error":"bad signature"}', { status: 403 }));
+    const err = await store.delete('k.bin', { fetchImpl }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpToolError);
+    expect((err as McpToolError).kind).toBe('http');
+    expect((err as McpToolError).status).toBe(403);
+    expect((err as Error).message).not.toContain('sig=');
+  });
+
+  it('wraps a network failure as a transport McpToolError without the URL', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      throw new TypeError(`fetch failed for ${url}`);
+    });
+    const err = await store
+      .delete('k.bin', { fetchImpl: fetchImpl as unknown as typeof fetch })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpToolError);
+    expect((err as McpToolError).kind).toBe('transport');
+    expect((err as Error).message).not.toContain('sig=');
+  });
+
+  it('rethrows the caller\'s own cancellation unchanged', async () => {
+    const ac = new AbortController();
+    ac.abort(new Error('user cancelled'));
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 204 }));
+    await expect(store.delete('k.bin', { fetchImpl, signal: ac.signal })).rejects.toThrow('user cancelled');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('validates the key before any network call', async () => {
+    const fetchImpl = vi.fn();
+    await expect(store.delete('a//b', { fetchImpl })).rejects.toBeInstanceOf(McpToolError);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe('get', () => {
+  const store = createBlobStore({ baseUrl: BASE, signingKey: KEY });
+
+  it('GETs a read-signed URL and returns the bytes and the stored content type', async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response(new Uint8Array([0xff, 0xd8, 0xff]), { status: 200, headers: { 'content-type': 'image/jpeg' } }),
+    );
+    const obj = await store.get('up/abc/photo.jpg', { fetchImpl, now: NOW });
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(init.method).toBe('GET');
+    const { sig, exp } = parse(url);
+    expect(sig).toBe(hmac(`reg-1234/up/abc/photo.jpg\n${exp}`));
+    expect(obj).toEqual({ key: 'up/abc/photo.jpg', bytes: new Uint8Array([0xff, 0xd8, 0xff]), contentType: 'image/jpeg' });
+  });
+
+  it('reports a missing content type as undefined', async () => {
+    const fetchImpl = vi.fn(async () => new Response(new Uint8Array([1]), { status: 200 }));
+    // A Response built from bytes carries no content-type of its own.
+    expect((await store.get('k.bin', { fetchImpl })).contentType).toBeUndefined();
+  });
+
+  it('names a 404 as missing, expired or already consumed', async () => {
+    const fetchImpl = vi.fn(async () => new Response('{"error":"not found"}', { status: 404 }));
+    const err = await store.get('k.bin', { fetchImpl }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpToolError);
+    expect((err as McpToolError).status).toBe(404);
+    expect((err as Error).message).toMatch(/not found/i);
+    expect((err as Error).message).not.toContain('sig=');
+  });
+
+  it('enforces maxBytes, defaulting to the gateway object cap', async () => {
+    const fetchImpl = vi.fn(async () => new Response(new Uint8Array(10), { status: 200 }));
+    await expect(store.get('k.bin', { fetchImpl, maxBytes: 4 })).rejects.toBeInstanceOf(ResponseTooLargeError);
+    expect(BLOB_MAX_OBJECT_BYTES).toBe(100 * 1024 * 1024);
+    const big = vi.fn(
+      async () => new Response(new Uint8Array(1), { status: 200, headers: { 'content-length': String(BLOB_MAX_OBJECT_BYTES + 1) } }),
+    );
+    await expect(store.get('k.bin', { fetchImpl: big })).rejects.toBeInstanceOf(ResponseTooLargeError);
+  });
+
+  it('wraps a network failure as a transport McpToolError without the URL', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      throw new TypeError(`fetch failed for ${url}`);
+    });
+    const err = await store.get('k.bin', { fetchImpl: fetchImpl as unknown as typeof fetch }).catch((e: unknown) => e);
+    expect((err as McpToolError).kind).toBe('transport');
+    expect((err as Error).message).not.toContain('sig=');
+  });
+});
+
+describe('consume', () => {
+  const store = createBlobStore({ baseUrl: BASE, signingKey: KEY });
+
+  /** A fetch that serves one object and records every call. */
+  function fakeStore(opts: { getStatus?: number; deleteStatus?: number; deleteThrows?: boolean } = {}) {
+    return vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'DELETE') {
+        if (opts.deleteThrows) throw new TypeError('socket hang up');
+        return new Response(null, { status: opts.deleteStatus ?? 204 });
+      }
+      return new Response(new Uint8Array([7, 7]), {
+        status: opts.getStatus ?? 200,
+        headers: { 'content-type': 'image/png' },
+      });
+    });
+  }
+  const methods = (f: ReturnType<typeof fakeStore>) =>
+    f.mock.calls.map((c) => (c[1] as RequestInit | undefined)?.method);
+
+  it('reads the object, hands it to `use`, then deletes it', async () => {
+    const fetchImpl = fakeStore();
+    const use = vi.fn(async (obj: { bytes: Uint8Array; contentType?: string }) => {
+      expect(obj.bytes).toEqual(new Uint8Array([7, 7]));
+      expect(obj.contentType).toBe('image/png');
+      // Not deleted while it is still in use.
+      expect(methods(fetchImpl)).toEqual(['GET']);
+      return { fileId: 42 };
+    });
+    const out = await store.consume('up/a/p.png', use, { fetchImpl: fetchImpl as unknown as typeof fetch });
+    expect(out).toEqual({ result: { fileId: 42 }, deleted: true });
+    expect(methods(fetchImpl)).toEqual(['GET', 'DELETE']);
+  });
+
+  it('keeps the object when `use` throws, and rethrows its error', async () => {
+    const fetchImpl = fakeStore();
+    await expect(
+      store.consume('k.png', async () => {
+        throw new Error('OFW rejected the upload');
+      }, { fetchImpl: fetchImpl as unknown as typeof fetch }),
+    ).rejects.toThrow('OFW rejected the upload');
+    expect(methods(fetchImpl)).toEqual(['GET']);
+  });
+
+  it('never calls `use` or deletes when the read fails', async () => {
+    const fetchImpl = fakeStore({ getStatus: 404 });
+    const use = vi.fn();
+    await expect(store.consume('k.png', use, { fetchImpl: fetchImpl as unknown as typeof fetch })).rejects.toBeInstanceOf(
+      McpToolError,
+    );
+    expect(use).not.toHaveBeenCalled();
+    expect(methods(fetchImpl)).toEqual(['GET']);
+  });
+
+  // The consumer's side effect has HAPPENED. Throwing now would read as "the
+  // upload failed" and invite a retry that duplicates it — so a failed delete
+  // is reported beside the result, never in place of it.
+  it('reports a failed delete beside the result instead of throwing', async () => {
+    for (const fetchImpl of [fakeStore({ deleteStatus: 500 }), fakeStore({ deleteThrows: true })]) {
+      const out = await store.consume('k.png', async () => 'ok', { fetchImpl: fetchImpl as unknown as typeof fetch });
+      expect(out.result).toBe('ok');
+      expect(out.deleted).toBe(false);
+      expect(out.deleteError).toMatch(/k\.png/);
+      expect(out.deleteError).not.toContain('sig=');
+    }
+  });
+
+  it('passes maxBytes through to the read', async () => {
+    const fetchImpl = fakeStore();
+    const use = vi.fn();
+    await expect(
+      store.consume('k.png', use, { fetchImpl: fetchImpl as unknown as typeof fetch, maxBytes: 1 }),
+    ).rejects.toBeInstanceOf(ResponseTooLargeError);
+    expect(use).not.toHaveBeenCalled();
   });
 });

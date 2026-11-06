@@ -17,14 +17,30 @@
  *
  * ## The payloads are the gateway's, byte for byte — do not "tidy" them
  *
- *   GET  signs  `<prefix>/<key>\n<exp>`
- *   PUT  signs  `put\0<prefix>/<key>\0<contentType>\0<exp>`
+ *   GET     signs  `<prefix>/<key>\n<exp>`
+ *   PUT     signs  `put\0<prefix>/<key>\0<contentType>\0<exp>`
+ *   DELETE  signs  `del\0<prefix>/<key>\0<exp>`
  *
  * HMAC-SHA256 under `MCP_BLOB_SIGNING_KEY`, base64url, and the URL is
  * `${base}/${key}?exp=<ms>&sig=<urlencoded sig>`. `prefix` is the base URL's
  * path with the leading `b/` stripped; `exp` is epoch MILLISECONDS. The PUT
  * signature commits to the content type, so a URL minted for a zip cannot
  * store anything else, and a read signature can never be replayed as a write.
+ * Each verb leads with its own word (a read with none, and a `\n` where the
+ * others carry NULs), so no signature verifies as another verb's — a link that
+ * lets someone read an object can never be spent destroying it.
+ *
+ * ## Consuming an upload
+ *
+ * The store also carries bytes INTO a hosted server: the server mints a PUT
+ * link, the caller `curl`s a file to it, and the server reads the object back
+ * — no base64 in the tool call, no request-size ceiling. {@link BlobStore.consume}
+ * is that read, plus the cleanup: the object is deleted once the caller's
+ * handler has succeeded, so a user's photo does not sit in the bucket until
+ * the retention prune. A handler that throws leaves it in place for a retry,
+ * and a delete that fails AFTER the handler succeeded is reported, never
+ * thrown — the handler's side effect has happened, and an error there would
+ * read as "it failed", inviting a retry that duplicates it.
  *
  * Signing is synchronous (`node:crypto`) on purpose: callers build the store
  * while constructing module-level singletons, where an `await` would put a
@@ -34,12 +50,16 @@
 import { createHmac } from 'node:crypto';
 import { readEnvVar, type EnvSource } from '../config/index.js';
 import { McpToolError } from '../errors/index.js';
+import { fetchBounded, RequestTimeoutError } from '../http/index.js';
 
 /** Default life of a signed link: one hour. */
 export const BLOB_DEFAULT_TTL_MS = 60 * 60 * 1000;
 
 /** The longest link life the gateway accepts (24h); anything longer is refused here, not at the gateway. */
 export const BLOB_MAX_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** The gateway's cap on one object (100 MiB) — and the default read cap for {@link BlobStore.get}. */
+export const BLOB_MAX_OBJECT_BYTES = 100 * 1024 * 1024;
 
 /** Longest object key accepted, in characters. */
 const MAX_KEY_LENGTH = 1024;
@@ -70,6 +90,41 @@ export interface BlobPutOptions extends BlobSignOptions {
   /** Cancels the upload. */
   signal?: AbortSignal;
 }
+
+/** Per-call options for {@link BlobStore.delete}. */
+export interface BlobRequestOptions extends BlobSignOptions {
+  /** `fetch` implementation (tests). Default global `fetch`. */
+  fetchImpl?: typeof fetch;
+  /** Cancels the request. The ambient tool-call signal applies as well. */
+  signal?: AbortSignal;
+  /** Milliseconds until the exchange (body included) must finish. Default 30 s. */
+  timeoutMs?: number;
+}
+
+/** Per-call options for {@link BlobStore.get} / {@link BlobStore.consume}. */
+export interface BlobGetOptions extends BlobRequestOptions {
+  /** Largest object this call will read. Default {@link BLOB_MAX_OBJECT_BYTES}. */
+  maxBytes?: number;
+}
+
+/** An object read back from the store. */
+export interface BlobObject {
+  /** The object key, relative to this registration's space. */
+  key: string;
+  /** The object's bytes. */
+  bytes: Uint8Array;
+  /** The content type it was stored with, if the store reported one. */
+  contentType?: string;
+}
+
+/**
+ * What {@link BlobStore.consume} produced. `deleted: false` means the handler
+ * SUCCEEDED but the object is still in the store (the retention prune will
+ * reclaim it); `deleteError` says why, without the signed URL.
+ */
+export type BlobConsumeResult<T> =
+  | { result: T; deleted: true }
+  | { result: T; deleted: false; deleteError: string };
 
 /** A signed link and the instant it stops working. */
 export interface SignedBlobUrl {
@@ -104,6 +159,28 @@ export interface BlobStore {
    * message carries the signed URL or the key material.
    */
   put(key: string, body: Uint8Array | string, contentType: string, opts?: BlobPutOptions): Promise<BlobPutResult>;
+  /** Mint a signed DELETE URL for `key`. Throws {@link McpToolError} on a bad key or TTL. */
+  signDeleteUrl(key: string, opts?: BlobSignOptions): SignedBlobUrl;
+  /**
+   * Read `key` back, refusing more than `maxBytes`. A 404 (never stored,
+   * expired out of retention, or already consumed) and any other non-2xx
+   * throw {@link McpToolError} kind `'http'` with `status`; an over-cap object
+   * throws `ResponseTooLargeError`; a network failure, kind `'transport'`.
+   * No message carries the signed URL.
+   */
+  get(key: string, opts?: BlobGetOptions): Promise<BlobObject>;
+  /**
+   * Delete `key`. Idempotent at the gateway: an absent object is success.
+   * Errors as {@link BlobStore.get}.
+   */
+  delete(key: string, opts?: BlobRequestOptions): Promise<void>;
+  /**
+   * Read `key`, pass it to `use`, and delete it once `use` resolves. If the
+   * read fails `use` is never called; if `use` throws, the object is KEPT and
+   * the error propagates; if the delete fails after `use` succeeded, that is
+   * reported as `deleted: false` + `deleteError`, never thrown.
+   */
+  consume<T>(key: string, use: (object: BlobObject) => Promise<T> | T, opts?: BlobGetOptions): Promise<BlobConsumeResult<T>>;
 }
 
 function configError(reason: string): McpToolError {
@@ -236,7 +313,80 @@ export function createBlobStore(opts: BlobStoreOptions): BlobStore {
     return { key, bytes: bytes.byteLength };
   };
 
-  return { baseUrl: base, prefix, signGetUrl, signPutUrl, put };
+  const signDeleteUrl = (key: string, o?: BlobSignOptions): SignedBlobUrl => {
+    const encoded = encodeKey(key);
+    const exp = expiry(o);
+    return { url: link(encoded, exp, sign(`del\0${prefix}/${key}\0${exp}`)), expiresAtMs: exp };
+  };
+
+  /**
+   * One signed exchange through {@link fetchBounded}: a timeout that covers the
+   * body, the caller's and the ambient cancellation, and a byte cap. A failure
+   * that is neither a cancellation, a timeout nor an over-cap body becomes a
+   * transport error whose message cannot carry the signed URL.
+   */
+  const exchange = async <R extends 'bytes' | 'none'>(
+    what: string,
+    url: string,
+    method: 'GET' | 'DELETE',
+    read: R,
+    o: BlobGetOptions,
+  ) => {
+    try {
+      return await fetchBounded(url, { method, ...(o.signal ? { signal: o.signal } : {}) }, {
+        read,
+        service: 'the blob store',
+        ...(read === 'bytes' ? { maxBytes: o.maxBytes ?? BLOB_MAX_OBJECT_BYTES } : {}),
+        ...(o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}),
+        ...(o.fetchImpl ? { fetchImpl: o.fetchImpl } : {}),
+      });
+    } catch (cause) {
+      if (o.signal?.aborted || cause instanceof McpToolError || cause instanceof RequestTimeoutError) throw cause;
+      throw new McpToolError(`Blob store ${what} did not complete (network error).`, { kind: 'transport' });
+    }
+  };
+
+  const get = async (key: string, o: BlobGetOptions = {}): Promise<BlobObject> => {
+    const { url } = signGetUrl(key, o);
+    const res = await exchange(`read of ${key}`, url, 'GET', 'bytes', o);
+    if (!res.ok) {
+      const why = res.status === 404 ? ' — not found (never uploaded, expired, or already consumed)' : '';
+      throw new McpToolError(`Blob store read of ${key} failed (HTTP ${res.status})${why}.`, {
+        kind: 'http',
+        status: res.status,
+      });
+    }
+    const contentType = res.headers.get('content-type') ?? undefined;
+    return { key, bytes: res.body, ...(contentType !== undefined ? { contentType } : {}) };
+  };
+
+  const del = async (key: string, o: BlobRequestOptions = {}): Promise<void> => {
+    const { url } = signDeleteUrl(key, o);
+    const res = await exchange(`delete of ${key}`, url, 'DELETE', 'none', o);
+    if (!res.ok) {
+      throw new McpToolError(`Blob store delete of ${key} failed (HTTP ${res.status}).`, {
+        kind: 'http',
+        status: res.status,
+      });
+    }
+  };
+
+  const consume = async <T>(
+    key: string,
+    use: (object: BlobObject) => Promise<T> | T,
+    o: BlobGetOptions = {},
+  ): Promise<BlobConsumeResult<T>> => {
+    const object = await get(key, o);
+    const result = await use(object);
+    try {
+      await del(key, o);
+      return { result, deleted: true };
+    } catch (e) {
+      return { result, deleted: false, deleteError: e instanceof Error ? e.message : String(e) };
+    }
+  };
+
+  return { baseUrl: base, prefix, signGetUrl, signPutUrl, put, signDeleteUrl, get, delete: del, consume };
 }
 
 /**
