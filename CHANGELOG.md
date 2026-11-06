@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.7.1](https://github.com/chrischall/mcp-utils/compare/v3.7.0...v3.7.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* **export:** deliverFile sends non-image files as a link when hosted ([#419](https://github.com/chrischall/mcp-utils/issues/419)) ([9d23733](https://github.com/chrischall/mcp-utils/commit/9d23733c791a50a1052d1252c50beacc050f4872))
+* **export:** let deliverFile create disk files with a given mode ([#418](https://github.com/chrischall/mcp-utils/issues/418)) ([bf55fa3](https://github.com/chrischall/mcp-utils/commit/bf55fa3c8d78176d538d1b8a060750086b19d3e4))
+
 ## [3.7.0](https://github.com/chrischall/mcp-utils/compare/v3.6.0...v3.7.0) (2026-11-06)
 
 
