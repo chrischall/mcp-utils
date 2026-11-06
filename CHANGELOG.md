@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.6.0](https://github.com/chrischall/mcp-utils/compare/v3.5.0...v3.6.0) (2026-11-06)
+
+
+### Features
+
+* **export:** inbound upload helpers (upload slots, strict base64, filename rules) ([#413](https://github.com/chrischall/mcp-utils/issues/413)) ([f968ff0](https://github.com/chrischall/mcp-utils/commit/f968ff063d8f34763baefa0b25287f92915ec9a5))
+
 ## [3.5.0](https://github.com/chrischall/mcp-utils/compare/v3.4.1...v3.5.0) (2026-11-06)
 
 
