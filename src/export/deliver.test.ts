@@ -166,3 +166,27 @@ describe('deliverFile — disk mode', () => {
     expect(statSync(out.path!).mode & 0o777).toBe(0o600);
   });
 });
+
+describe('deliverFile — non-image files on a hosted server', () => {
+  // claude.ai renders four image types inline and rejects every other
+  // EmbeddedResource outright, so on a server with a blob store a small PDF
+  // must go out as a link, not a resource the client throws away.
+  it("'auto' links a small non-image file when a blob store exists", async () => {
+    const { store, puts } = fakeStore();
+    const out = await deliverFile({ bytes: PDF, fileName: 'r.pdf', store });
+    expect(out.via).toBe('link');
+    expect(out.note).toMatch(/only render images inline/);
+    expect(puts).toHaveLength(1);
+  });
+
+  it("'auto' still inlines a small image when a blob store exists", async () => {
+    const { store, puts } = fakeStore();
+    expect((await deliverFile({ bytes: PNG, fileName: 'p.png', store })).via).toBe('image');
+    expect(puts).toHaveLength(0);
+  });
+
+  it("prefer:'inline' keeps the resource for a caller that wants the bytes", async () => {
+    const { store } = fakeStore();
+    expect((await deliverFile({ bytes: PDF, fileName: 'r.pdf', store, prefer: 'inline' })).via).toBe('resource');
+  });
+});

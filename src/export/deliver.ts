@@ -11,7 +11,9 @@
  * it in the web app" where a link would do. This is the one ladder:
  *
  *  1. **inline** when the bytes fit `inlineMaxBytes` — a host-renderable image
- *     as `ImageContent`, anything else as an `EmbeddedResource` blob;
+ *     as `ImageContent`, anything else as an `EmbeddedResource` blob. With a
+ *     blob store, `'auto'` sends a NON-image as a link instead: claude.ai
+ *     renders only images and rejects every other EmbeddedResource outright;
  *  2. **link** — PUT to the blob store, return a signed, expiring GET URL —
  *     when the deployment has one (i.e. it is hosted);
  *  3. **disk** — a fresh, never-overwriting file under `disk.dir` — when the
@@ -182,6 +184,14 @@ export async function deliverFile(opts: DeliverFileOptions): Promise<DeliveredFi
     return noRoute();
   }
   // 'auto' and 'inline'
+  // A hosted client (claude.ai) renders only images inline and REJECTS any
+  // other EmbeddedResource, so with a blob store a non-image goes out as a
+  // link. An explicit prefer:'inline' still gets the resource (raw bytes).
+  if (prefer === 'auto' && store && !RENDERABLE_IMAGES.has(mimeType)) {
+    return link(fits
+      ? `Hosted clients only render images inline, so ${fileName} (${mimeType}) is delivered as a download link.`
+      : `${tooBig} A download link is returned instead.`);
+  }
   if (fits) return inline();
   if (store) return link(`${tooBig} A download link is returned instead.`);
   if (opts.disk) return disk(`${tooBig} It was saved to disk instead.`);
