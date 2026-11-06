@@ -2727,7 +2727,7 @@ const released = await src.release(); // { deleted: true } | { deleted: false, e
 - **`deliverFile({bytes, fileName, mimeType?, prefer?, store?, keyPrefix?, linkTtlMs?, inlineMaxBytes?, disk?})`** walks a ladder.
   1. **Inline**, when the file is at most `inlineMaxBytes` (default `INLINE_DELIVERY_MAX_BYTES`, 10 MiB raw, about 13.3 MiB as base64, so under mcp-host's 14 MiB result cap). PNG, JPEG, GIF and WebP come back as `ImageContent`; anything else as an `EmbeddedResource` blob.
   2. **Link**, when there's a blob store: a PUT under `files/<uuid>/<name>`, plus a signed, expiring GET URL.
-  3. **Disk**, when `disk.dir` is set (local installs): `writeUniqueFile`, which never overwrites.
+  3. **Disk**, when `disk.dir` is set (local installs): `writeUniqueFile`, which never overwrites. Pass `disk.mode` (e.g. `0o600`) for personal documents; it's applied when the file is created, not by a later chmod.
   4. Otherwise a `too_large` `McpToolError` naming the size, the cap and the missing routes.
 
   `prefer` reorders the ladder but never picks a route the caller can't reach. `'disk'` on a hosted server becomes a link, with a `note` saying why. The type is sniffed from the bytes for images and stripped of `;charset`-style parameters.

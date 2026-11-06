@@ -66,7 +66,12 @@ export interface DeliverFileOptions {
   /** Inline ceiling in raw bytes. Default {@link INLINE_DELIVERY_MAX_BYTES}. */
   inlineMaxBytes?: number;
   /** Local-install disk route: the directory to write into, optionally confined. */
-  disk?: { dir: string; allowedRoots?: readonly string[] };
+  disk?: {
+    dir: string;
+    allowedRoots?: readonly string[];
+    /** File mode to create with (e.g. `0o600` for personal documents). Applied at create time — no chmod window. */
+    mode?: number;
+  };
 }
 
 /** What {@link deliverFile} did. Spread `content` into the tool result; put the rest in its JSON. */
@@ -150,6 +155,7 @@ export async function deliverFile(opts: DeliverFileOptions): Promise<DeliveredFi
     const path = await writeUniqueFile({
       dir: opts.disk!.dir, baseName: stem, extension, bytes,
       ...(opts.disk!.allowedRoots ? { allowedRoots: opts.disk!.allowedRoots } : {}),
+      ...(opts.disk!.mode !== undefined ? { mode: opts.disk!.mode } : {}),
     });
     return { via: 'disk', ...base, content: [], path, ...(note ? { note } : {}) };
   };

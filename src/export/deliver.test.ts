@@ -158,3 +158,11 @@ describe('deliverFile — preferred route with nothing that fits', () => {
     expect(out.note).toMatch(/no blob store/);
   });
 });
+
+describe('deliverFile — disk mode', () => {
+  it('creates the file with the given mode (no chmod window)', async () => {
+    const { statSync } = await import('node:fs');
+    const out = await deliverFile({ bytes: PDF, fileName: 'r.pdf', store: null, prefer: 'disk', disk: { dir, mode: 0o600 } });
+    expect(statSync(out.path!).mode & 0o777).toBe(0o600);
+  });
+});
