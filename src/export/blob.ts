@@ -252,7 +252,10 @@ function expiry(opts: BlobSignOptions | undefined): number {
 function toArrayBuffer(view: Uint8Array): ArrayBuffer {
   const buf = view.buffer;
   if (buf instanceof ArrayBuffer && view.byteOffset === 0 && view.byteLength === buf.byteLength) return buf;
-  return view.slice().buffer as ArrayBuffer;
+  // Uint8Array.prototype.slice, NOT view.slice(): on a Node Buffer the latter
+  // returns a view of the shared allocation pool, whose .buffer is the whole
+  // pool — unrelated process memory would be uploaded beside the bytes.
+  return Uint8Array.prototype.slice.call(view).buffer as ArrayBuffer;
 }
 
 /**
