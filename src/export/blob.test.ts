@@ -209,6 +209,20 @@ describe('put', () => {
     expect(init.body).toBe(bytes.buffer);
   });
 
+  // A small Node Buffer is a view into Node's shared allocation pool, and
+  // Buffer#slice returns a VIEW, not a copy — so `.slice().buffer` was the whole
+  // 8 KiB pool: unrelated process memory uploaded behind a shareable link.
+  it('PUTs only the bytes of a pooled Node Buffer, never the rest of the pool', async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const bytes = Buffer.from('%PDF-1.7 small');
+    expect(bytes.buffer.byteLength).toBeGreaterThan(bytes.byteLength); // it really is pooled
+    const res = await store.put('p.pdf', bytes, 'application/pdf', { fetchImpl });
+    const init = (fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect((init.body as ArrayBuffer).byteLength).toBe(bytes.byteLength);
+    expect(new Uint8Array(init.body as ArrayBuffer)).toEqual(new Uint8Array(bytes));
+    expect(res.bytes).toBe(bytes.byteLength);
+  });
+
   it('PUTs a Uint8Array view at its own offset only', async () => {
     const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
     const backing = new Uint8Array([9, 9, 1, 2, 9]);
