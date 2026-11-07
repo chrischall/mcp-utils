@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.7.2](https://github.com/chrischall/mcp-utils/compare/v3.7.1...v3.7.2) (2026-11-07)
+
+
+### Bug Fixes
+
+* **blob:** upload only the given bytes when put() receives a pooled Node Buffer ([#422](https://github.com/chrischall/mcp-utils/issues/422)) ([e50132e](https://github.com/chrischall/mcp-utils/commit/e50132e0ee0a5b20d932fe588708702ed6a6ce99))
+
 ## [3.7.1](https://github.com/chrischall/mcp-utils/compare/v3.7.0...v3.7.1) (2026-11-06)
 
 
