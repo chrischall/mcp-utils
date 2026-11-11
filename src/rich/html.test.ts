@@ -343,15 +343,52 @@ describe('workday gaps', () => {
     expect(decodeEntities('&amp;lt; &#39;&#34;&#x2019;')).toBe('&lt; \'"’');
   });
 
-  it('d. sanitiseHtml limits output to a tag subset, keeping text; the hook runs first', () => {
-    const subset = {
-      tags: ['p', 'br', 'b', 'ul', 'li'],
-      element: (el: { tag: string }, output: string, inner: string) =>
-        output === 'html' && el.tag === 'strong' ? `<b>${inner}</b>` : undefined,
-    };
+  it('d. sanitiseHtml limits output to a tag subset, keeping meaning; the hook runs first', () => {
     const md = renderMarkdown('**x** and [link](https://a.example/l) and `code`\n\n- one\n- two\n\n## Head', { headings: true });
-    expect(sanitiseHtml(md, subset)).toBe('<p><b>x</b> and link and code</p><ul><li>one</li><li>two</li></ul>Head');
-    expect(sanitiseHtml('<p><i>i</i><br>x</p>', { tags: new Set(['p']) })).toBe('<p>ix</p>');
+    expect(sanitiseHtml(md, { tags: ['p', 'br', 'b', 'ul', 'li'] })).toBe(
+      '<p><b>x</b> and link (https://a.example/l) and code</p><ul><li>one</li><li>two</li></ul><p><b>Head</b></p>'
+    );
+    expect(sanitiseHtml('<p><i>i</i><br>x</p>', { tags: new Set(['p']) })).toBe('<p>i x</p>');
+    // The hook still wins.
+    const hooked = { tags: ['p'], element: (el: { tag: string }, o: string) => (o === 'html' && el.tag === 'a' ? '[L]' : undefined) };
+    expect(sanitiseHtml('<p><a href="https://a.example">x</a></p>', hooked)).toBe('<p>[L]</p>');
+  });
+
+  describe('d. a tag outside the subset is said with the tags inside it', () => {
+    const tags = ['p', 'br', 'b', 'i', 'ul', 'li', 'span'];
+    const cut = (md: string) => sanitiseHtml(renderMarkdown(md), { tags });
+
+    it('writes an equivalent tag when one is allowed (strong → b, em → i, and back)', () => {
+      expect(cut('**bold** *it*')).toBe('<p><b>bold</b> <i>it</i></p>');
+      expect(sanitiseHtml('<b>x</b><i>y</i>', { tags: ['strong', 'em'] })).toBe('<strong>x</strong><em>y</em>');
+      expect(sanitiseHtml('<del>x</del>', { tags: ['s'] })).toBe('<s>x</s>');
+    });
+
+    it('keeps a link\'s address, or the address alone when that is its label', () => {
+      expect(cut('See [doc](https://e.test/d).')).toBe('<p>See doc (https://e.test/d).</p>');
+      expect(cut('<https://e.test/d> and [https://e.test/d](https://e.test/d)')).toContain('https://e.test/d</p>');
+      expect(sanitiseHtml('<a href="javascript:x()">t</a>', { tags })).toBe('t');
+    });
+
+    it('writes a numbered list as numbered lines, never as bare <li>s', () => {
+      expect(cut('1. one\n2. two')).toBe('<p>1. one<br>2. two</p>');
+      expect(sanitiseHtml('<ol start="3"><li>c</li><li>d</li></ol>', { tags })).toBe('<p>3. c<br>4. d</p>');
+      expect(sanitiseHtml('<ul><li>a</li></ul>', { tags: ['p', 'br', 'li'] })).toBe('<p>- a</p>');
+    });
+
+    it('closes the numbered lines before an allowed nested list', () => {
+      expect(cut('1. one\n   - nested\n2. two')).toBe('<p>1. one</p><ul><li>nested</li></ul><p>2. two</p>');
+    });
+
+    it('writes a code block as lines, and a heading as a bold paragraph', () => {
+      expect(cut('```\na\n  b\n```')).toBe('<p>a<br>  b</p>');
+      expect(sanitiseHtml(renderMarkdown('# Title', { headings: true }), { tags })).toBe('<p><b>Title</b></p>');
+    });
+
+    it('falls back to text when even the fallback tags are outside the subset', () => {
+      expect(sanitiseHtml('<ol><li>a</li><li>b</li></ol>', { tags: [] })).toBe('1. a 2. b');
+      expect(sanitiseHtml('<pre>a\nb</pre>', { tags: [] })).toBe('a b');
+    });
   });
 
   it('e. strips invisible format characters from text and Markdown, but not inside code, and keeps emoji joiners', () => {

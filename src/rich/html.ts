@@ -219,7 +219,7 @@ function serialise(nodes: readonly RichNode[], o: HtmlReadOptions, allow?: Reado
     const hooked = o.element?.(n, 'html', inner);
     if (hooked !== undefined) out += hooked;
     else if (n.tag === 'img') out += escapeHtml(defaultImageText(n));
-    else if (allow !== undefined && !allow.has(n.tag)) out += inner;
+    else if (allow !== undefined && !allow.has(n.tag)) out += outsideSubset(n, inner, o, allow);
     else if (n.tag === 'br' || n.tag === 'hr') out += `<${n.tag}>`;
     else if (PLAIN_TAGS.has(n.tag)) out += `<${n.tag}>${inner}</${n.tag}>`;
     else if (n.tag === 'ol') {
@@ -231,6 +231,96 @@ function serialise(nodes: readonly RichNode[], o: HtmlReadOptions, allow?: Reado
     } else out += inner;
   }
   return out;
+}
+
+/** Tags that mean the same, so a subset holding one can say the other. */
+const EQUIVALENT: Readonly<Record<string, readonly string[]>> = {
+  b: ['strong'],
+  strong: ['b'],
+  i: ['em'],
+  em: ['i'],
+  s: ['strike', 'del'],
+  strike: ['s', 'del'],
+  del: ['s', 'strike'],
+};
+
+/** `inner` as a paragraph when the subset has one; bare otherwise. */
+const para = (inner: string, allow: ReadonlySet<string>): string => (allow.has('p') ? `<p>${inner}</p>` : inner);
+
+/** A line break when the subset has one; a space otherwise. */
+const lineBreak = (allow: ReadonlySet<string>): string => (allow.has('br') ? '<br>' : ' ');
+
+/** A list the subset cannot hold, as marked lines; an allowed nested list
+ *  closes the lines before it and follows. */
+function listLines(el: RichElement, o: HtmlReadOptions, allow: ReadonlySet<string>): string {
+  const ordered = el.tag === 'ol';
+  const startAttr = Number(attr(el.attrs, 'start'));
+  let n = ordered && Number.isInteger(startAttr) && startAttr >= 0 ? startAttr : 1;
+  let out = '';
+  let lines: string[] = [];
+  const flush = () => {
+    if (lines.length > 0) out += para(lines.join(lineBreak(allow)), allow);
+    lines = [];
+  };
+  for (const li of el.children) {
+    if (typeof li === 'string' || li.tag !== 'li') continue;
+    const marker = ordered ? `${n++}. ` : '- ';
+    const text: RichNode[] = [];
+    const nested: RichElement[] = [];
+    for (const c of li.children) {
+      if (typeof c !== 'string' && (c.tag === 'ul' || c.tag === 'ol')) nested.push(c);
+      else text.push(c);
+    }
+    lines.push(marker + serialise(text, o, allow).trim());
+    const blocks = nested.map((c) => serialise([c], o, allow)).join('');
+    if (/^<(ul|ol|p)\b/.test(blocks)) {
+      flush();
+      out += blocks;
+    } else if (blocks !== '') lines.push(blocks);
+  }
+  flush();
+  return allow.has('p') ? out : out.replace(/<br>$/, '');
+}
+
+/**
+ * An element whose tag is outside a `tags` subset, said with the tags inside
+ * it so its meaning survives: an equivalent tag (`strong` ↔ `b`, `em` ↔ `i`,
+ * strike ↔ `s`/`del`); a link as `label (address)`; a list as numbered or
+ * bulleted lines; a code block as lines; a heading as a bold paragraph.
+ * Anything else keeps its content, as unknown tags always have.
+ */
+function outsideSubset(n: RichElement, inner: string, o: HtmlReadOptions, allow: ReadonlySet<string>): string {
+  const same = EQUIVALENT[n.tag]?.find((t) => allow.has(t));
+  if (same !== undefined) return `<${same}>${inner}</${same}>`;
+  switch (n.tag) {
+    case 'a': {
+      const href = safeHref(n.attrs);
+      if (href === undefined) return inner;
+      const shown = escapeHtml(href);
+      const label = inner.trim();
+      return label === '' || label === shown || LOOKS_LIKE_ADDRESS.test(label) ? shown : `${inner} (${shown})`;
+    }
+    case 'ol':
+    case 'ul':
+      return listLines(n, o, allow);
+    case 'li':
+      return inner;
+    case 'pre':
+      return para(inner.replace(/^\n+|\n+$/g, '').replace(/\n/g, lineBreak(allow)), allow);
+    case 'br':
+      return ' ';
+    case 'h1':
+    case 'h2':
+    case 'h3':
+    case 'h4':
+    case 'h5':
+    case 'h6': {
+      const bold = ['b', 'strong'].find((t) => allow.has(t));
+      return para(bold === undefined ? inner : `<${bold}>${inner}</${bold}>`, allow);
+    }
+    default:
+      return inner;
+  }
 }
 
 /**
