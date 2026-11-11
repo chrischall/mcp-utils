@@ -15,6 +15,8 @@
  * default — it costs tokens and is a classic place to hide instructions.
  */
 
+import { HTML4_ENTITIES } from './entities.js';
+
 const NAMED_ENTITIES: Record<string, string> = {
   amp: '&',
   lt: '<',
@@ -29,9 +31,10 @@ export function decodeEntities(s: string): string {
   // The legacy references browsers also decode WITHOUT a semicolon (`&nbsp`),
   // except where a letter, digit or `=` follows (`&ampersand`, `&amp=1`) — the
   // rule HTML applies inside attributes, kept here so a word is never cut.
-  return s.replace(/&(?:#(\d{1,8})|#x([0-9a-f]{1,8})|([a-z]{1,10}));|&(amp|lt|gt|quot|nbsp)(?![a-z0-9=])/gi, (whole, dec, hex, name, legacy) => {
+  return s.replace(/&(?:#(\d{1,8})|#x([0-9a-f]{1,8})|([a-z][a-z0-9]{0,9}));|&(amp|lt|gt|quot|nbsp)(?![a-z0-9=])/gi, (whole, dec, hex, name, legacy) => {
     if (legacy !== undefined) return NAMED_ENTITIES[legacy.toLowerCase()]!;
-    if (name !== undefined) return NAMED_ENTITIES[name.toLowerCase()] ?? whole;
+    // The core names in any case (`&AMP;`), then HTML 4's table, exactly as written.
+    if (name !== undefined) return NAMED_ENTITIES[name.toLowerCase()] ?? HTML4_ENTITIES.get(name) ?? whole;
     const code = dec !== undefined ? Number(dec) : parseInt(hex, 16);
     if (!Number.isFinite(code) || code > 0x10ffff) return whole;
     // Drop control characters (keeping tab/newline): they carry no text and
@@ -101,12 +104,12 @@ export interface SanitiseOptions extends HtmlReadOptions {
 }
 
 /**
- * Invisible format characters (zero-width space, non-joiner, word joiner,
- * byte-order mark), dropped from text and Markdown output but never from
+ * Invisible format characters (soft hyphen, combining grapheme joiner,
+ * zero-width space, non-joiner, word joiner, byte-order mark), dropped from text and Markdown output but never from
  * code. The zero-width JOINER (U+200D) is kept: it binds emoji sequences
  * (👩‍💻), and dropping it would split them.
  */
-const INVISIBLE = /[\u200b\u200c\u2060\ufeff]/g;
+const INVISIBLE = /[\u00ad\u034f\u200b\u200c\u2060\ufeff]/g;
 const visible = (s: string): string => s.replace(INVISIBLE, '');
 
 /**
@@ -124,11 +127,31 @@ interface Ctx extends HtmlReadOptions {
 export const MAX_DEPTH = 200;
 
 const VOID = new Set(['br', 'img', 'hr', 'wbr', 'input', 'meta', 'link', 'col', 'source', 'area', 'base', 'embed', 'param', 'track']);
-const DROPPED_WITH_CONTENT = 'script|style|head|title|template|noscript|iframe|object|svg|math|xml';
-const BLOCK = new Set(['p', 'div', 'ul', 'ol', 'pre', 'blockquote', 'table', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
-// Attributes never span a `<`, so a failed match costs at most the distance to the next tag.
-const TAG = /<(\/?)([a-z][a-z0-9]*)\b((?:[^<>"']|"[^"<]*"|'[^'<]*')*)>/gi;
-const HIDDEN_STYLE = /(?:^|[;\s])(?:display\s*:\s*none|visibility\s*:\s*hidden|mso-hide\s*:\s*all)\b/i;
+/** Raw-text elements: their content is never markup, and is never shown. */
+const RAW_TEXT = new Set(['script', 'style', 'title', 'textarea', 'xmp']);
+/**
+ * Elements dropped with their (tokenized) content. Form controls are among
+ * them: a <select>'s options are not text anyone wrote (a country picker is
+ * 250 of them).
+ */
+const DROP_CONTENT = new Set(['head', 'template', 'noscript', 'object', 'svg', 'math', 'xml', 'select', 'datalist', 'canvas']);
+/** Elements that read as nothing by default but stay in the tree, so a hook can say them (an embed as a link). */
+const SILENT = new Set(['iframe']);
+/** HTML5 sectioning and grouping elements, read as `<div>`s: blocks of their own, no formatting. */
+const SECTIONS = new Set([
+  'figure', 'figcaption', 'section', 'article', 'header', 'footer', 'nav', 'aside', 'main', 'address',
+  'details', 'summary', 'dl', 'dt', 'dd', 'center', 'fieldset', 'legend',
+]);
+const BLOCK = new Set(['p', 'div', 'ul', 'ol', 'pre', 'blockquote', 'table', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', ...SECTIONS]);
+/** A tag name; a namespaced one (`o:p`, `band:refer`) is one name, so a hook can match it whole. */
+const NAME = /[a-z][a-z0-9:-]*/iy;
+/**
+ * Hidden by style, as a mail client renders it: `display:none`,
+ * `visibility:hidden`, `mso-hide:all`, a zero `font-size` or a zero `opacity`
+ * (not `0.9em` or `0.5`).
+ */
+const HIDDEN_STYLE =
+  /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden|mso-hide\s*:\s*all|font-size\s*:\s*0(?:[a-z%]*)?\s*(?:!important\s*)?(?:;|$)|opacity\s*:\s*0(?:\.0*)?\s*(?:!important\s*)?(?:;|$))/i;
 
 function isHidden(attrs: string): boolean {
   // The `hidden` attribute is matched among attribute NAMES: quoted values
@@ -139,36 +162,124 @@ function isHidden(attrs: string): boolean {
   return style !== undefined && HIDDEN_STYLE.test(decodeEntities(style));
 }
 
+const isSpace = (c: string): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
+
+/**
+ * Index of the `>` ending a tag whose attributes start at `from`, or -1 at end
+ * of input. Follows the HTML tokenizer's attribute states: a quote opens a
+ * quoted value ONLY right after `=`; anywhere else (`title=it's`) it is an
+ * ordinary character, so one stray apostrophe cannot run the scan past the
+ * real `>` and leak the markup after it. One pass, no backtracking.
+ */
+function tagEnd(html: string, from: number): number {
+  let state: 'name' | 'eq' | 'unquoted' | '"' | "'" = 'name';
+  for (let j = from; j < html.length; j++) {
+    const c = html[j]!;
+    if (state === '"' || state === "'") {
+      if (c === state) state = 'name';
+      continue;
+    }
+    if (c === '>') return j;
+    if (state === 'unquoted') {
+      if (isSpace(c)) state = 'name';
+    } else if (state === 'eq') {
+      if (c === '"' || c === "'") state = c;
+      else if (!isSpace(c)) state = 'unquoted';
+    } else if (c === '=') state = 'eq';
+  }
+  return -1;
+}
+
 interface MutableElement {
   tag: string;
   attrs: string;
   children: RichNode[];
+  /** Never attached to the tree: what is parsed into it is discarded. */
+  dropped?: boolean;
 }
 
 /**
- * A forgiving parse into a tree: unknown nesting is closed, stray closing
- * tags are ignored, comments and script/style-like elements go with their
- * content, and (unless `keepHidden`) so do hidden elements.
+ * A forgiving parse into a tree, as a browser's tokenizer reads the markup
+ * (after apple-icloud-mcp's mail reader): unknown nesting is closed, stray
+ * closing tags are ignored, comments end at `-->` or `--!>` (so `<!-->` is
+ * empty), raw-text elements (`script`, `style`, `textarea`…) are skipped
+ * whole, `/>` closes only void and SVG/MathML elements, and nothing is shown
+ * after a tag left unterminated at the end. Head, template, form-control and
+ * (unless `keepHidden`) hidden elements are dropped with their content; an
+ * unclosed `<head>` ends at `<body>`. One linear pass.
  */
 export function parseHtml(html: string, opts: { keepHidden?: boolean } = {}): RichElement {
   const root: MutableElement = { tag: '#root', attrs: '', children: [] };
   const stack: MutableElement[] = [root];
   const top = () => stack[stack.length - 1]!;
-  const src = html
-    .replace(/[\u0001-\u0005]/g, '')
-    .replace(/<!--[\s\S]*?(?:-->|$)/g, '')
-    .replace(/<!\[CDATA\[[\s\S]*?(?:\]\]>|$)/g, '')
-    .replace(/<![^>]*>/g, '')
-    .replace(new RegExp(`<(${DROPPED_WITH_CONTENT})\\b[\\s\\S]*?(?:<\\/\\1\\s*>|$)`, 'gi'), '');
-  let at = 0;
-  for (const m of src.matchAll(TAG)) {
-    if (m.index > at) top().children.push(src.slice(at, m.index));
-    at = m.index + m[0].length;
-    const tag = m[2]!.toLowerCase();
-    if (m[1] === '/') {
-      let i = stack.length - 1;
-      while (i > 0 && stack[i]!.tag !== tag) i--;
-      if (i > 0) stack.length = i;
+  const src = html.replace(/[\u0001-\u0005]/g, '');
+  const len = src.length;
+  const text = (t: string) => {
+    if (t !== '') top().children.push(t);
+  };
+  let i = 0;
+  while (i < len) {
+    const lt = src.indexOf('<', i);
+    if (lt === -1) {
+      text(src.slice(i));
+      break;
+    }
+    text(src.slice(i, lt));
+    if (src.startsWith('<!--', lt)) {
+      // The first `-->` may overlap the opening (`<!-->`, `<!--->` are empty); `--!>` also ends it.
+      const dash = src.indexOf('-->', lt + 2);
+      const bang = src.indexOf('--!>', lt + 4);
+      if (dash !== -1 && (bang === -1 || dash < bang)) i = dash + 3;
+      else i = bang === -1 ? len : bang + 4;
+      continue;
+    }
+    if (src.startsWith('<![CDATA[', lt)) {
+      const end = src.indexOf(']]>', lt);
+      i = end === -1 ? len : end + 3;
+      continue;
+    }
+    const next = src[lt + 1];
+    if (next === '!' || next === '?') {
+      const end = src.indexOf('>', lt);
+      i = end === -1 ? len : end + 1;
+      continue;
+    }
+    const closing = next === '/';
+    NAME.lastIndex = lt + (closing ? 2 : 1);
+    const m = NAME.exec(src);
+    if (m === null) {
+      text('<');
+      i = lt + 1;
+      continue;
+    }
+    const tag = m[0].toLowerCase();
+    const j = tagEnd(src, NAME.lastIndex);
+    // End of input inside a tag: a browser renders nothing from here on, and
+    // neither does this (emitting it would dump raw markup, hidden parts included).
+    if (j === -1) break;
+    const attrs = src.slice(NAME.lastIndex, j);
+    i = j + 1;
+    if (closing) {
+      let k = stack.length - 1;
+      while (k > 0 && stack[k]!.tag !== tag) k--;
+      if (k > 0) stack.length = k;
+      continue;
+    }
+    if (RAW_TEXT.has(tag)) {
+      const close = new RegExp(`</${tag}[\\s/>]`, 'gi');
+      close.lastIndex = i;
+      const end = close.exec(src);
+      if (end === null) i = len;
+      else {
+        const gt = src.indexOf('>', end.index);
+        i = gt === -1 ? len : gt + 1;
+      }
+      continue;
+    }
+    if (tag === 'body' || tag === 'html') {
+      // A wrapper, not content; a <body> ends anything still dropping (an unclosed <head>).
+      const firstDropped = stack.findIndex((e) => e.dropped === true);
+      if (tag === 'body' && firstDropped > 0) stack.length = firstDropped;
       continue;
     }
     // Implicit closes HTML itself makes: a new item, cell or row ends the
@@ -176,15 +287,14 @@ export function parseHtml(html: string, opts: { keepHidden?: boolean } = {}): Ri
     if ((tag === 'li' && top().tag === 'li') || (BLOCK.has(tag) && top().tag === 'p')) stack.pop();
     if ((tag === 'td' || tag === 'th' || tag === 'tr') && (top().tag === 'td' || top().tag === 'th')) stack.pop();
     if (tag === 'tr' && top().tag === 'tr') stack.pop();
-    const attrs = m[3]!;
     const el: MutableElement = { tag, attrs, children: [] };
-    const hidden = opts.keepHidden !== true && isHidden(attrs);
-    // A hidden element is never attached, so whatever is parsed into it is discarded.
-    if (!hidden) top().children.push(el);
-    const opens = !VOID.has(tag) && !attrs.trimEnd().endsWith('/');
-    if (opens && (hidden || stack.length <= MAX_DEPTH)) stack.push(el);
+    const dropped = DROP_CONTENT.has(tag) || (opts.keepHidden !== true && isHidden(attrs));
+    if (dropped) el.dropped = true;
+    else top().children.push(el);
+    // A browser ignores `/>` on an ordinary element: `<div/>` opens a div.
+    const selfClosing = /\/\s*$/.test(attrs) && (VOID.has(tag) || tag === 'svg' || tag === 'math');
+    if (!VOID.has(tag) && !selfClosing && (dropped || stack.length <= MAX_DEPTH)) stack.push(el);
   }
-  if (at < src.length) top().children.push(src.slice(at));
   return root;
 }
 
@@ -218,9 +328,11 @@ function serialise(nodes: readonly RichNode[], o: HtmlReadOptions, allow?: Reado
     const inner = n.tag === 'img' ? '' : serialise(n.children, o, allow);
     const hooked = o.element?.(n, 'html', inner);
     if (hooked !== undefined) out += hooked;
+    else if (SILENT.has(n.tag)) continue;
     else if (n.tag === 'img') out += escapeHtml(defaultImageText(n));
     else if (allow !== undefined && !allow.has(n.tag)) out += outsideSubset(n, inner, o, allow);
     else if (n.tag === 'br' || n.tag === 'hr') out += `<${n.tag}>`;
+    else if (SECTIONS.has(n.tag)) out += `<div>${inner}</div>`;
     else if (PLAIN_TAGS.has(n.tag)) out += `<${n.tag}>${inner}</${n.tag}>`;
     else if (n.tag === 'ol') {
       const start = attr(n.attrs, 'start');
@@ -418,7 +530,7 @@ const MARKS = /[\u0004\u0005]/g;
 const paraBlock = (inner: string): string => `\n${PARA}\n${inner}\n${PARA}\n`;
 
 /** Elements that are paragraphs of text. */
-const TEXT_BLOCK = new Set(['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'hr']);
+const TEXT_BLOCK = new Set(['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'hr', ...SECTIONS]);
 
 /** A label that is itself an address (a pasted, often clipped link): the href alone says it. */
 const LOOKS_LIKE_ADDRESS = /^(https?:\/\/|www\.)/i;
@@ -430,6 +542,8 @@ function linkText(el: RichElement, label: string): string {
   if (url === undefined) return label;
   const shown = label.trim();
   if (shown === '' || shown === url || LOOKS_LIKE_ADDRESS.test(shown)) return url;
+  // A mail link shown as its own address says it once.
+  if (url.toLowerCase() === `mailto:${shown.toLowerCase()}`) return shown;
   return `${label} (${url})`;
 }
 
@@ -466,6 +580,7 @@ function toText(nodes: readonly RichNode[], o: Ctx): string {
     const inner = n.tag === 'img' ? '' : code ? codeText(n.children) : toText(n.children, o);
     const hooked = o.element?.(n, 'text', inner);
     if (hooked !== undefined) out += hooked;
+    else if (SILENT.has(n.tag)) continue;
     else if (n.tag === 'img') out += defaultImageText(n);
     else if (n.tag === 'a') out += linkText(n, inner);
     else if (n.tag === 'tr') out += `\n${rowText(n, o)}\n`;
@@ -554,15 +669,24 @@ const tidyInner = (s: string): string => s.replace(/\n{3,}/g, '\n\n').trim();
 function list(el: RichElement, codes: string[], o: Ctx): string {
   const ordered = el.tag === 'ol';
   const startAttr = Number(attr(el.attrs, 'start'));
-  const start = ordered && Number.isInteger(startAttr) && startAttr >= 0 ? startAttr : 1;
-  const items = el.children.filter((n): n is RichElement => typeof n !== 'string' && n.tag === 'li');
-  return items
-    .map((li, i) => {
-      const marker = ordered ? `${start + i}. ` : '- ';
-      const lines = md(li.children, codes, o).replace(/\n{2,}/g, '\n').trim().split('\n');
-      return lines.map((l, n) => (n === 0 ? marker + l : l === '' ? '' : ' '.repeat(marker.length) + l)).join('\n');
-    })
-    .join('\n');
+  let n = ordered && Number.isInteger(startAttr) && startAttr >= 0 ? startAttr : 1;
+  const out: string[] = [];
+  let indent = 0;
+  for (const c of el.children) {
+    if (typeof c === 'string') continue;
+    if (c.tag === 'li') {
+      const marker = ordered ? `${n++}. ` : '- ';
+      const lines = md(c.children, codes, o).replace(/\n{2,}/g, '\n').trim().split('\n');
+      out.push(...lines.map((l, k) => (k === 0 ? marker + l : l === '' ? '' : ' '.repeat(marker.length) + l)));
+      indent = marker.length;
+    } else if (c.tag === 'ul' || c.tag === 'ol') {
+      // A sub-list written beside its item (`</li><ul>`, as editors often do)
+      // still belongs under it; one with no item before it stands alone.
+      const pad = ' '.repeat(out.length > 0 ? indent : 0);
+      out.push(...list(c, codes, o).split('\n').map((l) => (l === '' ? '' : pad + l)));
+    }
+  }
+  return out.join('\n');
 }
 
 /** A table's own rows: through thead/tbody/tfoot, but never into a nested table (its cell renders that). */
@@ -577,6 +701,14 @@ function rowsOf(el: RichElement): RichElement[] {
 }
 
 function table(el: RichElement, codes: string[], o: Ctx): string {
+  // A caption says what the table is: it goes above it.
+  const caption = el.children.find((n): n is RichElement => typeof n !== 'string' && n.tag === 'caption');
+  const title = caption === undefined ? '' : md(caption.children, codes, o).replace(/\s+/g, ' ').trim();
+  const body = tableBody(el, codes, o);
+  return title === '' ? body : body === '' ? title : `${title}\n\n${body}`;
+}
+
+function tableBody(el: RichElement, codes: string[], o: Ctx): string {
   const cellsOf = (tr: RichElement) =>
     tr.children
       .filter((n): n is RichElement => typeof n !== 'string' && (n.tag === 'td' || n.tag === 'th'))
@@ -622,6 +754,8 @@ function md(nodes: readonly RichNode[], codes: string[], o: Ctx): string {
       case 'br':
         out += '\n';
         break;
+      case 'iframe':
+        break;
       case 'p':
       case 'div':
         out += block(inner().trim());
@@ -666,7 +800,8 @@ function md(nodes: readonly RichNode[], codes: string[], o: Ctx): string {
         const href = safeHref(n.attrs);
         if (href === undefined) out += label;
         else if (label === '' || label === href || LOOKS_LIKE_ADDRESS.test(label)) out += href;
-        else out += `[${label}](${href.replace(/[()\s]/g, (c) => encodeURIComponent(c))})`;
+        // encodeURIComponent leaves ( and ) alone, and a bare `)` ends the link: percent-encode them.
+        else out += `[${label}](${href.replace(/[()\s]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`)})`;
         break;
       }
       case 'blockquote':
@@ -688,7 +823,8 @@ function md(nodes: readonly RichNode[], codes: string[], o: Ctx): string {
         out += defaultImageText(n);
         break;
       default:
-        out += inner();
+        // A section reads as a block, like a <div>; anything else as its content.
+        out += SECTIONS.has(n.tag) ? block(inner().trim()) : inner();
     }
   }
   memo.set(nodes, out);
