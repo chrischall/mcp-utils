@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.8.0](https://github.com/chrischall/mcp-utils/compare/v3.7.2...v3.8.0) (2026-11-11)
+
+
+### Features
+
+* **rich:** add a /rich subpath to read and write rich message bodies ([#426](https://github.com/chrischall/mcp-utils/issues/426)) ([9991b92](https://github.com/chrischall/mcp-utils/commit/9991b925de93ac2e4a84ab85355d5df0f07b2a25))
+* **rich:** paragraph breaks, tag subsets, legacy entities and invisible characters ([#429](https://github.com/chrischall/mcp-utils/issues/429)) ([a15870e](https://github.com/chrischall/mcp-utils/commit/a15870e08833a4d3ad2bf90e4bf509efc60e5ff9))
+
+
+### Bug Fixes
+
+* **rich:** keep a tag's meaning when sanitiseHtml cuts to a subset ([#431](https://github.com/chrischall/mcp-utils/issues/431)) ([7803e4f](https://github.com/chrischall/mcp-utils/commit/7803e4f950d691c1f535264f6476de761e07d717))
+* **rich:** read link labels with the plain-text renderer ([#430](https://github.com/chrischall/mcp-utils/issues/430)) ([11c44a1](https://github.com/chrischall/mcp-utils/commit/11c44a1abee3692fd49e2823498068dd5cd43f00))
+
 ## [3.7.2](https://github.com/chrischall/mcp-utils/compare/v3.7.1...v3.7.2) (2026-11-07)
 
 
