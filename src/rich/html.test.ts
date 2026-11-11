@@ -119,6 +119,10 @@ describe('hidden content', () => {
 
   it('does not mistake a visible element for a hidden one', () => {
     expect(htmlToText('<p style="display:block" data-hidden-x="1" class="hidden">a</p><p title="hidden">b</p>')).toBe('a\nb');
+    expect(htmlToText('<div title="Reveal hidden fees">Fees</div><p aria-label=\'Show hidden items\' data-x=hidden>Items</p>')).toBe(
+      'Fees\nItems',
+    );
+    expect(htmlToText('<p style="content: \'display:none\'">c</p>')).toBe('c');
   });
 });
 
@@ -266,6 +270,23 @@ describe('hostile input', () => {
     let depth = 0;
     for (let el = parseHtml(deep); typeof el.children[0] === 'object'; el = el.children[0]) depth++;
     expect(depth).toBeLessThanOrEqual(MAX_DEPTH + 1);
+  });
+
+  it('renders hooked nested lists and tables in linear time (each subtree once)', () => {
+    let calls = 0;
+    const counting: HtmlReadOptions = { element: () => (calls++, undefined) };
+    const lists = '<ul><li>'.repeat(60) + 'x' + '</li></ul>'.repeat(60);
+    const tables = '<table><tr><td>'.repeat(60) + 'x' + '</td></tr></table>'.repeat(60);
+    for (const html of [lists, tables]) {
+      for (const output of ['markdown', 'text'] as const) {
+        calls = 0;
+        const run = output === 'markdown' ? htmlToMarkdown : htmlToText;
+        expect(time(() => run(html, counting))).toBeLessThan(200);
+        expect(run(html, counting)).toContain('x');
+        // One hook call per element per render, never one per path through the tree.
+        expect(calls).toBeLessThan(400);
+      }
+    }
   });
 
   it('renders a hooked, deeply nested body in linear time', () => {

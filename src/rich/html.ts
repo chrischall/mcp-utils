@@ -80,6 +80,17 @@ export interface HtmlReadOptions {
   keepHidden?: boolean;
 }
 
+/**
+ * One render's state: the caller's options plus, per output, each children
+ * list already rendered. Every path to a subtree (a hook reading `inner`, a
+ * list or table renderer reading its items) then renders it once, so a render
+ * stays linear in the body however it nests.
+ */
+interface Ctx extends HtmlReadOptions {
+  textMemo?: WeakMap<readonly RichNode[], string>;
+  mdMemo?: WeakMap<readonly RichNode[], string>;
+}
+
 /** Nesting deeper than this is flattened, so a hostile body cannot exhaust the stack. */
 export const MAX_DEPTH = 200;
 
@@ -91,7 +102,10 @@ const TAG = /<(\/?)([a-z][a-z0-9]*)\b((?:[^<>"']|"[^"<]*"|'[^'<]*')*)>/gi;
 const HIDDEN_STYLE = /(?:^|[;\s])(?:display\s*:\s*none|visibility\s*:\s*hidden|mso-hide\s*:\s*all)\b/i;
 
 function isHidden(attrs: string): boolean {
-  if (/(?:^|\s)hidden(?:\s|=|\/|$)/i.test(attrs)) return true;
+  // The `hidden` attribute is matched among attribute NAMES: quoted values
+  // ("Reveal hidden fees") are blanked first.
+  const names = attrs.replace(/"[^"]*"|'[^']*'/g, '""');
+  if (/(?:^|\s)hidden(?:\s|=|\/|$)/i.test(names)) return true;
   const style = attr(attrs, 'style');
   return style !== undefined && HIDDEN_STYLE.test(decodeEntities(style));
 }
@@ -298,7 +312,7 @@ function linkText(el: RichElement, label: string): string {
 }
 
 /** One table row on one line, its cells joined by ` | ` (line breaks in a cell become spaces). */
-function rowText(tr: RichElement, o: HtmlReadOptions): string {
+function rowText(tr: RichElement, o: Ctx): string {
   const cells = tr.children.filter((n): n is RichElement => typeof n !== 'string' && (n.tag === 'td' || n.tag === 'th'));
   if (cells.length === 0) return toText(tr.children, o);
   const raw = cells.map((c) => toText(c.children, o));
@@ -311,7 +325,10 @@ function rowText(tr: RichElement, o: HtmlReadOptions): string {
   return texts.join(' | ');
 }
 
-function toText(nodes: readonly RichNode[], o: HtmlReadOptions): string {
+function toText(nodes: readonly RichNode[], o: Ctx): string {
+  const memo = (o.textMemo ??= new WeakMap());
+  const hit = memo.get(nodes);
+  if (hit !== undefined) return hit;
   let out = '';
   for (const n of nodes) {
     if (typeof n === 'string') {
@@ -322,11 +339,11 @@ function toText(nodes: readonly RichNode[], o: HtmlReadOptions): string {
       out += '\n';
       continue;
     }
-    const inner = n.tag === 'img' ? '' : n.tag === 'tr' || n.tag === 'ol' || n.tag === 'ul' ? undefined : toText(n.children, o);
-    const hooked = o.element?.(n, 'text', inner ?? '');
+    const inner = n.tag === 'img' ? '' : toText(n.children, o);
+    const hooked = o.element?.(n, 'text', inner);
     if (hooked !== undefined) out += hooked;
     else if (n.tag === 'img') out += defaultImageText(n);
-    else if (n.tag === 'a') out += linkText(n, inner!);
+    else if (n.tag === 'a') out += linkText(n, inner);
     else if (n.tag === 'tr') out += `\n${rowText(n, o)}\n`;
     else if (n.tag === 'blockquote') out += `\n${QUOTE_OPEN}\n${inner}\n${QUOTE_CLOSE}\n`;
     else if (n.tag === 'ol' || n.tag === 'ul') {
@@ -340,6 +357,7 @@ function toText(nodes: readonly RichNode[], o: HtmlReadOptions): string {
     } else if (TEXT_BLOCK.has(n.tag)) out += `\n${inner}\n`;
     else out += inner;
   }
+  memo.set(nodes, out);
   return out;
 }
 
@@ -353,7 +371,8 @@ function toText(nodes: readonly RichNode[], o: HtmlReadOptions): string {
 export function htmlToText(html: string, opts: HtmlReadOptions = {}): string {
   const out: string[] = [];
   let depth = 0;
-  for (const raw of toText(parseHtml(html, opts).children, opts).split(/\r?\n/)) {
+  // A fresh context per call: the memo must never outlive (or leak into) the caller's options.
+  for (const raw of toText(parseHtml(html, opts).children, { ...opts }).split(/\r?\n/)) {
     const line = raw.replace(/[ \t ]+/g, ' ').trim();
     if (line === QUOTE_OPEN) depth++;
     else if (line === QUOTE_CLOSE) depth = Math.max(0, depth - 1);
@@ -391,7 +410,7 @@ function inlineCode(text: string): string {
 
 const tidyInner = (s: string): string => s.replace(/\n{3,}/g, '\n\n').trim();
 
-function list(el: RichElement, codes: string[], o: HtmlReadOptions): string {
+function list(el: RichElement, codes: string[], o: Ctx): string {
   const ordered = el.tag === 'ol';
   const startAttr = Number(attr(el.attrs, 'start'));
   const start = ordered && Number.isInteger(startAttr) && startAttr >= 0 ? startAttr : 1;
@@ -416,7 +435,7 @@ function rowsOf(el: RichElement): RichElement[] {
   return out;
 }
 
-function table(el: RichElement, codes: string[], o: HtmlReadOptions): string {
+function table(el: RichElement, codes: string[], o: Ctx): string {
   const cellsOf = (tr: RichElement) =>
     tr.children
       .filter((n): n is RichElement => typeof n !== 'string' && (n.tag === 'td' || n.tag === 'th'))
@@ -439,17 +458,18 @@ function table(el: RichElement, codes: string[], o: HtmlReadOptions): string {
   return [row(lines[0]!), sep, ...lines.slice(1).map(row)].join('\n');
 }
 
-function md(nodes: readonly RichNode[], codes: string[], o: HtmlReadOptions): string {
+function md(nodes: readonly RichNode[], codes: string[], o: Ctx): string {
+  const memo = (o.mdMemo ??= new WeakMap());
+  const hit = memo.get(nodes);
+  if (hit !== undefined) return hit;
   let out = '';
   for (const n of nodes) {
     if (typeof n === 'string') {
       out += decodeEntities(n).replace(/[\s ]+/g, ' ');
       continue;
     }
-    // Rendered at most once: a hook and the default both read it, and a
-    // second pass per level would be exponential in the nesting depth.
-    let rendered: string | undefined;
-    const inner = () => (rendered ??= md(n.children, codes, o));
+    // Memoised in `md`: a hook and the default renderers all read it once.
+    const inner = () => md(n.children, codes, o);
     if (o.element !== undefined && n.tag !== 'br') {
       const hooked = o.element(n, 'markdown', n.tag === 'img' ? '' : inner());
       if (hooked !== undefined) {
@@ -530,6 +550,7 @@ function md(nodes: readonly RichNode[], codes: string[], o: HtmlReadOptions): st
         out += inner();
     }
   }
+  memo.set(nodes, out);
   return out;
 }
 
@@ -541,7 +562,7 @@ function md(nodes: readonly RichNode[], codes: string[], o: HtmlReadOptions): st
  */
 export function htmlToMarkdown(html: string, opts: HtmlReadOptions = {}): string {
   const codes: string[] = [];
-  const lines = md(parseHtml(html, opts).children, codes, opts).split('\n');
+  const lines = md(parseHtml(html, opts).children, codes, { ...opts }).split('\n');
   const tidy: string[] = [];
   for (const raw of lines) {
     const line = raw.trimEnd();
