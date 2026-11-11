@@ -51,6 +51,10 @@
     "./export": {
       "import": "./dist/export/index.js",
       "types": "./dist/export/index.d.ts"
+    },
+    "./rich": {
+      "import": "./dist/rich/index.js",
+      "types": "./dist/rich/index.d.ts"
     }
   },
   "files": [

@@ -42,6 +42,7 @@ import light:
 | `@chrischall/mcp-utils/netguard` | SSRF guard for fetching third-party URLs: public-address table, DNS-pinning undici dispatcher, redirect-checked `fetchPublic` (needs `undici`) |
 | `@chrischall/mcp-utils/export` | bulk-export plumbing: export sink (local disk with absolute paths, or one zip in the mcp-host blob store behind a signed link), resume-cursor codec, zip writer, and the blob-store client — signed GET/PUT/DELETE URLs, PUT, GET, DELETE, and `consume` (read a caller's upload, delete it once handled), plus inbound-upload helpers: `mintUploadSlot`, `uploadFileNameFromKey`, strict base64, filename/MIME rules, and the two per-tool entry points `deliverFile` (inline → link → disk) and `resolveUploadSource` (path / inline / blobKey) (no optional peers) |
 | `@chrischall/mcp-utils/html` | opt-in HTML scraping helpers (needs `node-html-parser`) |
+| `@chrischall/mcp-utils/rich` | message bodies: tolerant HTML parse → sanitised HTML / plain text / Markdown / links (hidden content dropped), and Markdown → safe HTML for sending (no dependencies) |
 | `@chrischall/mcp-utils/scrape` | convenience alias for the zero-dep `scrape` module (also in the core barrel) |
 | `@chrischall/mcp-utils/test` | in-memory test harness for tool registration |
 
@@ -2570,6 +2571,41 @@ through `truncateErrorMessage` (redaction, then the cut), never a bare
 `body.slice()`. An
 error response whose body breaks off mid-read is treated as an empty body, not
 a transport failure: its status is the answer.
+
+### `rich` — message bodies: HTML ↔ Markdown *(subpath, no dependencies)*
+
+For servers that read or send rich message bodies (chat messages, mail).
+Reading, an agent should rarely see raw HTML: Markdown keeps the structure
+(lists, tables, links, emphasis) at a fraction of the tokens. Writing, an
+agent should write Markdown, not HTML: fewer output tokens and no markup to
+get wrong.
+
+```ts
+import { htmlToMarkdown, htmlToText, linksOf, renderMarkdown, sanitiseHtml } from '@chrischall/mcp-utils/rich';
+
+htmlToMarkdown(body);          // '**Plan**\n\n1. one\n2. two\n\nsee [doc](https://…)'
+htmlToText(body);              // 'Plan\n1. one\n2. two\nsee doc (https://…)'
+linksOf(body);                 // [{ href: 'https://…', text: 'doc' }]
+sanitiseHtml(body);            // formatting tags only, no attributes but href/start
+renderMarkdown(agentText, { headings: true, quotes: true }); // '<p><strong>…'
+```
+
+- **Hostile input.** The parser is linear on any input (a tag's attributes
+  never run past the next `<`), flattens nesting past `MAX_DEPTH` instead of
+  recursing, and drops comments, `<script>`/`<style>`/`<head>`/`<xml>` with
+  their content. Content the sender **hid** (`display:none`,
+  `visibility:hidden`, `mso-hide:all`, `hidden`) is dropped too, unless
+  `{ keepHidden: true }`: mail preheaders cost tokens and are a classic place
+  to hide instructions.
+- **Links** pass through only for `http(s):` and `mailto:`, on both sides.
+  `renderMarkdown` escapes raw HTML, so a caller cannot smuggle markup in.
+- **Images** read as `[alt]`, or nothing (spacers, tracking pixels).
+- **Hooks.** `element(el, output, inner)` overrides how any element reads in
+  `'html'`, `'text'` or `'markdown'` output (microsoft-teams-mcp keeps its
+  @mention spans and shows emoji images as their character);
+  `renderMarkdown`'s `shortcode(key)` renders `:key:` (Teams emoji).
+  `renderMarkdown` reserves U+E000–U+E00F for its placeholders and strips them
+  from its input; a caller's own placeholders in U+E010–U+F8FF pass through.
 
 ### `html` — scraping helpers *(subpath, optional peer)*
 
