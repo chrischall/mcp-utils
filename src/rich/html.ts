@@ -212,12 +212,33 @@ export function parseHtml(html: string, opts: { keepHidden?: boolean } = {}): Ri
   const root: MutableElement = { tag: '#root', attrs: '', children: [] };
   const stack: MutableElement[] = [root];
   const top = () => stack[stack.length - 1]!;
+  // How many of each tag are open, so a closing tag with nothing to close is
+  // O(1) instead of a walk down the whole stack (quadratic on a hostile body
+  // of deep nesting and unmatched closes). A matched close pays only for the
+  // elements it pops, each popped once.
+  const open = new Map<string, number>();
+  const push = (el: MutableElement) => {
+    stack.push(el);
+    open.set(el.tag, (open.get(el.tag) ?? 0) + 1);
+  };
+  const popTo = (k: number) => {
+    while (stack.length > k) {
+      const el = stack.pop()!;
+      open.set(el.tag, open.get(el.tag)! - 1);
+    }
+  };
   const src = html.replace(/[\u0001-\u0005]/g, '');
   const len = src.length;
   const text = (t: string) => {
     if (t !== '') top().children.push(t);
   };
   let i = 0;
+  // The next `-->` and `--!>` at or after the current comment, each found
+  // once and moved forward only: searching afresh from every comment would
+  // rescan to the end of a body that has none, quadratic in the number of
+  // comments. -2: not searched yet; -1: none left.
+  let nextDash = -2;
+  let nextBang = -2;
   while (i < len) {
     const lt = src.indexOf('<', i);
     if (lt === -1) {
@@ -227,8 +248,10 @@ export function parseHtml(html: string, opts: { keepHidden?: boolean } = {}): Ri
     text(src.slice(i, lt));
     if (src.startsWith('<!--', lt)) {
       // The first `-->` may overlap the opening (`<!-->`, `<!--->` are empty); `--!>` also ends it.
-      const dash = src.indexOf('-->', lt + 2);
-      const bang = src.indexOf('--!>', lt + 4);
+      if (nextDash === -2 || (nextDash !== -1 && nextDash < lt + 2)) nextDash = src.indexOf('-->', lt + 2);
+      const dash = nextDash;
+      if (nextBang === -2 || (nextBang !== -1 && nextBang < lt + 4)) nextBang = src.indexOf('--!>', lt + 4);
+      const bang = nextBang;
       if (dash !== -1 && (bang === -1 || dash < bang)) i = dash + 3;
       else i = bang === -1 ? len : bang + 4;
       continue;
@@ -260,9 +283,10 @@ export function parseHtml(html: string, opts: { keepHidden?: boolean } = {}): Ri
     const attrs = src.slice(NAME.lastIndex, j);
     i = j + 1;
     if (closing) {
+      if ((open.get(tag) ?? 0) === 0) continue;
       let k = stack.length - 1;
       while (k > 0 && stack[k]!.tag !== tag) k--;
-      if (k > 0) stack.length = k;
+      if (k > 0) popTo(k);
       continue;
     }
     if (RAW_TEXT.has(tag)) {
@@ -279,21 +303,21 @@ export function parseHtml(html: string, opts: { keepHidden?: boolean } = {}): Ri
     if (tag === 'body' || tag === 'html') {
       // A wrapper, not content; a <body> ends anything still dropping (an unclosed <head>).
       const firstDropped = stack.findIndex((e) => e.dropped === true);
-      if (tag === 'body' && firstDropped > 0) stack.length = firstDropped;
+      if (tag === 'body' && firstDropped > 0) popTo(firstDropped);
       continue;
     }
     // Implicit closes HTML itself makes: a new item, cell or row ends the
     // last, and a block ends a paragraph.
-    if ((tag === 'li' && top().tag === 'li') || (BLOCK.has(tag) && top().tag === 'p')) stack.pop();
-    if ((tag === 'td' || tag === 'th' || tag === 'tr') && (top().tag === 'td' || top().tag === 'th')) stack.pop();
-    if (tag === 'tr' && top().tag === 'tr') stack.pop();
+    if ((tag === 'li' && top().tag === 'li') || (BLOCK.has(tag) && top().tag === 'p')) popTo(stack.length - 1);
+    if ((tag === 'td' || tag === 'th' || tag === 'tr') && (top().tag === 'td' || top().tag === 'th')) popTo(stack.length - 1);
+    if (tag === 'tr' && top().tag === 'tr') popTo(stack.length - 1);
     const el: MutableElement = { tag, attrs, children: [] };
     const dropped = DROP_CONTENT.has(tag) || (opts.keepHidden !== true && isHidden(attrs));
     if (dropped) el.dropped = true;
     else top().children.push(el);
     // A browser ignores `/>` on an ordinary element: `<div/>` opens a div.
     const selfClosing = /\/\s*$/.test(attrs) && (VOID.has(tag) || tag === 'svg' || tag === 'math');
-    if (!VOID.has(tag) && !selfClosing && (dropped || stack.length <= MAX_DEPTH)) stack.push(el);
+    if (!VOID.has(tag) && !selfClosing && (dropped || stack.length <= MAX_DEPTH)) push(el);
   }
   return root;
 }
