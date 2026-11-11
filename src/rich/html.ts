@@ -303,9 +303,9 @@ const LOOKS_LIKE_ADDRESS = /^(https?:\/\/|www\.)/i;
 
 /** A link as text: `label (url)`, or the address alone when that is all it shows. */
 function linkText(el: RichElement, label: string): string {
-  const href = attr(el.attrs, 'href');
-  if (!href) return label;
-  const url = decodeEntities(href);
+  // Only http(s)/mailto targets are shown, as in Markdown and linksOf.
+  const url = safeHref(el.attrs);
+  if (url === undefined) return label;
   const shown = label.trim();
   if (shown === '' || shown === url || LOOKS_LIKE_ADDRESS.test(shown)) return url;
   return `${label} (${url})`;

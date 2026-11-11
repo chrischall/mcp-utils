@@ -171,6 +171,14 @@ describe('htmlToText', () => {
   });
 });
 
+describe('htmlToText links', () => {
+  it('shows only http(s) and mailto targets, like Markdown and linksOf', () => {
+    expect(htmlToText('<p><a href="javascript:alert(1)">click</a> <a href="data:text/html,x">d</a> <a href="mailto:a@x.example">mail</a></p>')).toBe(
+      'click d mail (mailto:a@x.example)',
+    );
+  });
+});
+
 describe('htmlToMarkdown', () => {
   it('renders bold, italic, strike and inline code', () => {
     expect(htmlToMarkdown('<p><b>bold</b> <i>it</i> <s>gone</s> <code>x()</code></p>')).toBe('**bold** _it_ ~~gone~~ `x()`');
