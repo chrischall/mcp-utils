@@ -268,21 +268,16 @@ function walk(nodes: readonly RichNode[], visit: (el: RichElement) => void): voi
   }
 }
 
-/** An element's text, entities decoded and whitespace collapsed. */
-function textOf(nodes: readonly RichNode[], o: HtmlReadOptions): string {
-  const raw = (ns: readonly RichNode[]): string =>
-    ns
-      .map((n) => {
-        if (typeof n === 'string') return visible(decodeEntities(n));
-        if (n.tag === 'br') return ' ';
-        const inner = n.tag === 'img' ? '' : raw(n.children);
-        return o.element?.(n, 'text', inner) ?? (n.tag === 'img' ? defaultImageText(n) : inner);
-      })
-      .join('');
-  return raw(nodes).replace(/\s+/g, ' ').trim();
+/**
+ * An element's text on one line, for a link label: the plain-text reading
+ * (same hooks, entities, code and invisible-character rules as
+ * {@link htmlToText}), its line breaks and blocks as single spaces.
+ */
+function textOf(nodes: readonly RichNode[], o: Ctx): string {
+  return toText(nodes, o).replace(/[\u0001-\u0005]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-function links(root: RichElement, o: HtmlReadOptions): RichLink[] {
+function links(root: RichElement, o: Ctx): RichLink[] {
   const out: RichLink[] = [];
   const seen = new Set<string>();
   walk(root.children, (el) => {
@@ -300,7 +295,7 @@ function links(root: RichElement, o: HtmlReadOptions): RichLink[] {
 
 /** Every http(s)/mailto link in a body with its shown text, in order, each pair once. */
 export function linksOf(html: string, opts: HtmlReadOptions = {}): RichLink[] {
-  return links(parseHtml(html, opts), opts);
+  return links(parseHtml(html, opts), { ...opts });
 }
 
 /**
@@ -311,7 +306,7 @@ export function linksOf(html: string, opts: HtmlReadOptions = {}): RichLink[] {
 export function bodyStructure(html: string, opts: HtmlReadOptions = {}): { contentHtml?: string; links: RichLink[] } {
   const root = parseHtml(html, opts);
   const sanitised = serialise(root.children, opts);
-  return { ...(FORMATTING.test(sanitised) ? { contentHtml: sanitised } : {}), links: links(root, opts) };
+  return { ...(FORMATTING.test(sanitised) ? { contentHtml: sanitised } : {}), links: links(root, { ...opts }) };
 }
 
 /* ----------------------------------------------------------------------------

@@ -151,6 +151,12 @@ describe('linksOf / bodyStructure', () => {
     ]);
   });
 
+  it('reads a link label like htmlToText, one line: blocks and line breaks become spaces', () => {
+    expect(linksOf('<a href="https://a.example"><p>Read</p><p>the <code>x\u200by</code><br>doc\u200b</p></a>')).toEqual([
+      { href: 'https://a.example', text: 'Read the x\u200by doc' },
+    ]);
+  });
+
   it('gives sanitised HTML only for a formatted body, and its links', () => {
     expect(bodyStructure('<p>plain</p>')).toEqual({ links: [] });
     expect(bodyStructure('<p><a href="https://a.example">a</a></p>')).toEqual({
