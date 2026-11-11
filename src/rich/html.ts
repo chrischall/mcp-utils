@@ -26,7 +26,11 @@ const NAMED_ENTITIES: Record<string, string> = {
 
 /** HTML character references decoded, in one pass (so `&amp;lt;` becomes `&lt;`, not `<`). */
 export function decodeEntities(s: string): string {
-  return s.replace(/&(?:#(\d{1,8})|#x([0-9a-f]{1,8})|([a-z]{1,10}));/gi, (whole, dec, hex, name) => {
+  // The legacy references browsers also decode WITHOUT a semicolon (`&nbsp`),
+  // except where a letter, digit or `=` follows (`&ampersand`, `&amp=1`) — the
+  // rule HTML applies inside attributes, kept here so a word is never cut.
+  return s.replace(/&(?:#(\d{1,8})|#x([0-9a-f]{1,8})|([a-z]{1,10}));|&(amp|lt|gt|quot|nbsp)(?![a-z0-9=])/gi, (whole, dec, hex, name, legacy) => {
+    if (legacy !== undefined) return NAMED_ENTITIES[legacy.toLowerCase()]!;
     if (name !== undefined) return NAMED_ENTITIES[name.toLowerCase()] ?? whole;
     const code = dec !== undefined ? Number(dec) : parseInt(hex, 16);
     if (!Number.isFinite(code) || code > 0x10ffff) return whole;
@@ -78,7 +82,32 @@ export interface HtmlReadOptions {
    * `hidden` attribute, is dropped with everything inside it.
    */
   keepHidden?: boolean;
+  /**
+   * {@link htmlToText} only: keep one blank line between paragraphs and other
+   * blocks, and for a `<br><br>`, collapsing runs of them (default false:
+   * every blank line is dropped, the compact form mail reads best in).
+   */
+  paragraphs?: boolean;
 }
+
+export interface SanitiseOptions extends HtmlReadOptions {
+  /**
+   * Keep only these tags (lower case); any other element is removed and its
+   * text kept, as unknown tags already are. The `element` hook runs first, so
+   * it can map a tag into the set (`strong` → `<b>`). For hosts that store
+   * only a subset: `sanitiseHtml(renderMarkdown(md), { tags, element })`.
+   */
+  tags?: ReadonlySet<string> | readonly string[];
+}
+
+/**
+ * Invisible format characters (zero-width space, non-joiner, word joiner,
+ * byte-order mark), dropped from text and Markdown output but never from
+ * code. The zero-width JOINER (U+200D) is kept: it binds emoji sequences
+ * (👩‍💻), and dropping it would split them.
+ */
+const INVISIBLE = /[\u200b\u200c\u2060\ufeff]/g;
+const visible = (s: string): string => s.replace(INVISIBLE, '');
 
 /**
  * One render's state: the caller's options plus, per output, each children
@@ -126,7 +155,7 @@ export function parseHtml(html: string, opts: { keepHidden?: boolean } = {}): Ri
   const stack: MutableElement[] = [root];
   const top = () => stack[stack.length - 1]!;
   const src = html
-    .replace(/[\u0001-\u0003]/g, '')
+    .replace(/[\u0001-\u0005]/g, '')
     .replace(/<!--[\s\S]*?(?:-->|$)/g, '')
     .replace(/<!\[CDATA\[[\s\S]*?(?:\]\]>|$)/g, '')
     .replace(/<![^>]*>/g, '')
@@ -179,17 +208,18 @@ const PLAIN_TAGS = new Set([
   'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'thead', 'tbody', 'tr', 'td', 'th', 'hr',
 ]);
 
-function serialise(nodes: readonly RichNode[], o: HtmlReadOptions): string {
+function serialise(nodes: readonly RichNode[], o: HtmlReadOptions, allow?: ReadonlySet<string>): string {
   let out = '';
   for (const n of nodes) {
     if (typeof n === 'string') {
       out += n.replace(/\r\n?/g, '\n').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       continue;
     }
-    const inner = n.tag === 'img' ? '' : serialise(n.children, o);
+    const inner = n.tag === 'img' ? '' : serialise(n.children, o, allow);
     const hooked = o.element?.(n, 'html', inner);
     if (hooked !== undefined) out += hooked;
     else if (n.tag === 'img') out += escapeHtml(defaultImageText(n));
+    else if (allow !== undefined && !allow.has(n.tag)) out += inner;
     else if (n.tag === 'br' || n.tag === 'hr') out += `<${n.tag}>`;
     else if (PLAIN_TAGS.has(n.tag)) out += `<${n.tag}>${inner}</${n.tag}>`;
     else if (n.tag === 'ol') {
@@ -211,8 +241,9 @@ function serialise(nodes: readonly RichNode[], o: HtmlReadOptions): string {
  * content go with their content; any other tag goes but its text stays.
  * Images become `[alt]`, or nothing without alt text.
  */
-export function sanitiseHtml(html: string, opts: HtmlReadOptions = {}): string {
-  return serialise(parseHtml(html, opts).children, opts);
+export function sanitiseHtml(html: string, opts: SanitiseOptions = {}): string {
+  const allow = opts.tags === undefined ? undefined : new Set([...opts.tags].map((t) => t.toLowerCase()));
+  return serialise(parseHtml(html, opts).children, opts, allow);
 }
 
 /** Any tag in sanitised HTML beyond paragraphs and line breaks. */
@@ -242,7 +273,7 @@ function textOf(nodes: readonly RichNode[], o: HtmlReadOptions): string {
   const raw = (ns: readonly RichNode[]): string =>
     ns
       .map((n) => {
-        if (typeof n === 'string') return decodeEntities(n);
+        if (typeof n === 'string') return visible(decodeEntities(n));
         if (n.tag === 'br') return ' ';
         const inner = n.tag === 'img' ? '' : raw(n.children);
         return o.element?.(n, 'text', inner) ?? (n.tag === 'img' ? defaultImageText(n) : inner);
@@ -294,9 +325,15 @@ export function bodyStructure(html: string, opts: HtmlReadOptions = {}): { conte
  */
 const QUOTE_OPEN = '\u0001';
 const QUOTE_CLOSE = '\u0002';
+/** A paragraph boundary: a blank line with `paragraphs`, nothing without. */
+const PARA = '\u0004';
+/** Opens the line a `<br>` starts, so a line holding only it is a `<br><br>` (a paragraph break). */
+const BR = '\u0005';
+const MARKS = /[\u0004\u0005]/g;
+const paraBlock = (inner: string): string => `\n${PARA}\n${inner}\n${PARA}\n`;
 
-/** Elements that start and end a line of text. */
-const TEXT_BLOCK = new Set(['p', 'div', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'hr']);
+/** Elements that are paragraphs of text. */
+const TEXT_BLOCK = new Set(['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'hr']);
 
 /** A label that is itself an address (a pasted, often clipped link): the href alone says it. */
 const LOOKS_LIKE_ADDRESS = /^(https?:\/\/|www\.)/i;
@@ -317,9 +354,9 @@ function rowText(tr: RichElement, o: Ctx): string {
   if (cells.length === 0) return toText(tr.children, o);
   const raw = cells.map((c) => toText(c.children, o));
   // A row with one filled cell is layout: its lines (lists, nested tables, quotes) stay lines.
-  const filled = raw.filter((t) => t.replace(/[\s\u0001\u0002]+/g, '') !== '');
+  const filled = raw.filter((t) => t.replace(/[\s\u0001-\u0005]+/g, '') !== '');
   if (filled.length === 1) return filled[0]!;
-  const texts = raw.map((t) => t.replace(/[\n\u0001\u0002]+/g, ' ').trim());
+  const texts = raw.map((t) => t.replace(/[\n\u0001-\u0005]+/g, ' ').trim());
   // Trailing empty cells say nothing; inner ones keep the columns aligned.
   while (texts.length > 0 && texts[texts.length - 1] === '') texts.pop();
   return texts.join(' | ');
@@ -332,29 +369,36 @@ function toText(nodes: readonly RichNode[], o: Ctx): string {
   let out = '';
   for (const n of nodes) {
     if (typeof n === 'string') {
-      out += decodeEntities(n);
+      out += visible(decodeEntities(n));
       continue;
     }
     if (n.tag === 'br') {
-      out += '\n';
+      out += `\n${BR}`;
       continue;
     }
-    const inner = n.tag === 'img' ? '' : toText(n.children, o);
+    // Code keeps its characters as written, invisible ones included.
+    const code = n.tag === 'code' || n.tag === 'pre';
+    const inner = n.tag === 'img' ? '' : code ? codeText(n.children) : toText(n.children, o);
     const hooked = o.element?.(n, 'text', inner);
     if (hooked !== undefined) out += hooked;
     else if (n.tag === 'img') out += defaultImageText(n);
     else if (n.tag === 'a') out += linkText(n, inner);
     else if (n.tag === 'tr') out += `\n${rowText(n, o)}\n`;
-    else if (n.tag === 'blockquote') out += `\n${QUOTE_OPEN}\n${inner}\n${QUOTE_CLOSE}\n`;
+    else if (n.tag === 'blockquote') out += paraBlock(`${QUOTE_OPEN}\n${inner}\n${QUOTE_CLOSE}`);
     else if (n.tag === 'ol' || n.tag === 'ul') {
       const start = Number(attr(n.attrs, 'start'));
       let i = n.tag === 'ol' && Number.isInteger(start) && start >= 0 ? start : 1;
+      let items = '';
       for (const c of n.children) {
         if (typeof c !== 'string' && c.tag === 'li') {
-          out += `\n${n.tag === 'ol' ? `${i++}. ` : '- '}${toText(c.children, o)}\n`;
-        } else out += toText([c], o);
+          // An item that opens with a block (`<li><p>`) keeps its text on the marker's line.
+          const text = toText(c.children, o).replace(/^[\s\u0004\u0005]+|[\s\u0004\u0005]+$/g, '');
+          items += `\n${n.tag === 'ol' ? `${i++}. ` : '- '}${text}\n`;
+        } else items += toText([c], o);
       }
-    } else if (TEXT_BLOCK.has(n.tag)) out += `\n${inner}\n`;
+      out += paraBlock(items);
+    } else if (n.tag === 'pre' || TEXT_BLOCK.has(n.tag)) out += paraBlock(inner);
+    else if (n.tag === 'li') out += `\n${inner}\n`;
     else out += inner;
   }
   memo.set(nodes, out);
@@ -370,13 +414,25 @@ function toText(nodes: readonly RichNode[], o: Ctx): string {
  */
 export function htmlToText(html: string, opts: HtmlReadOptions = {}): string {
   const out: string[] = [];
+  const paragraphs = opts.paragraphs === true;
   let depth = 0;
+  let lastDepth = 0;
+  let pendingBreak = false;
   // A fresh context per call: the memo must never outlive (or leak into) the caller's options.
   for (const raw of toText(parseHtml(html, opts).children, { ...opts }).split(/\r?\n/)) {
-    const line = raw.replace(/[ \t ]+/g, ' ').trim();
+    const line = raw.replace(/[ \t\u00a0]+/g, ' ').trim();
     if (line === QUOTE_OPEN) depth++;
     else if (line === QUOTE_CLOSE) depth = Math.max(0, depth - 1);
-    else if (line !== '') out.push(`${'> '.repeat(depth)}${line}`);
+    else if (line === PARA || line === BR) pendingBreak = paragraphs && out.length > 0;
+    else {
+      const text = line.replace(MARKS, '').trim();
+      if (text === '') continue;
+      // One blank line however many breaks ran together; inside a quote it keeps the quote's `>`.
+      if (pendingBreak) out.push('> '.repeat(Math.min(depth, lastDepth)).trimEnd());
+      pendingBreak = false;
+      out.push(`${'> '.repeat(depth)}${text}`);
+      lastDepth = depth;
+    }
   }
   return out.join('\n');
 }
@@ -465,7 +521,7 @@ function md(nodes: readonly RichNode[], codes: string[], o: Ctx): string {
   let out = '';
   for (const n of nodes) {
     if (typeof n === 'string') {
-      out += decodeEntities(n).replace(/[\s ]+/g, ' ');
+      out += visible(decodeEntities(n)).replace(/[\s\u00a0]+/g, ' ');
       continue;
     }
     // Memoised in `md`: a hook and the default renderers all read it once.

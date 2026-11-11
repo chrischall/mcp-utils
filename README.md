@@ -2600,6 +2600,25 @@ renderMarkdown(agentText, { headings: true, quotes: true }); // '<p><strong>…'
 - **Links** pass through only for `http(s):` and `mailto:`, on both sides.
   `renderMarkdown` escapes raw HTML, so a caller cannot smuggle markup in.
 - **Images** read as `[alt]`, or nothing (spacers, tracking pixels).
+- **Paragraphs.** `htmlToText` drops blank lines by default (compact, for
+  mail). `{ paragraphs: true }` keeps one blank line between blocks and for a
+  `<br><br>`, runs collapsed, quote depth and list/table layout unchanged.
+- **Entities and invisible characters.** The legacy references `&nbsp`,
+  `&amp`, `&lt`, `&gt` and `&quot` decode without a semicolon, except where a
+  letter, digit or `=` follows (`&ampersand` stays). Zero-width space,
+  non-joiner, word joiner and BOM are dropped from text and Markdown output,
+  never from code; the zero-width joiner stays because emoji sequences need it.
+- **Writing to a host that stores only some tags.** Render, then cut down to
+  the host's set: an element outside `tags` is removed with its text kept,
+  and the `element` hook runs first, so it can map a tag into the set.
+
+  ```ts
+  const html = sanitiseHtml(renderMarkdown(agentText), {
+    tags: ['p', 'br', 'b', 'ul', 'li'],
+    element: (el, output, inner) => (output === 'html' && el.tag === 'strong' ? `<b>${inner}</b>` : undefined),
+  });
+  // '**x** see [doc](https://…) `code`' → '<p><b>x</b> see doc code</p>'
+  ```
 - **Hooks.** `element(el, output, inner)` overrides how any element reads in
   `'html'`, `'text'` or `'markdown'` output (microsoft-teams-mcp keeps its
   @mention spans and shows emoji images as their character);

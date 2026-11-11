@@ -10,6 +10,7 @@ import {
   isRichHtml,
   linksOf,
   parseHtml,
+  renderMarkdown,
   sanitiseHtml,
   type HtmlReadOptions,
 } from './index.js';
@@ -300,5 +301,57 @@ describe('hostile input', () => {
   it('renders a hooked, deeply nested body in linear time', () => {
     const nested = '<span>'.repeat(150) + 'x' + '</span>'.repeat(150);
     expect(time(() => htmlToMarkdown(nested, { element: () => undefined }))).toBeLessThan(200);
+  });
+});
+
+/* Gaps found adopting /rich in workday-mcp (Workday rich text, captured live). */
+describe('workday gaps', () => {
+  it('a. a list item that starts with a block keeps its marker on the same line', () => {
+    expect(htmlToText('<ul><li><p>one</p></li><li><p>two</p></li></ul>')).toBe('- one\n- two');
+    expect(htmlToText('<ol><li><p>one</p><p>more</p></li></ol>')).toBe('1. one\nmore');
+  });
+
+  it('b. paragraphs: keeps one blank line between blocks and <br><br>, collapsing runs', () => {
+    const p = { paragraphs: true };
+    expect(htmlToText('<p>x</p><p></p><p>y</p>', p)).toBe('x\n\ny');
+    expect(htmlToText('a<br /><br />b', p)).toBe('a\n\nb');
+    expect(htmlToText('a<br />\n<br /><br /><br />b', p)).toBe('a\n\nb');
+    expect(htmlToText('a<br />b', p)).toBe('a\nb');
+    expect(htmlToText('<p>a</p><br /><p>b</p>', p)).toBe('a\n\nb');
+    expect(htmlToText('<p style="text-align:left">Intro</p>\n<ul>\n  <li><p>one</p></li>\n  <li>two</li>\n</ul><p>End</p>', p)).toBe(
+      'Intro\n\n- one\n- two\n\nEnd',
+    );
+    expect(htmlToText('<p>a</p><blockquote><p>q1</p><p>q2</p></blockquote><p>b</p>', p)).toBe('a\n\n> q1\n>\n> q2\n\nb');
+    expect(htmlToText('<p>a</p><table><tr><td>1</td><td>2</td></tr><tr><td>3</td><td>4</td></tr></table>', p)).toBe('a\n\n1 | 2\n3 | 4');
+  });
+
+  it('b. without paragraphs, blank lines are still dropped', () => {
+    expect(htmlToText('<p>x</p><p></p><p>y</p>')).toBe('x\ny');
+    expect(htmlToText('a<br /><br />b')).toBe('a\nb');
+  });
+
+  it('c. decodes legacy named references written without a semicolon, but not inside a longer word', () => {
+    expect(htmlToText('Blank&nbsp label')).toBe('Blank label');
+    expect(decodeEntities('a &amp b &lt c &gt d &quot e')).toBe('a & b < c > d " e');
+    expect(decodeEntities('&ampersand &ltx &amp=1 &nbspx')).toBe('&ampersand &ltx &amp=1 &nbspx');
+    expect(decodeEntities('&amp;lt; &#39;&#34;&#x2019;')).toBe('&lt; \'"’');
+  });
+
+  it('d. sanitiseHtml limits output to a tag subset, keeping text; the hook runs first', () => {
+    const subset = {
+      tags: ['p', 'br', 'b', 'ul', 'li'],
+      element: (el: { tag: string }, output: string, inner: string) =>
+        output === 'html' && el.tag === 'strong' ? `<b>${inner}</b>` : undefined,
+    };
+    const md = renderMarkdown('**x** and [link](https://a.example/l) and `code`\n\n- one\n- two\n\n## Head', { headings: true });
+    expect(sanitiseHtml(md, subset)).toBe('<p><b>x</b> and link and code</p><ul><li>one</li><li>two</li></ul>Head');
+    expect(sanitiseHtml('<p><i>i</i><br>x</p>', { tags: new Set(['p']) })).toBe('<p>ix</p>');
+  });
+
+  it('e. strips invisible format characters from text and Markdown, but not inside code, and keeps emoji joiners', () => {
+    expect(htmlToText('<p>Q?</p>​')).toBe('Q?');
+    expect(htmlToText('a‌b⁠c﻿d&#x200b;e')).toBe('abcde');
+    expect(htmlToMarkdown('<p>Q?​</p><pre><code>x​y</code></pre> <code>z​</code>')).toBe('Q?\n\n```\nx​y\n```\n\n`z​`');
+    expect(htmlToText('<p>👩‍💻 dev</p>')).toBe('👩‍💻 dev');
   });
 });
