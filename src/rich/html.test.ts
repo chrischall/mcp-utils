@@ -494,6 +494,11 @@ describe('tokenizer hardening (apple-icloud)', () => {
     htmlToText(`<a title=x'`.repeat(40_000));
     htmlToText(`<p a="`.repeat(40_000));
     htmlToText('<!--'.repeat(50_000));
+    // Closed comments with no `--!>` anywhere: each must not rescan to the end.
+    htmlToText('<!-- a -->x'.repeat(40_000));
+    htmlToText('<!--a--!>x'.repeat(40_000));
+    // Deep hidden nesting with closes that match nothing: each close must not walk the stack.
+    htmlToText('<div hidden>'.repeat(40_000) + '</span>'.repeat(40_000));
     expect(performance.now() - t).toBeLessThan(500);
   });
 });
