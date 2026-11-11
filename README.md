@@ -2596,14 +2596,18 @@ renderMarkdown(agentText, { headings: true, quotes: true }); // '<p><strong>…'
   their content. Content the sender **hid** (`display:none`,
   `visibility:hidden`, `mso-hide:all`, `hidden`) is dropped too, unless
   `{ keepHidden: true }`: mail preheaders cost tokens and are a classic place
-  to hide instructions.
+  to hide instructions. Form controls (`<select>` with its options,
+  `<textarea>`) are dropped too, and HTML5 sections (`figure`, `figcaption`,
+  `section`, `header`, `aside`…) read as blocks.
 - **Links** pass through only for `http(s):` and `mailto:`, on both sides.
   `renderMarkdown` escapes raw HTML, so a caller cannot smuggle markup in.
 - **Images** read as `[alt]`, or nothing (spacers, tracking pixels).
 - **Paragraphs.** `htmlToText` drops blank lines by default (compact, for
   mail). `{ paragraphs: true }` keeps one blank line between blocks and for a
   `<br><br>`, runs collapsed, quote depth and list/table layout unchanged.
-- **Entities and invisible characters.** The legacy references `&nbsp`,
+- **Entities and invisible characters.** The HTML 4 named references
+  (`&rsquo;`, `&mdash;`, `&eacute;`, `&copy;`…, case-sensitive) decode, as do
+  numeric ones. The legacy references `&nbsp`,
   `&amp`, `&lt`, `&gt` and `&quot` decode without a semicolon, except where a
   letter, digit or `=` follows (`&ampersand` stays). Zero-width space,
   non-joiner, word joiner and BOM are dropped from text and Markdown output,
