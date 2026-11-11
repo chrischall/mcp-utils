@@ -2609,15 +2609,17 @@ renderMarkdown(agentText, { headings: true, quotes: true }); // '<p><strong>…'
   non-joiner, word joiner and BOM are dropped from text and Markdown output,
   never from code; the zero-width joiner stays because emoji sequences need it.
 - **Writing to a host that stores only some tags.** Render, then cut down to
-  the host's set: an element outside `tags` is removed with its text kept,
-  and the `element` hook runs first, so it can map a tag into the set.
+  the host's set. An element outside `tags` is said with the tags inside it,
+  so its meaning survives: an equivalent tag (`strong` ↔ `b`, `em` ↔ `i`,
+  `s`/`strike`/`del`), a link as `label (address)`, a list as numbered or
+  bulleted lines (never bare `<li>`s), a code block as lines, a heading as a
+  bold paragraph; anything else keeps its text. The `element` hook runs
+  first, for anything host-specific.
 
   ```ts
-  const html = sanitiseHtml(renderMarkdown(agentText), {
-    tags: ['p', 'br', 'b', 'ul', 'li'],
-    element: (el, output, inner) => (output === 'html' && el.tag === 'strong' ? `<b>${inner}</b>` : undefined),
-  });
-  // '**x** see [doc](https://…) `code`' → '<p><b>x</b> see doc code</p>'
+  const html = sanitiseHtml(renderMarkdown(agentText), { tags: ['p', 'br', 'b', 'ul', 'li'] });
+  // '**x** see [doc](https://e.test) `code`\n\n1. one\n2. two'
+  //   → '<p><b>x</b> see doc (https://e.test) code</p><p>1. one<br>2. two</p>'
   ```
 - **Hooks.** `element(el, output, inner)` overrides how any element reads in
   `'html'`, `'text'` or `'markdown'` output (microsoft-teams-mcp keeps its
