@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.8.1](https://github.com/chrischall/mcp-utils/compare/v3.8.0...v3.8.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* **rich:** harden the HTML reader and fill gaps found across the fleet ([#432](https://github.com/chrischall/mcp-utils/issues/432)) ([de2979a](https://github.com/chrischall/mcp-utils/commit/de2979a2b1a974fa5187f9b85b09791c0aca1428))
+* **rich:** keep the HTML reader linear on comment and nesting floods ([#434](https://github.com/chrischall/mcp-utils/issues/434)) ([00cb5ed](https://github.com/chrischall/mcp-utils/commit/00cb5ed73ab02cc72409e7f80e8b0c390744a562))
+
 ## [3.8.0](https://github.com/chrischall/mcp-utils/compare/v3.7.2...v3.8.0) (2026-11-11)
 
 
