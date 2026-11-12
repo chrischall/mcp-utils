@@ -42,6 +42,7 @@ import light:
 | `@chrischall/mcp-utils/netguard` | SSRF guard for fetching third-party URLs: public-address table, DNS-pinning undici dispatcher, redirect-checked `fetchPublic` (needs `undici`) |
 | `@chrischall/mcp-utils/export` | bulk-export plumbing: export sink (local disk with absolute paths, or one zip in the mcp-host blob store behind a signed link), resume-cursor codec, zip writer, and the blob-store client — signed GET/PUT/DELETE URLs, PUT, GET, DELETE, and `consume` (read a caller's upload, delete it once handled), plus inbound-upload helpers: `mintUploadSlot`, `uploadFileNameFromKey`, strict base64, filename/MIME rules, and the two per-tool entry points `deliverFile` (inline → link → disk) and `resolveUploadSource` (path / inline / blobKey) (no optional peers) |
 | `@chrischall/mcp-utils/html` | opt-in HTML scraping helpers (needs `node-html-parser`) |
+| `@chrischall/mcp-utils/convert` | attachments → model-readable content: PDF → Markdown or page images, .xlsx/.xlsm → one CSV per sheet, .pptx → per-slide Markdown plus embedded pictures; hostile-input caps, never a silent cut (optional peers `unpdf`, `exceljs`, `fflate`, `fast-xml-parser`, `@napi-rs/canvas`, loaded per format) |
 | `@chrischall/mcp-utils/rich` | message bodies: tolerant HTML parse → sanitised HTML / plain text / Markdown / links (hidden content dropped), and Markdown → safe HTML for sending (no dependencies) |
 | `@chrischall/mcp-utils/scrape` | convenience alias for the zero-dep `scrape` module (also in the core barrel) |
 | `@chrischall/mcp-utils/test` | in-memory test harness for tool registration |
@@ -2868,6 +2869,78 @@ field. **`jsonlLine(value)`** — one `JSON.stringify` line plus `\n`.
 upstream file name or title. **`buildZip(entries, modifiedAt?)`** /
 **`crc32(bytes)`** — the minimal STORE/DEFLATE zip writer (ported from
 gemini-mcp `zip.ts`; no ZIP64, UTF-8 names, unsafe or duplicate names refused).
+
+### `convert` — attachments → model-readable content *(subpath, optional peers)*
+
+Hosted clients (claude.ai) render only images inline; any other file
+`deliverFile` returns is a download link the **model** cannot open. `/convert`
+turns a PDF, workbook or deck into content the model can read:
+
+- **PDF** → one Markdown part (`## Page N` per page) from the text layer. In
+  `mode: 'auto'` a scan (sparse text layer) also gets page images;
+  `'images'` returns page images only; `'text'` never renders.
+- **.xlsx / .xlsm** → one `text/csv` part per worksheet.
+- **.pptx** → one Markdown part (`## Slide N: title`, text, tables, speaker
+  notes) plus the pictures embedded in each slide. There is no true slide
+  rendering. `mode: 'images'` behaves as `'auto'` for workbooks and decks, and
+  a note says so.
+
+```ts
+import { deliverFile } from '@chrischall/mcp-utils/export';
+import { convertAttachment, convertedToContent } from '@chrischall/mcp-utils/convert';
+
+// The original, for the user to download …
+const out = await deliverFile({ bytes, fileName, mimeType, disk: { dir: outputDir } });
+// … and readable content for the model, when the format is convertible.
+const converted = await convertAttachment({ bytes, fileName, mimeType, mode: 'auto', signal });
+return {
+  content: [
+    ...out.content,
+    // converted text is third-party data: wrap it in your untrusted-content envelope
+    ...(converted ? convertedToContent(converted) : []),
+  ],
+};
+```
+
+- **`detectConvertible(fileName, mimeType?)`** returns `'pdf' | 'xlsx' | 'pptx' | undefined`.
+  It goes by MIME type (parameters and case ignored), and by extension
+  (`.pdf`, `.xlsx`, `.xlsm`, `.pptx`) only when the MIME type is missing or
+  `application/octet-stream`.
+- **`convertAttachment({bytes, fileName, mimeType?, mode?, limits?, signal?})`**
+  returns `{format, parts, notes, count?}`, or `undefined` when the format is
+  not convertible or the bytes lack its magic (`%PDF-` / `PK\x03\x04`). An
+  input over `maxInputBytes` throws a `too_large` `McpToolError`.
+- **`convertedToContent(result)`** maps the result to MCP content: each text
+  part headed `--- <name> (<mimeType>[, truncated]) ---`, each image as base64,
+  then one block listing the notes.
+- The per-format converters (`convertPdf`, `convertXlsx`, `convertPptx`,
+  `renderPdfPages`, `extractPdfText`) are exported too.
+
+**Optional peers.** Install only what you convert: `unpdf` (PDF), `exceljs` +
+`fflate` (workbooks), `fflate` + `fast-xml-parser` (decks), and
+`@napi-rs/canvas` (PDF page images). Each is loaded with a dynamic `import()`
+when its format is converted. A missing one throws an `McpToolError` naming the
+package to install, except `@napi-rs/canvas`: without it, you get the text and
+a note saying page images are unavailable.
+
+**Limits** (`ConvertLimits`, defaults in `DEFAULT_CONVERT_LIMITS`):
+
+| Limit | Default | Caps |
+| --- | --- | --- |
+| `maxTextBytes` | 200 KiB | UTF-8 bytes across all text parts |
+| `maxImages` | 10 | image parts returned |
+| `maxImageBytes` | 8 MiB | raw image bytes (under mcp-host's 14 MiB result cap after base64) |
+| `maxPages` | 100 | PDF pages / slides / sheets read at all |
+| `maxInputBytes` | 50 MiB | input size (larger throws) |
+| `maxUnzippedBytes` | 200 MiB | total inflated bytes of an .xlsx/.pptx (each entry at most `ZIP_ENTRY_MAX_BYTES`, 50 MiB) |
+
+Truncation is never silent. A cap that bites marks the part `truncated` or adds
+a note, or both. Input is treated as hostile:
+- Zips are read through a bounded reader that caps declared **and** actual
+  inflated sizes.
+- XML is parsed with no entity expansion and no DTD.
+- pdf.js runs with no eval, no font loading and no network.
+- External relationships in a deck are never followed.
 
 ### `netguard` — SSRF guard for third-party URLs *(subpath, optional peer)*
 
