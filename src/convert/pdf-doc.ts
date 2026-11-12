@@ -18,10 +18,15 @@ import type { ResolvedConvertLimits } from './types.js';
 /** An open pdf.js document, as unpdf's `getDocumentProxy` returns it. */
 export type PdfDoc = Awaited<ReturnType<(typeof import('unpdf'))['getDocumentProxy']>>;
 
+const PDF_PASSWORD_HINT = 'The PDF is password-protected; open it and save an unprotected copy.';
+
+function isPasswordError(err: unknown): boolean {
+  return (err as { name?: unknown } | null)?.name === 'PasswordException';
+}
+
 /** One line, no stack, bounded: pdf.js messages can quote document bytes. */
 export function describePdfError(err: unknown): string {
-  const name = (err as { name?: unknown } | null)?.name;
-  if (name === 'PasswordException') return 'the PDF is password-protected';
+  if (isPasswordError(err)) return 'the PDF is password-protected';
   const msg = err instanceof Error ? err.message : String(err);
   return (msg.split('\n')[0] ?? '').slice(0, 200) || 'unknown error';
 }
@@ -30,7 +35,8 @@ export function describePdfError(err: unknown): string {
  * Open `bytes` as a PDF, run `use` on the document and always destroy it
  * afterwards. Throws an {@link McpToolError} for an input over
  * `maxInputBytes` (kind `'too_large'`), a missing `unpdf`, or bytes that are
- * not a readable PDF (`Could not read the PDF: …`).
+ * not a readable PDF (`Could not read the PDF: …`; for a password-protected
+ * one, with a hint to save an unprotected copy).
  */
 export async function withPdf<T>(
   bytes: Uint8Array,
@@ -57,7 +63,11 @@ export async function withPdf<T>(
       verbosity: 0,
     });
   } catch (err) {
-    throw new McpToolError(`Could not read the PDF: ${describePdfError(err)}`, { kind: 'unknown', cause: err });
+    throw new McpToolError(`Could not read the PDF: ${describePdfError(err)}`, {
+      kind: 'unknown',
+      cause: err,
+      ...(isPasswordError(err) ? { hint: PDF_PASSWORD_HINT } : {}),
+    });
   }
   try {
     return await use(doc);

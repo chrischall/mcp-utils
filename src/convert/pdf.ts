@@ -13,9 +13,12 @@
  * Hostile input: the document is opened by `pdf-doc.ts` (no eval, no font
  * loading, no XFA, nothing to fetch); the signal is checked between pages.
  * Every cap that bites is reported: `maxPages` with a "pages X–Y not read" note,
- * `maxTextBytes` with a cut at a page or line boundary, `truncated: true` and
- * a note. A PDF whose text layer is sparse (see {@link isTextSparse}) is
- * noted as likely scanned.
+ * `maxTextBytes` with a cut at a page or line boundary (inside the line, at a
+ * character boundary, when a page's first line alone is over what is left),
+ * `truncated: true` and notes. Once the pages read already hold more text than
+ * `maxTextBytes`, later pages are still read — every page counts toward the
+ * scan check — but their text is not kept. A PDF whose text layer is sparse
+ * (see {@link isTextSparse}) is noted as likely scanned.
  */
 
 import { McpToolError } from '../errors/index.js';
@@ -42,10 +45,9 @@ export const PDF_SPARSE_NOTE = 'this PDF has little or no text layer (likely sca
  * probably scanned images, and page images will read better than its text.
  */
 export function isTextSparse(pages: readonly string[]): boolean {
-  if (pages.length === 0) return true;
   let chars = 0;
-  for (const p of pages) chars += p.replace(/\s+/g, '').length;
-  return chars / pages.length < PDF_SPARSE_CHARS_PER_PAGE;
+  for (const p of pages) chars += visibleChars(p);
+  return sparse(chars, pages.length);
 }
 
 /** The text a PDF yielded: one string per page read, plus the page count of the whole document. */
@@ -66,12 +68,13 @@ interface TextItemLike {
 }
 
 /**
- * Join one page's text items into lines. A new line starts after an item
- * with `hasEOL` or when the baseline moves; a vertical gap of more than 1.5×
- * the line height leaves a blank line (a paragraph break). Same-line items
- * separated by a visible gap get a space. Runs of spaces collapse to one.
+ * Join one page's pdf.js text items into lines. A new line starts after an
+ * item with `hasEOL` or when the baseline moves; a vertical gap of more than
+ * 1.5× the line height leaves a blank line (a paragraph break). Same-line
+ * items separated by a visible gap get a space. Runs of spaces collapse to
+ * one. Internal to the converter; exported for its tests.
  */
-function joinItems(items: readonly TextItemLike[]): string {
+export function joinTextItems(items: readonly TextItemLike[]): string {
   const lines: string[] = [];
   let line = '';
   let lastY: number | undefined;
@@ -87,12 +90,14 @@ function joinItems(items: readonly TextItemLike[]): string {
     const w = typeof it.width === 'number' ? it.width : 0;
     if (it.str === '' && it.hasEOL !== true) continue;
     const moved = y !== undefined && lastY !== undefined && Math.abs(y - lastY) > Math.max(h, lastHeight, 1) * 0.5;
-    if ((eol || moved) && (line !== '' || lines.length > 0)) {
-      lines.push(line);
+    if (eol || moved) {
+      // An empty end-of-line item leaves `line` empty: it ends no line of its
+      // own, so pushing it would add a spurious blank line.
+      if (line !== '') lines.push(line);
       line = '';
       const gap = y !== undefined && lastY !== undefined ? Math.abs(lastY - y) : 0;
       const lh = Math.max(lastHeight, h, 1);
-      if (gap > lh * 1.5 * 1.2) lines.push('');
+      if (gap > lh * 1.5 * 1.2 && lines.length > 0 && lines[lines.length - 1] !== '') lines.push('');
       lastEndX = undefined;
     } else if (line !== '' && x !== undefined && lastEndX !== undefined && x - lastEndX > Math.max(h, 1) * 0.2 && !/\s$/.test(line) && !/^\s/.test(it.str)) {
       line += ' ';
@@ -111,23 +116,54 @@ function joinItems(items: readonly TextItemLike[]): string {
     .trim();
 }
 
-/** Read the text of pages 1..min(pageCount, maxPages) of an open document. */
-async function readPages(doc: PdfDoc, lim: ResolvedConvertLimits, signal?: AbortSignal): Promise<PdfText> {
+/** Non-whitespace characters in `text` — what {@link isTextSparse} measures. */
+function visibleChars(text: string): number {
+  return text.replace(/\s+/g, '').length;
+}
+
+/** {@link isTextSparse} over pages already reduced to their {@link visibleChars} total. */
+function sparse(chars: number, pages: number): boolean {
+  return pages === 0 || chars / pages < PDF_SPARSE_CHARS_PER_PAGE;
+}
+
+/** What {@link readPages} found: the text it kept, and enough about the rest for the notes. */
+interface PageScan extends PdfText {
+  /** Pages read: 1..min(pageCount, maxPages). `pages` may hold fewer (see {@link readPages}). */
+  read: number;
+  /** {@link isTextSparse} over every page read, kept or not. */
+  sparse: boolean;
+}
+
+/**
+ * Read pages 1..min(pageCount, maxPages) of an open document. With
+ * `keepBytes`, page text is kept only until the pages kept hold more than
+ * `keepBytes` UTF-8 bytes: no later page can make the cut (its Markdown costs
+ * more than its text), so later pages are read for the scan check only.
+ */
+async function readPages(doc: PdfDoc, lim: ResolvedConvertLimits, signal?: AbortSignal, keepBytes = Infinity): Promise<PageScan> {
   const pageCount = doc.numPages;
   const pages: string[] = [];
-  const last = Math.min(pageCount, lim.maxPages);
-  for (let n = 1; n <= last; n++) {
+  const read = Math.min(pageCount, lim.maxPages);
+  let kept = 0;
+  let chars = 0;
+  for (let n = 1; n <= read; n++) {
     signal?.throwIfAborted();
+    let text: string;
     try {
       const page = await doc.getPage(n);
       const content = await page.getTextContent();
-      pages.push(joinItems(content.items as TextItemLike[]));
+      text = joinTextItems(content.items as TextItemLike[]);
       page.cleanup();
     } catch (err) {
       throw new McpToolError(`Could not read the PDF: page ${n}: ${describePdfError(err)}`, { kind: 'unknown', cause: err });
     }
+    chars += visibleChars(text);
+    if (kept <= keepBytes) {
+      pages.push(text);
+      kept += Buffer.byteLength(text);
+    }
   }
-  return { pages, pageCount };
+  return { pages, pageCount, read, sparse: sparse(chars, read) };
 }
 
 /**
@@ -139,16 +175,33 @@ async function readPages(doc: PdfDoc, lim: ResolvedConvertLimits, signal?: Abort
  */
 export async function extractPdfText(bytes: Uint8Array, limits?: ConvertLimits, signal?: AbortSignal): Promise<PdfText> {
   const lim = resolveConvertLimits(limits);
-  return withPdf(bytes, lim, signal, (doc) => readPages(doc, lim, signal));
+  return withPdf(bytes, lim, signal, async (doc) => {
+    const { pages, pageCount } = await readPages(doc, lim, signal);
+    return { pages, pageCount };
+  });
 }
 
-/** The text layer as one `text/markdown` part, honouring `maxTextBytes`, plus notes on what was cut. */
+/** The longest prefix of `line` within `maxBytes` UTF-8 bytes, never splitting a character. */
+function cutAtUtf8Boundary(line: string, maxBytes: number): string {
+  const buf = Buffer.from(line);
+  if (buf.length <= maxBytes) return line;
+  let end = Math.max(0, maxBytes);
+  while (end > 0 && (buf[end]! & 0xc0) === 0x80) end--; // back off a continuation byte
+  return buf.subarray(0, end).toString();
+}
+
+/**
+ * The text layer as one `text/markdown` part, honouring `maxTextBytes`, plus
+ * notes on what was cut. The page the cap lands in keeps its whole lines that
+ * fit; when not even its first line fits, that line is cut by characters.
+ */
 function markdownPart(
-  { pages, pageCount }: PdfText,
+  { pages, pageCount, read, sparse: isSparse }: PageScan,
   lim: ResolvedConvertLimits,
   fileName: string | undefined,
 ): { part: ConvertedPart; notes: string[] } {
   const notes: string[] = [];
+  const cap = `the ${lim.maxTextBytes}-byte text cap was reached`;
   let text = '';
   let budget = lim.maxTextBytes;
   let truncated = false;
@@ -181,17 +234,23 @@ function markdownPart(
       }
       if (kept > 0) {
         text += `${sep}${heading}\n${chunk}`;
-        notes.push(`page ${n}: kept lines 1–${kept} of ${lines.length} (the ${lim.maxTextBytes}-byte text cap was reached)`);
+        notes.push(`page ${n}: kept lines 1–${kept} of ${lines.length} (${cap})`);
+      } else {
+        // The first line alone is over the budget: keep what fits of it (and its newline).
+        const part = cutAtUtf8Boundary(lines[0]!, rest - 1);
+        if (part !== '') {
+          text += `${sep}${heading}\n${part}\n`;
+          kept = 1;
+          notes.push(`page ${n}: kept the first ${[...part].length} characters of line 1 of ${lines.length} (${cap})`);
+        }
       }
     }
     const firstOut = kept > 0 ? n + 1 : n;
-    if (firstOut <= pages.length) {
-      notes.push(`${pageRange(firstOut, pages.length)} not included (the ${lim.maxTextBytes}-byte text cap was reached)`);
-    }
+    if (firstOut <= read) notes.push(`${pageRange(firstOut, read)} not included (${cap})`);
     break;
   }
-  if (pageCount > pages.length) notes.push(`${pageRange(pages.length + 1, pageCount)} not read (maxPages is ${lim.maxPages})`);
-  if (isTextSparse(pages)) notes.push(PDF_SPARSE_NOTE);
+  if (pageCount > read) notes.push(`${pageRange(read + 1, pageCount)} not read (maxPages is ${lim.maxPages})`);
+  if (isSparse) notes.push(PDF_SPARSE_NOTE);
   return {
     part: { type: 'text', name: `${pdfBaseName(fileName)}.md`, mimeType: 'text/markdown', text, ...(truncated ? { truncated: true } : {}) },
     notes,
@@ -220,7 +279,8 @@ function firstPages(n: number): number[] {
  *
  * `maxPages` caps the pages read or rendered (note: "pages X–Y not read" /
  * "not rendered"), `maxTextBytes` the markdown (cut at a page or line
- * boundary, `truncated`, notes naming what was kept). A missing canvas never
+ * boundary — or by characters when a page's first line alone does not fit —
+ * `truncated`, notes naming what was kept and the pages not included). A missing canvas never
  * throws; otherwise throws as {@link extractPdfText} does.
  */
 export async function convertPdf(
@@ -242,7 +302,7 @@ export async function convertPdf(
         if (pageCount > renderable) notes.push(`${pageRange(renderable + 1, pageCount)} not rendered (maxPages is ${lim.maxPages})`);
         return { format: 'pdf', parts: rendered.images, notes, count: pageCount };
       }
-      const { part, notes } = markdownPart(await readPages(doc, lim, signal), lim, fileName);
+      const { part, notes } = markdownPart(await readPages(doc, lim, signal, lim.maxTextBytes), lim, fileName);
       return {
         format: 'pdf',
         parts: [part],
@@ -251,11 +311,11 @@ export async function convertPdf(
       };
     }
 
-    const text = await readPages(doc, lim, signal);
-    const { part, notes } = markdownPart(text, lim, fileName);
+    const scan = await readPages(doc, lim, signal, lim.maxTextBytes);
+    const { part, notes } = markdownPart(scan, lim, fileName);
     const parts: ConvertedPart[] = [part];
-    if (mode === 'auto' && isTextSparse(text.pages)) {
-      const rendered = await renderPdfDocPages(doc, firstPages(text.pages.length), lim, signal, { fileName });
+    if (mode === 'auto' && scan.sparse) {
+      const rendered = await renderPdfDocPages(doc, firstPages(scan.read), lim, signal, { fileName });
       parts.push(...rendered.images);
       notes.push(...rendered.notes);
     }
