@@ -30,13 +30,14 @@
 import type { Workbook, Worksheet } from 'exceljs';
 import { McpToolError } from '../errors/index.js';
 import { csvRow } from './csv.js';
+import { safeFileName } from './file-name.js';
 import { importPeer } from './peer.js';
 import { resolveConvertLimits, type ConvertLimits, type ConvertResult, type ConvertedPart } from './types.js';
 import { repackZipWithinLimits } from './zip-read.js';
 
 /** `<sheet name>.csv`, with `/\:*?"<>|` and control characters replaced by `_`. */
 export function sheetFileName(sheetName: string): string {
-  return `${sheetName.replace(/[/\\:*?"<>|\u0000-\u001f\u007f]/g, '_')}.csv`;
+  return `${safeFileName(sheetName)}.csv`;
 }
 
 function isoDate(d: Date): string {
@@ -196,7 +197,8 @@ export async function convertXlsx(bytes: Uint8Array, limits?: ConvertLimits, sig
     }
     if (truncated) {
       // Nothing more fits; later sheets are reported by the budget check above.
-      notes.push(`sheet "${ws.name}": kept rows 1–${kept} of ${sheet.lastRow} (the ${lim.maxTextBytes}-byte text cap was reached)`);
+      const what = kept === 0 ? 'no rows kept' : `kept rows 1–${kept}`;
+      notes.push(`sheet "${ws.name}": ${what} of ${sheet.lastRow} (the ${lim.maxTextBytes}-byte text cap was reached)`);
       budget = 0;
     }
 

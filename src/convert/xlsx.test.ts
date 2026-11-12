@@ -106,6 +106,15 @@ describe('convertXlsx', () => {
     expect(notes).toMatch(/"After".*not converted/);
   });
 
+  it('says no rows were kept when even the first row is over the text cap', async () => {
+    const bytes = await book((wb) => {
+      wb.addWorksheet('Wide').addRow(['x'.repeat(50), 'y']);
+    });
+    const r = await convertXlsx(bytes, { maxTextBytes: 10 });
+    expect(r.parts[0]).toMatchObject({ name: 'Wide.csv', text: '', truncated: true });
+    expect(r.notes).toContain('sheet "Wide": no rows kept of 1 (the 10-byte text cap was reached)');
+  });
+
   it('reads at most maxPages sheets and notes the rest', async () => {
     const bytes = await book((wb) => {
       for (const n of ['S1', 'S2', 'S3']) wb.addWorksheet(n).addRow([n]);
