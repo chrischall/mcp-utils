@@ -200,6 +200,13 @@ describe('openZip', () => {
     await expect(z.read('a.bin')).resolves.toHaveLength(600 * 1024);
   });
 
+  it('inflates an entry at most once: a re-read returns the cached bytes (#436)', async () => {
+    const zip = zipSync({ 'a.bin': new Uint8Array(600 * 1024) });
+    const z = await openZip(zip, { maxUnzippedBytes: MiB });
+    const first = await z.read('a.bin');
+    expect(await z.read('a.bin')).toBe(first);
+  });
+
   it('rejects bytes that are not a zip with a clear McpToolError', async () => {
     const err = await openZip(strToU8('definitely not a zip file')).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(McpToolError);
