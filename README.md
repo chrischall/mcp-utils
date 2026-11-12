@@ -2942,6 +2942,12 @@ a note, or both. Input is treated as hostile:
 - pdf.js runs with no eval, no font loading and no network.
 - External relationships in a deck are never followed.
 
+A password-protected PDF throws an `McpToolError` whose hint says to save an
+unprotected copy. A workbook's peak memory is its inflated archive (at most
+`maxUnzippedBytes`) plus exceljs's in-memory model of it, which can run to
+several GB for a hostile file within the cap — lower `maxUnzippedBytes` where
+that matters.
+
 ### `netguard` — SSRF guard for third-party URLs *(subpath, optional peer)*
 
 ```ts
