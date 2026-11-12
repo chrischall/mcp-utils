@@ -41,6 +41,7 @@
  */
 
 import { McpToolError } from '../errors/index.js';
+import { attachmentBaseName } from './file-name.js';
 import { importPeer } from './peer.js';
 import { pageRange } from './pdf-doc.js';
 import { resolveConvertLimits, type ConvertedPart, type ConvertLimits, type ConvertResult, type ResolvedConvertLimits } from './types.js';
@@ -407,13 +408,6 @@ class ImageCollector {
   }
 }
 
-/** The base of an attachment file name: leaf only, `.pptx`/`.pptm` dropped, unsafe characters `_`; `presentation` when empty. */
-function pptxBaseName(fileName: string | undefined): string {
-  const leaf = (fileName ?? '').split(/[/\\]/).pop() ?? '';
-  const base = leaf.replace(/\.(pptx|pptm)$/i, '').replace(/[:*?"<>|\u0000-\u001f\u007f]/g, '_').trim();
-  return base === '' ? 'presentation' : base;
-}
-
 /** One slide rendered: heading line and body (may be empty). */
 async function renderSlide(
   zip: ZipReader,
@@ -555,8 +549,9 @@ export async function convertPptx(
 
   // A picture whose reference was cut with the text is not returned.
   const imageParts = truncated ? images.parts.filter((p) => text.includes(`[image: ${p.name}]`)) : images.parts;
+  const name = `${attachmentBaseName(fileName, /\.(pptx|pptm)$/i, 'presentation')}.md`;
   const parts: ConvertedPart[] = [
-    { type: 'text', name: `${pptxBaseName(fileName)}.md`, mimeType: 'text/markdown', text, ...(truncated ? { truncated: true } : {}) },
+    { type: 'text', name, mimeType: 'text/markdown', text, ...(truncated ? { truncated: true } : {}) },
     ...imageParts,
   ];
   return { format: 'pptx', parts, notes, count };

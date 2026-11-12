@@ -11,6 +11,7 @@
  */
 
 import { McpToolError } from '../errors/index.js';
+import { attachmentBaseName } from './file-name.js';
 import { importPeer } from './peer.js';
 import type { ResolvedConvertLimits } from './types.js';
 
@@ -67,9 +68,7 @@ export async function withPdf<T>(
 
 /** The base of an attachment file name: leaf only, `.pdf` dropped, unsafe characters `_`; `document` when empty. */
 export function pdfBaseName(fileName: string | undefined): string {
-  const leaf = (fileName ?? '').split(/[/\\]/).pop() ?? '';
-  const base = leaf.replace(/\.pdf$/i, '').replace(/[:*?"<>|\u0000-\u001f\u007f]/g, '_').trim();
-  return base === '' ? 'document' : base;
+  return attachmentBaseName(fileName, /\.pdf$/i, 'document');
 }
 
 /** `page 3` or `pages 3–5`. */
