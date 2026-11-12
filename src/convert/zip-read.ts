@@ -114,6 +114,14 @@ function readCentralDirectory(bytes: Uint8Array): ZipEntryInfo[] {
  * anything is inflated when the declared sizes already break a cap.
  */
 export async function openZip(bytes: Uint8Array, limits?: ConvertLimits, signal?: AbortSignal): Promise<ZipReader> {
+  return (await open(bytes, limits, signal)).reader;
+}
+
+async function open(
+  bytes: Uint8Array,
+  limits: ConvertLimits | undefined,
+  signal: AbortSignal | undefined,
+): Promise<{ reader: ZipReader; inflateAll: () => Promise<void> }> {
   signal?.throwIfAborted();
   const totalCap = resolveConvertLimits(limits).maxUnzippedBytes;
   const entryCap = Math.min(ZIP_ENTRY_MAX_BYTES, totalCap);
@@ -125,18 +133,21 @@ export async function openZip(bytes: Uint8Array, limits?: ConvertLimits, signal?
     if (e.size > entryCap) throw tooLarge(`entry "${e.name}" declares ${mib(e.size)}, over the ${mib(entryCap)} per-entry cap`);
     declaredTotal += e.size;
     if (declaredTotal > totalCap) throw tooLarge(`entries declare more than the ${mib(totalCap)} total cap`);
-    // First entry wins on a duplicated name.
-    if (!byName.has(e.name)) byName.set(e.name, e);
+    // Libraries disagree on which copy of a duplicated name wins (JSZip, under
+    // exceljs, keeps the LAST), and undecodable name bytes all become U+FFFD
+    // here while JSZip decodes them as CP437 — so a collision would let a
+    // guarded copy stand in for an unguarded one. Office never writes either.
+    if (byName.has(e.name)) throw invalid(`duplicate entry name "${e.name}"`);
+    byName.set(e.name, e);
   }
 
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let inflatedTotal = 0;
-  const countedNames = new Set<string>();
+  const counted = new Set<ZipEntryInfo>();
 
-  const read = async (name: string): Promise<Uint8Array | undefined> => {
+  const readEntry = async (e: ZipEntryInfo): Promise<Uint8Array> => {
     signal?.throwIfAborted();
-    const e = byName.get(name);
-    if (!e) return undefined;
+    const name = e.name;
     const lh = e.localOffset;
     if (lh + 30 > bytes.length || view.getUint32(lh, true) !== SIG_LOCAL) throw invalid(`bad local header for "${name}"`);
     const start = lh + 30 + view.getUint16(lh + 26, true) + view.getUint16(lh + 28, true);
@@ -144,9 +155,9 @@ export async function openZip(bytes: Uint8Array, limits?: ConvertLimits, signal?
     if (end > bytes.length) throw invalid(`entry "${name}" runs past the end of the file`);
     const data = bytes.subarray(start, end);
     // An entry may not inflate past what it declared (already within the caps).
-    // Each distinct entry counts once toward the running actual total.
-    const counted = countedNames.has(name);
-    const cap = counted ? e.size : Math.min(e.size, totalCap - inflatedTotal);
+    // Each central-directory entry counts once toward the running actual total.
+    const seen = counted.has(e);
+    const cap = seen ? e.size : Math.min(e.size, totalCap - inflatedTotal);
     const overflow = (): McpToolError =>
       tooLarge(`entry "${name}" inflates past its declared ${e.size} bytes or the ${mib(totalCap)} total cap`);
 
@@ -186,14 +197,20 @@ export async function openZip(bytes: Uint8Array, limits?: ConvertLimits, signal?
         o += c.length;
       }
     }
-    if (!counted) {
-      countedNames.add(name);
+    if (!seen) {
+      counted.add(e);
       inflatedTotal += out.length;
     }
     return out;
   };
 
-  return {
+  const read = async (name: string): Promise<Uint8Array | undefined> => {
+    signal?.throwIfAborted();
+    const e = byName.get(name);
+    return e ? readEntry(e) : undefined;
+  };
+
+  const reader: ZipReader = {
     names: () => entries.map((e) => e.name),
     entry: (name) => byName.get(name),
     read,
@@ -203,17 +220,26 @@ export async function openZip(bytes: Uint8Array, limits?: ConvertLimits, signal?
       return new TextDecoder().decode(b).replace(/^﻿/, '');
     },
   };
+  // By central-directory entry, not by name: whatever a library resolves a
+  // name to, every entry it could inflate has been inflated here first.
+  const inflateAll = async (): Promise<void> => {
+    for (const e of entries) await readEntry(e);
+  };
+  return { reader, inflateAll };
 }
 
 /**
  * Inflate every entry of `bytes` under the same caps as {@link openZip}, for a
- * library (exceljs) that would otherwise inflate a zip bomb unguarded. Resolves
+ * library (exceljs) that would otherwise inflate a zip bomb unguarded.
+ *
+ * This doubles the inflate work on a good archive (the library inflates it all
+ * again), which is the price of guarding a library that cannot be bounded
+ * itself; a cheaper path would hand the library the already-inflated entries. Resolves
  * to the entry names when the archive is within limits; throws like
  * {@link ZipReader.read}.
  */
 export async function assertZipWithinLimits(bytes: Uint8Array, limits?: ConvertLimits, signal?: AbortSignal): Promise<string[]> {
-  const zip = await openZip(bytes, limits, signal);
-  const names = [...new Set(zip.names())];
-  for (const name of names) await zip.read(name);
-  return names;
+  const { reader, inflateAll } = await open(bytes, limits, signal);
+  await inflateAll();
+  return reader.names();
 }

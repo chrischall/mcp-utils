@@ -63,8 +63,20 @@ export function cellText(value: unknown, depth = 0): string {
   return '';
 }
 
-/** A worksheet as rows of field text, trailing empty rows/columns dropped. */
-function sheetRows(ws: Worksheet, signal?: AbortSignal): string[][] {
+/**
+ * A worksheet's non-empty cells, sparse. Rows are produced lazily by
+ * {@link denseRow}: a tiny file can place one cell at XFD1048576, and padding
+ * the whole rectangle up front would be ~17 billion fields.
+ */
+interface SparseSheet {
+  byRow: Map<number, string[]>;
+  /** Last row holding a non-empty cell (1-based); 0 when the sheet is empty. */
+  lastRow: number;
+  /** Last column holding a non-empty cell, across all rows. */
+  width: number;
+}
+
+function sparseSheet(ws: Worksheet, signal?: AbortSignal): SparseSheet {
   const byRow = new Map<number, string[]>();
   let lastRow = 0;
   let width = 0;
@@ -84,12 +96,15 @@ function sheetRows(ws: Worksheet, signal?: AbortSignal): string[][] {
     if (rowNumber > lastRow) lastRow = rowNumber;
     if (last > width) width = last;
   });
-  const rows: string[][] = [];
-  for (let r = 1; r <= lastRow; r++) {
-    const src = byRow.get(r) ?? [];
-    rows.push(Array.from({ length: width }, (_, i) => src[i] ?? ''));
-  }
-  return rows;
+  return { byRow, lastRow, width };
+}
+
+/** Row `r` (1-based) padded to the sheet's width. */
+function denseRow(sheet: SparseSheet, r: number): string[] {
+  const src = sheet.byRow.get(r);
+  const row = new Array<string>(sheet.width);
+  for (let i = 0; i < sheet.width; i++) row[i] = src?.[i] ?? '';
+  return row;
 }
 
 async function loadWorkbook(bytes: Uint8Array): Promise<Workbook> {
@@ -149,12 +164,16 @@ export async function convertXlsx(bytes: Uint8Array, limits?: ConvertLimits, sig
     }
     if (ws.state === 'hidden' || ws.state === 'veryHidden') notes.push(`sheet "${ws.name}" is hidden (included)`);
 
-    const rows = sheetRows(ws, signal);
+    // Rows are built one at a time and the loop stops when the text budget is
+    // spent, so the work is bounded by maxTextBytes (every row costs at least
+    // its CRLF), not by how far apart the sheet's cells are.
+    const sheet = sparseSheet(ws, signal);
     let text = '';
     let kept = 0;
     let truncated = false;
-    for (const row of rows) {
-      const line = csvRow(row);
+    for (let r = 1; r <= sheet.lastRow; r++) {
+      if (r % 1000 === 0) signal?.throwIfAborted();
+      const line = csvRow(denseRow(sheet, r));
       const size = Buffer.byteLength(line);
       if (size > budget) {
         truncated = true;
@@ -166,7 +185,7 @@ export async function convertXlsx(bytes: Uint8Array, limits?: ConvertLimits, sig
     }
     if (truncated) {
       // Nothing more fits; later sheets are reported by the budget check above.
-      notes.push(`sheet "${ws.name}": kept rows 1–${kept} of ${rows.length} (the ${lim.maxTextBytes}-byte text cap was reached)`);
+      notes.push(`sheet "${ws.name}": kept rows 1–${kept} of ${sheet.lastRow} (the ${lim.maxTextBytes}-byte text cap was reached)`);
       budget = 0;
     }
 

@@ -123,6 +123,22 @@ describe('convertXlsx', () => {
     expect((err as McpToolError).kind).toBe('too_large');
   });
 
+  it('stays cheap on a tiny workbook with one cell in a far corner', async () => {
+    const bytes = await book((wb) => {
+      const ws = wb.addWorksheet('Sparse');
+      ws.getCell('A1').value = 'a';
+      ws.getCell(1048576, 16384).value = 'z'; // XFD1048576
+    });
+    const t = Date.now();
+    const r = await convertXlsx(bytes, { maxTextBytes: 64 * 1024 });
+    expect(Date.now() - t).toBeLessThan(5000);
+    const part = r.parts[0];
+    expect(part?.truncated).toBe(true);
+    expect(Buffer.byteLength(text(part))).toBeLessThanOrEqual(64 * 1024);
+    expect(text(part).startsWith('a,')).toBe(true);
+    expect(r.notes.join('\n')).toMatch(/of 1048576/);
+  }, 20000);
+
   it('refuses input over maxInputBytes', async () => {
     const bytes = await book((wb) => {
       wb.addWorksheet('A').addRow(['a']);

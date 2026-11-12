@@ -1,4 +1,4 @@
-import { strToU8, zipSync } from 'fflate';
+import { deflateSync, strToU8, zipSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
 import { McpToolError } from '../errors/index.js';
 import { assertZipWithinLimits, openZip } from './zip-read.js';
@@ -12,6 +12,57 @@ function lieAboutSizes(zip: Uint8Array, declared: number): Uint8Array {
   for (let i = 0; i + 4 <= out.length; i++) {
     if (view.getUint32(i, true) === 0x02014b50) view.setUint32(i + 24, declared, true);
     if (view.getUint32(i, true) === 0x04034b50) view.setUint32(i + 22, declared, true);
+  }
+  return out;
+}
+
+/** Hand-build a DEFLATE zip, allowing duplicate names, raw name bytes and lying sizes. */
+function rawZip(entries: { name: string | Uint8Array; raw: Uint8Array; declare?: number }[]): Uint8Array {
+  const locals: Uint8Array[] = [];
+  const cds: Uint8Array[] = [];
+  let off = 0;
+  for (const e of entries) {
+    const name = typeof e.name === 'string' ? strToU8(e.name) : e.name;
+    const comp = deflateSync(e.raw);
+    const size = e.declare ?? e.raw.length;
+    const lh = new Uint8Array(30 + name.length + comp.length);
+    const lv = new DataView(lh.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true);
+    lv.setUint16(8, 8, true);
+    lv.setUint32(18, comp.length, true);
+    lv.setUint32(22, size, true);
+    lv.setUint16(26, name.length, true);
+    lh.set(name, 30);
+    lh.set(comp, 30 + name.length);
+    const cd = new Uint8Array(46 + name.length);
+    const cv = new DataView(cd.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint16(10, 8, true);
+    cv.setUint32(20, comp.length, true);
+    cv.setUint32(24, size, true);
+    cv.setUint16(28, name.length, true);
+    cv.setUint32(42, off, true);
+    cd.set(name, 46);
+    locals.push(lh);
+    cds.push(cd);
+    off += lh.length;
+  }
+  const cdLen = cds.reduce((a, b) => a + b.length, 0);
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(8, entries.length, true);
+  ev.setUint16(10, entries.length, true);
+  ev.setUint32(12, cdLen, true);
+  ev.setUint32(16, off, true);
+  const out = new Uint8Array(off + cdLen + 22);
+  let p = 0;
+  for (const x of [...locals, ...cds, eocd]) {
+    out.set(x, p);
+    p += x.length;
   }
   return out;
 }
@@ -93,6 +144,34 @@ describe('assertZipWithinLimits', () => {
 
   it('inflates every entry so a lying zip bomb is caught before a library loads it', async () => {
     const zip = lieAboutSizes(zipSync({ 'bomb.bin': new Uint8Array(8 * MiB) }), 10);
+    await expect(assertZipWithinLimits(zip, { maxUnzippedBytes: MiB })).rejects.toMatchObject({ kind: 'too_large' });
+  });
+
+  it('refuses a duplicated entry name (a library may inflate the copy the guard skipped)', async () => {
+    const zip = rawZip([
+      { name: 'docProps/custom.bin', raw: new Uint8Array(1) },
+      { name: 'docProps/custom.bin', raw: new Uint8Array(4 * MiB), declare: 1 },
+    ]);
+    const err = await assertZipWithinLimits(zip, { maxUnzippedBytes: MiB }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpToolError);
+    expect((err as Error).message).toMatch(/duplicate/i);
+  });
+
+  it('refuses names that only collide once undecodable bytes become U+FFFD', async () => {
+    const zip = rawZip([
+      { name: new Uint8Array([0x61, 0xff]), raw: new Uint8Array(1) },
+      { name: new Uint8Array([0x61, 0xfe]), raw: new Uint8Array(4 * MiB), declare: 1 },
+    ]);
+    await expect(assertZipWithinLimits(zip, { maxUnzippedBytes: MiB })).rejects.toBeInstanceOf(McpToolError);
+  });
+
+  it('inflates every central-directory entry, not just one per name', async () => {
+    // Two distinct names whose bytes differ, so no duplicate check applies;
+    // the second is a lying bomb that must still be inflated and caught.
+    const zip = rawZip([
+      { name: 'a.bin', raw: new Uint8Array(1) },
+      { name: 'b.bin', raw: new Uint8Array(4 * MiB), declare: 1 },
+    ]);
     await expect(assertZipWithinLimits(zip, { maxUnzippedBytes: MiB })).rejects.toMatchObject({ kind: 'too_large' });
   });
 });
