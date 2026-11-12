@@ -320,17 +320,27 @@ export async function repackZipWithinLimits(
   const files = entries.filter((e) => !e.name.endsWith('/')).map((e) => ({ e, name: encoder.encode(e.name) }));
   let capacity = 22;
   for (const f of files) capacity += 30 + 46 + 2 * f.name.length + f.e.size;
+  // The STORE archive has 16-bit name lengths and entry counts and 32-bit
+  // offsets. A name of invalid UTF-8 grows when re-encoded (each bad byte
+  // becomes a 3-byte U+FFFD), and a caller may raise maxUnzippedBytes past
+  // 4 GiB: refuse rather than let a field wrap into a corrupt archive.
+  const longName = files.find((f) => f.name.length > 0xffff);
+  if (longName) throw invalid(`entry name of ${longName.name.length} bytes is too long to repack`);
+  if (files.length > 0xffff) throw tooLarge(`${files.length} entries are too many to repack`);
+  if (capacity > 0xffffffff) throw tooLarge(`the repacked workbook would be ${mib(capacity)}, past the 4 GiB a zip without zip64 can address`);
   const out = new Uint8Array(capacity);
   const view = new DataView(out.buffer);
 
   const written: { name: Uint8Array; crc: number; size: number; offset: number }[] = [];
   let p = 0;
+  const encodedName = new Map(files.map((f) => [f.e, f.name]));
   for (const e of entries) {
-    if (e.name.endsWith('/')) {
+    const name = encodedName.get(e);
+    if (name === undefined) {
+      // A directory entry: inflated and counted, not written.
       await inflateTo(e, () => undefined);
       continue;
     }
-    const name = encoder.encode(e.name);
     const dataStart = p + 30 + name.length;
     let q = dataStart;
     await inflateTo(e, (chunk) => {

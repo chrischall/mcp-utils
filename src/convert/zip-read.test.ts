@@ -139,6 +139,22 @@ describe('central-directory parsing agrees with other zip readers', () => {
 });
 
 describe('repackZipWithinLimits', () => {
+  it('refuses a name that no longer fits a 16-bit length once re-encoded, rather than writing a corrupt archive', async () => {
+    // 30 000 invalid UTF-8 bytes decode to U+FFFD each, which re-encodes as 3 bytes: ~90 000 > 0xFFFF.
+    const long = 'a'.repeat(30_000);
+    const zip = zipSync({ [long]: new Uint8Array([1, 2, 3]) });
+    const needle = new TextEncoder().encode(long);
+    for (let i = 0; i + needle.length <= zip.length; i++) {
+      if (zip[i] === 0x61 && zip[i + needle.length - 1] === 0x61 && zip.subarray(i, i + needle.length).every((b) => b === 0x61)) {
+        zip.fill(0xff, i, i + needle.length);
+        i += needle.length - 1;
+      }
+    }
+    const err = await repackZipWithinLimits(zip).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpToolError);
+    expect((err as McpToolError).message).toMatch(/name/i);
+  });
+
   it('rebuilds the archive from exactly the entries it inflated', async () => {
     const src = zipSync({ 'a.txt': strToU8('hello'), 'dir/b.txt': strToU8('world') });
     const { names, bytes } = await repackZipWithinLimits(src);
