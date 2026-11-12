@@ -20,11 +20,14 @@
  * through the bounded zip reader first and exceljs is handed a fresh archive
  * rebuilt from the entries it inflated (see `repackZipWithinLimits`).
  *
- * Memory: exceljs builds the whole workbook model, and every non-empty cell is
- * kept until its sheet is written, so peak heap scales with the inflated XML
- * (up to `maxUnzippedBytes`, 200 MiB by default) — a hostile workbook within
- * that cap can still cost several GB. Lower `maxUnzippedBytes` where that
- * matters; the CSV output itself is bounded by `maxTextBytes`.
+ * Memory: the repacked archive holds the inflated entries once (up to
+ * `maxUnzippedBytes`, 200 MiB by default — entries are inflated straight into
+ * it, never also kept as a second copy) and stays alive while exceljs loads
+ * it; exceljs then builds the whole workbook model, and every non-empty cell
+ * is kept until its sheet is written. So peak heap is that archive plus
+ * exceljs's model, both scaling with the inflated XML — a hostile workbook
+ * within the cap can still cost several GB. Lower `maxUnzippedBytes` where
+ * that matters; the CSV output itself is bounded by `maxTextBytes`.
  */
 
 import type { Workbook, Worksheet } from 'exceljs';

@@ -15,6 +15,7 @@
  */
 
 import { McpToolError } from '../errors/index.js';
+import { crc32 } from '../export/zip.js';
 import { importPeer } from './peer.js';
 import { resolveConvertLimits, ZIP_ENTRY_MAX_BYTES, type ConvertLimits } from './types.js';
 
@@ -134,7 +135,12 @@ async function open(
   bytes: Uint8Array,
   limits: ConvertLimits | undefined,
   signal: AbortSignal | undefined,
-): Promise<{ reader: ZipReader; inflateAll: () => Promise<void> }> {
+): Promise<{
+  reader: ZipReader;
+  entries: ZipEntryInfo[];
+  inflateAll: () => Promise<void>;
+  inflateTo: (e: ZipEntryInfo, sink: (chunk: Uint8Array) => void) => Promise<number>;
+}> {
   signal?.throwIfAborted();
   const totalCap = resolveConvertLimits(limits).maxUnzippedBytes;
   const entryCap = Math.min(ZIP_ENTRY_MAX_BYTES, totalCap);
@@ -166,7 +172,7 @@ async function open(
   const readEntry = (e: ZipEntryInfo): Promise<Uint8Array> => {
     let p = inflated.get(e);
     if (!p) {
-      p = inflateEntry(e);
+      p = inflateToArray(e);
       inflated.set(e, p);
       // A failed read is not cached: the caller sees the error, and a retry fails the same way.
       p.catch(() => inflated.delete(e));
@@ -174,7 +180,12 @@ async function open(
     return p;
   };
 
-  const inflateEntry = async (e: ZipEntryInfo): Promise<Uint8Array> => {
+  /**
+   * Inflate `e` under the caps, handing each piece of output to `sink` as it
+   * is produced (a piece may be a view of the input: copy it before keeping
+   * it past the call). Resolves to the inflated length.
+   */
+  const inflateTo = async (e: ZipEntryInfo, sink: (chunk: Uint8Array) => void): Promise<number> => {
     signal?.throwIfAborted();
     const name = e.name;
     const lh = e.localOffset;
@@ -190,14 +201,13 @@ async function open(
     const overflow = (): McpToolError =>
       tooLarge(`entry "${name}" inflates past its declared ${e.size} bytes or the ${mib(totalCap)} total cap`);
 
-    let out: Uint8Array;
+    let got = 0;
     if (e.method === 0) {
       if (data.length > cap) throw overflow();
-      out = data.slice();
+      sink(data);
+      got = data.length;
     } else {
       const { Inflate } = await importPeer('fflate', () => import('fflate'));
-      const chunks: Uint8Array[] = [];
-      let got = 0;
       let over = false;
       const inflater = new Inflate((chunk) => {
         got += chunk.length;
@@ -205,7 +215,7 @@ async function open(
           over = true;
           throw overflow();
         }
-        chunks.push(chunk);
+        sink(chunk);
       });
       try {
         for (let i = 0; i < data.length; i += INFLATE_CHUNK) {
@@ -219,16 +229,22 @@ async function open(
         if (err instanceof McpToolError || signal?.aborted) throw err;
         throw invalid(`entry "${name}" is corrupt (${err instanceof Error ? err.message : String(err)})`);
       }
-      out = new Uint8Array(got);
-      let o = 0;
-      for (const c of chunks) {
-        out.set(c, o);
-        o += c.length;
-      }
     }
     if (!seen) {
       counted.add(e);
-      inflatedTotal += out.length;
+      inflatedTotal += got;
+    }
+    return got;
+  };
+
+  const inflateToArray = async (e: ZipEntryInfo): Promise<Uint8Array> => {
+    const chunks: Uint8Array[] = [];
+    const length = await inflateTo(e, (chunk) => chunks.push(chunk));
+    const out = new Uint8Array(length);
+    let o = 0;
+    for (const c of chunks) {
+      out.set(c, o);
+      o += c.length;
     }
     return out;
   };
@@ -254,7 +270,7 @@ async function open(
   const inflateAll = async (): Promise<void> => {
     for (const e of entries) await readEntry(e);
   };
-  return { reader, inflateAll };
+  return { reader, entries, inflateAll, inflateTo };
 }
 
 /**
@@ -272,6 +288,11 @@ export async function assertZipWithinLimits(bytes: Uint8Array, limits?: ConvertL
   return reader.names();
 }
 
+/** DOS date 1980-01-01 (the format's epoch), stamped on every repacked entry. */
+const DOS_EPOCH_DATE = (1 << 5) | 1;
+const FLAG_UTF8 = 0x0800;
+const VERSION = 20;
+
 /**
  * Inflate every entry of `bytes` under the same caps as {@link openZip} and
  * rebuild a fresh, uncompressed (STORE) archive from exactly those entries,
@@ -280,7 +301,13 @@ export async function assertZipWithinLimits(bytes: Uint8Array, limits?: ConvertL
  * no quirk of its zip parser can reach an entry the guard skipped, and the
  * archive is inflated once rather than twice.
  *
- * Directory entries (a name ending in `/`) are dropped. Throws like
+ * Memory: each entry is inflated straight into one output buffer sized from
+ * the declared sizes (which the reader never lets an entry exceed), and no
+ * other copy is kept, so the repack peaks at about the inflated total — at
+ * most `maxUnzippedBytes` — plus the input.
+ *
+ * Directory entries (a name ending in `/`) are inflated and counted but not
+ * written. Names are written as UTF-8 (general-purpose bit 11). Throws like
  * {@link ZipReader.read}.
  */
 export async function repackZipWithinLimits(
@@ -288,15 +315,64 @@ export async function repackZipWithinLimits(
   limits?: ConvertLimits,
   signal?: AbortSignal,
 ): Promise<{ names: string[]; bytes: Uint8Array }> {
-  const { reader } = await open(bytes, limits, signal);
-  const names = reader.names();
-  const files: Record<string, Uint8Array> = {};
-  for (const name of names) {
-    const data = await reader.read(name);
-    if (name.endsWith('/') || data === undefined) continue;
-    files[name] = data;
+  const { entries, inflateTo } = await open(bytes, limits, signal);
+  const encoder = new TextEncoder();
+  const files = entries.filter((e) => !e.name.endsWith('/')).map((e) => ({ e, name: encoder.encode(e.name) }));
+  let capacity = 22;
+  for (const f of files) capacity += 30 + 46 + 2 * f.name.length + f.e.size;
+  const out = new Uint8Array(capacity);
+  const view = new DataView(out.buffer);
+
+  const written: { name: Uint8Array; crc: number; size: number; offset: number }[] = [];
+  let p = 0;
+  for (const e of entries) {
+    if (e.name.endsWith('/')) {
+      await inflateTo(e, () => undefined);
+      continue;
+    }
+    const name = encoder.encode(e.name);
+    const dataStart = p + 30 + name.length;
+    let q = dataStart;
+    await inflateTo(e, (chunk) => {
+      out.set(chunk, q);
+      q += chunk.length;
+    });
+    const size = q - dataStart;
+    const crc = crc32(out.subarray(dataStart, q));
+    view.setUint32(p, SIG_LOCAL, true);
+    view.setUint16(p + 4, VERSION, true);
+    view.setUint16(p + 6, FLAG_UTF8, true);
+    view.setUint16(p + 12, DOS_EPOCH_DATE, true);
+    view.setUint32(p + 14, crc, true);
+    view.setUint32(p + 18, size, true);
+    view.setUint32(p + 22, size, true);
+    view.setUint16(p + 26, name.length, true);
+    out.set(name, p + 30);
+    written.push({ name, crc, size, offset: p });
+    p = q;
   }
   signal?.throwIfAborted();
-  const { zipSync } = await importPeer('fflate', () => import('fflate'));
-  return { names, bytes: zipSync(files, { level: 0 }) };
+
+  const cdOffset = p;
+  for (const w of written) {
+    view.setUint32(p, SIG_CENTRAL, true);
+    view.setUint16(p + 4, VERSION, true); // version made by
+    view.setUint16(p + 6, VERSION, true); // version needed
+    view.setUint16(p + 8, FLAG_UTF8, true);
+    view.setUint16(p + 14, DOS_EPOCH_DATE, true);
+    view.setUint32(p + 16, w.crc, true);
+    view.setUint32(p + 20, w.size, true);
+    view.setUint32(p + 24, w.size, true);
+    view.setUint16(p + 28, w.name.length, true);
+    view.setUint32(p + 42, w.offset, true);
+    out.set(w.name, p + 46);
+    p += 46 + w.name.length;
+  }
+  view.setUint32(p, SIG_EOCD, true);
+  view.setUint16(p + 8, written.length, true);
+  view.setUint16(p + 10, written.length, true);
+  view.setUint32(p + 12, p - cdOffset, true);
+  view.setUint32(p + 16, cdOffset, true);
+  p += 22;
+  return { names: entries.map((e) => e.name), bytes: out.subarray(0, p) };
 }

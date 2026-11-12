@@ -1,6 +1,7 @@
 import { deflateSync, strToU8, unzipSync, zipSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
 import { McpToolError } from '../errors/index.js';
+import { crc32 } from '../export/zip.js';
 import { assertZipWithinLimits, openZip, repackZipWithinLimits } from './zip-read.js';
 
 const MiB = 1024 * 1024;
@@ -151,6 +152,44 @@ describe('repackZipWithinLimits', () => {
   it('refuses a lying zip bomb', async () => {
     const zip = lieAboutSizes(zipSync({ 'bomb.bin': new Uint8Array(8 * MiB) }), 10);
     await expect(repackZipWithinLimits(zip, { maxUnzippedBytes: MiB })).rejects.toMatchObject({ kind: 'too_large' });
+  });
+
+  it('writes STORE entries with their real sizes and CRC-32, names flagged UTF-8, directories dropped', async () => {
+    const files = { 'xl/workbook.xml': strToU8('<workbook/>'.repeat(50)), 'Données €.xml': strToU8('é'), 'empty.txt': new Uint8Array(0) };
+    const src = zipSync({ ...files, 'folder/': new Uint8Array(0) });
+    const { names, bytes } = await repackZipWithinLimits(src);
+    expect(names).toEqual(['xl/workbook.xml', 'Données €.xml', 'empty.txt', 'folder/']);
+
+    const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const e = bytes.length - 22;
+    expect(v.getUint32(e, true)).toBe(0x06054b50);
+    expect(v.getUint16(e + 10, true)).toBe(3);
+    let p = v.getUint32(e + 16, true);
+    const seen: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      expect(v.getUint32(p, true)).toBe(0x02014b50);
+      const nameLen = v.getUint16(p + 28, true);
+      const name = new TextDecoder().decode(bytes.subarray(p + 46, p + 46 + nameLen));
+      const content = files[name as keyof typeof files];
+      expect(v.getUint16(p + 8, true) & 0x800).toBe(0x800);
+      expect(v.getUint16(p + 10, true)).toBe(0); // STORE
+      expect(v.getUint32(p + 16, true)).toBe(crc32(content));
+      expect(v.getUint32(p + 20, true)).toBe(content.length);
+      expect(v.getUint32(p + 24, true)).toBe(content.length);
+      const lh = v.getUint32(p + 42, true);
+      expect(v.getUint32(lh, true)).toBe(0x04034b50);
+      expect(v.getUint32(lh + 14, true)).toBe(crc32(content));
+      const start = lh + 30 + v.getUint16(lh + 26, true) + v.getUint16(lh + 28, true);
+      expect(bytes.subarray(start, start + content.length)).toEqual(content);
+      seen.push(name);
+      p += 46 + nameLen + v.getUint16(p + 30, true) + v.getUint16(p + 32, true);
+    }
+    expect(seen).toEqual(['xl/workbook.xml', 'Données €.xml', 'empty.txt']);
+    expect(p).toBe(e);
+  });
+
+  it('honours an aborted signal', async () => {
+    await expect(repackZipWithinLimits(zipSync({ 'a.txt': strToU8('a') }), {}, AbortSignal.abort())).rejects.toThrow();
   });
 });
 
