@@ -17,7 +17,14 @@
  *    and the rows kept).
  *
  * exceljs inflates the whole archive without any size guard, so the bytes go
- * through the bounded zip reader's checks first.
+ * through the bounded zip reader first and exceljs is handed a fresh archive
+ * rebuilt from the entries it inflated (see `repackZipWithinLimits`).
+ *
+ * Memory: exceljs builds the whole workbook model, and every non-empty cell is
+ * kept until its sheet is written, so peak heap scales with the inflated XML
+ * (up to `maxUnzippedBytes`, 200 MiB by default) — a hostile workbook within
+ * that cap can still cost several GB. Lower `maxUnzippedBytes` where that
+ * matters; the CSV output itself is bounded by `maxTextBytes`.
  */
 
 import type { Workbook, Worksheet } from 'exceljs';
@@ -25,7 +32,7 @@ import { McpToolError } from '../errors/index.js';
 import { csvRow } from './csv.js';
 import { importPeer } from './peer.js';
 import { resolveConvertLimits, type ConvertLimits, type ConvertResult, type ConvertedPart } from './types.js';
-import { assertZipWithinLimits } from './zip-read.js';
+import { repackZipWithinLimits } from './zip-read.js';
 
 /** `<sheet name>.csv`, with `/\:*?"<>|` and control characters replaced by `_`. */
 export function sheetFileName(sheetName: string): string {
@@ -136,15 +143,19 @@ export async function convertXlsx(bytes: Uint8Array, limits?: ConvertLimits, sig
       kind: 'too_large',
     });
   }
-  const entries = await assertZipWithinLimits(bytes, lim, signal);
+  // exceljs loads the REPACKED archive: only entries the bounded reader has
+  // already inflated and counted, so its own zip parser cannot be steered to
+  // anything the guard did not see.
+  const { names, bytes: repacked } = await repackZipWithinLimits(bytes, lim, signal);
   // exceljs "loads" any zip as an empty workbook; say what is wrong instead.
-  if (!entries.includes('xl/workbook.xml')) {
+  // (It strips one leading '/' from entry names, so '/xl/workbook.xml' counts.)
+  if (!names.some((n) => n.replace(/^\//, '') === 'xl/workbook.xml')) {
     throw new McpToolError('Could not read the workbook: the archive has no xl/workbook.xml (not an .xlsx/.xlsm file).', {
       kind: 'unknown',
     });
   }
   signal?.throwIfAborted();
-  const wb = await loadWorkbook(bytes);
+  const wb = await loadWorkbook(repacked);
 
   const sheets = wb.worksheets;
   const parts: ConvertedPart[] = [];

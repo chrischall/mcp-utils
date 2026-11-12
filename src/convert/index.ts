@@ -20,5 +20,5 @@
 
 export * from './types.js';
 export { csvField, csvRow, toCsv } from './csv.js';
-export { assertZipWithinLimits, openZip, type ZipEntryInfo, type ZipReader } from './zip-read.js';
+export { assertZipWithinLimits, openZip, repackZipWithinLimits, type ZipEntryInfo, type ZipReader } from './zip-read.js';
 export { cellText, convertXlsx, sheetFileName } from './xlsx.js';

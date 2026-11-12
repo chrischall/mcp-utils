@@ -1,5 +1,5 @@
 import ExcelJS from 'exceljs';
-import { zipSync } from 'fflate';
+import { unzipSync, zipSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
 import { McpToolError } from '../errors/index.js';
 import type { ConvertedPart } from './types.js';
@@ -164,5 +164,25 @@ describe('convertXlsx', () => {
 describe('sheetFileName', () => {
   it('replaces characters unsafe in file names', () => {
     expect(sheetFileName('a/b\\c:d*e?f"g<h>i|j')).toBe('a_b_c_d_e_f_g_h_i_j.csv');
+  });
+});
+
+describe('convertXlsx archive handling', () => {
+  it('refuses a workbook whose EOCD hides a zip bomb behind an understated entry count', async () => {
+    const files = unzipSync(await book((wb) => wb.addWorksheet('A').addRow(['a'])));
+    const z = zipSync({ ...files, 'zz/bomb.bin': new Uint8Array(8 * 1024 * 1024) });
+    const v = new DataView(z.buffer);
+    const e = z.length - 22;
+    const n = v.getUint16(e + 10, true);
+    v.setUint16(e + 8, n - 1, true);
+    v.setUint16(e + 10, n - 1, true);
+    await expect(convertXlsx(z, { maxUnzippedBytes: 1024 * 1024 })).rejects.toBeInstanceOf(McpToolError);
+  });
+
+  it('reads a workbook whose entry names carry a leading slash', async () => {
+    const files = unzipSync(await book((wb) => wb.addWorksheet('S').addRow(['x', 'y'])));
+    const slashed = Object.fromEntries(Object.entries(files).map(([k, v]) => [`/${k}`, v]));
+    const r = await convertXlsx(zipSync(slashed));
+    expect(text(r.parts[0])).toBe('x,y\r\n');
   });
 });

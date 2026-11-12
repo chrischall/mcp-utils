@@ -1,7 +1,7 @@
-import { deflateSync, strToU8, zipSync } from 'fflate';
+import { deflateSync, strToU8, unzipSync, zipSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
 import { McpToolError } from '../errors/index.js';
-import { assertZipWithinLimits, openZip } from './zip-read.js';
+import { assertZipWithinLimits, openZip, repackZipWithinLimits } from './zip-read.js';
 
 const MiB = 1024 * 1024;
 
@@ -66,6 +66,93 @@ function rawZip(entries: { name: string | Uint8Array; raw: Uint8Array; declare?:
   }
   return out;
 }
+
+/** Offset of the end-of-central-directory record (no archive comment). */
+function eocdAt(zip: Uint8Array): number {
+  return zip.length - 22;
+}
+
+/** The archive with its EOCD claiming one entry fewer than its central directory holds. */
+function understateCount(zip: Uint8Array): Uint8Array {
+  const out = zip.slice();
+  const v = new DataView(out.buffer);
+  const e = eocdAt(out);
+  const n = v.getUint16(e + 10, true);
+  v.setUint16(e + 8, n - 1, true);
+  v.setUint16(e + 10, n - 1, true);
+  return out;
+}
+
+/** The archive with `junk` bytes between the central directory and the EOCD. */
+function gapBeforeEocd(zip: Uint8Array, junk: number): Uint8Array {
+  const e = eocdAt(zip);
+  const out = new Uint8Array(zip.length + junk);
+  out.set(zip.subarray(0, e), 0);
+  out.set(zip.subarray(e), e + junk);
+  return out;
+}
+
+describe('central-directory parsing agrees with other zip readers', () => {
+  // JSZip (under exceljs) reads central-directory records while the signature
+  // matches, takes its zip64 path on any 0xFFFF EOCD field, and shifts every
+  // offset by a gap before the EOCD. Each shape would let it see entries the
+  // guard never inflated, so each is refused.
+  const bombed = (): Uint8Array =>
+    rawZip([
+      { name: 'a.txt', raw: strToU8('x') },
+      { name: 'zz/bomb.bin', raw: new Uint8Array(8 * MiB) },
+    ]);
+
+  it('refuses an EOCD that understates the entry count', async () => {
+    const zip = understateCount(bombed());
+    const err = await assertZipWithinLimits(zip, { maxUnzippedBytes: MiB }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpToolError);
+    expect((err as Error).message).toMatch(/central directory/i);
+    await expect(openZip(zip, { maxUnzippedBytes: MiB })).rejects.toBeInstanceOf(McpToolError);
+  });
+
+  for (const [field, off] of [
+    ['disk number', 4],
+    ['central-directory start disk', 6],
+    ['entries on this disk', 8],
+  ] as const) {
+    it(`refuses a 0xFFFF ${field} field (a zip64 marker)`, async () => {
+      const zip = rawZip([{ name: 'a.txt', raw: strToU8('x') }]);
+      new DataView(zip.buffer).setUint16(eocdAt(zip) + off, 0xffff, true);
+      await expect(openZip(zip)).rejects.toBeInstanceOf(McpToolError);
+    });
+  }
+
+  it('refuses a multi-disk archive', async () => {
+    const zip = rawZip([{ name: 'a.txt', raw: strToU8('x') }]);
+    new DataView(zip.buffer).setUint16(eocdAt(zip) + 4, 1, true);
+    await expect(openZip(zip)).rejects.toBeInstanceOf(McpToolError);
+  });
+
+  it('refuses a gap between the central directory and the EOCD', async () => {
+    const zip = gapBeforeEocd(rawZip([{ name: 'a.txt', raw: strToU8('x') }]), 16);
+    const err = await openZip(zip).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpToolError);
+    expect((err as Error).message).toMatch(/central directory/i);
+  });
+});
+
+describe('repackZipWithinLimits', () => {
+  it('rebuilds the archive from exactly the entries it inflated', async () => {
+    const src = zipSync({ 'a.txt': strToU8('hello'), 'dir/b.txt': strToU8('world') });
+    const { names, bytes } = await repackZipWithinLimits(src);
+    expect(names).toEqual(['a.txt', 'dir/b.txt']);
+    const back = unzipSync(bytes);
+    expect(Object.keys(back).sort()).toEqual(['a.txt', 'dir/b.txt']);
+    expect(new TextDecoder().decode(back['a.txt'])).toBe('hello');
+    expect(new TextDecoder().decode(back['dir/b.txt'])).toBe('world');
+  });
+
+  it('refuses a lying zip bomb', async () => {
+    const zip = lieAboutSizes(zipSync({ 'bomb.bin': new Uint8Array(8 * MiB) }), 10);
+    await expect(repackZipWithinLimits(zip, { maxUnzippedBytes: MiB })).rejects.toMatchObject({ kind: 'too_large' });
+  });
+});
 
 describe('openZip', () => {
   it('lists entries and reads them on demand', async () => {

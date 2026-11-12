@@ -75,11 +75,21 @@ function readCentralDirectory(bytes: Uint8Array): ZipEntryInfo[] {
     }
   }
   if (eocd < 0) throw invalid('no end-of-central-directory record');
+  const disk = view.getUint16(eocd + 4, true);
+  const cdDisk = view.getUint16(eocd + 6, true);
+  const countOnDisk = view.getUint16(eocd + 8, true);
   const count = view.getUint16(eocd + 10, true);
   const cdSize = view.getUint32(eocd + 12, true);
   const cdOffset = view.getUint32(eocd + 16, true);
-  if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) throw invalid('zip64 archives are not supported');
-  if (cdOffset + cdSize > eocd) throw invalid('central directory out of bounds');
+  // The guard must read the SAME central directory as the library it guards.
+  // JSZip (under exceljs) takes a zip64 path when ANY of these fields is
+  // all-ones, and shifts every offset by a gap between the central directory
+  // and the EOCD ("prepended data"); so both are refused, as is a split archive.
+  if ([disk, cdDisk, countOnDisk, count].includes(0xffff) || cdSize === 0xffffffff || cdOffset === 0xffffffff) {
+    throw invalid('zip64 archives are not supported');
+  }
+  if (disk !== 0 || cdDisk !== 0 || countOnDisk !== count) throw invalid('multi-disk archives are not supported');
+  if (cdOffset + cdSize !== eocd) throw invalid('the central directory does not end at the end-of-central-directory record');
 
   const decoder = new TextDecoder();
   const entries: ZipEntryInfo[] = [];
@@ -104,6 +114,9 @@ function readCentralDirectory(bytes: Uint8Array): ZipEntryInfo[] {
     entries.push({ name, method, compressedSize, size, localOffset });
     p += 46 + nameLen + extraLen + commentLen;
   }
+  // JSZip keeps reading records while the signature matches, whatever the
+  // count says; an understated count would hide entries from the guard.
+  if (p !== eocd) throw invalid('the central directory holds more than the entry count it declares');
   return entries;
 }
 
@@ -229,17 +242,45 @@ async function open(
 }
 
 /**
- * Inflate every entry of `bytes` under the same caps as {@link openZip}, for a
- * library (exceljs) that would otherwise inflate a zip bomb unguarded.
- *
- * This doubles the inflate work on a good archive (the library inflates it all
- * again), which is the price of guarding a library that cannot be bounded
- * itself; a cheaper path would hand the library the already-inflated entries. Resolves
- * to the entry names when the archive is within limits; throws like
+ * Inflate every entry of `bytes` under the same caps as {@link openZip}.
+ * Resolves to the entry names when the archive is within limits; throws like
  * {@link ZipReader.read}.
+ *
+ * Passing the ORIGINAL bytes on to another zip library afterwards is only as
+ * safe as that library's parser agreeing with this one; prefer
+ * {@link repackZipWithinLimits}, which hands it nothing it did not check.
  */
 export async function assertZipWithinLimits(bytes: Uint8Array, limits?: ConvertLimits, signal?: AbortSignal): Promise<string[]> {
   const { reader, inflateAll } = await open(bytes, limits, signal);
   await inflateAll();
   return reader.names();
+}
+
+/**
+ * Inflate every entry of `bytes` under the same caps as {@link openZip} and
+ * rebuild a fresh, uncompressed (STORE) archive from exactly those entries,
+ * for a library (exceljs) that cannot bound its own inflation. The library
+ * then parses only content this reader has already inflated and counted, so
+ * no quirk of its zip parser can reach an entry the guard skipped, and the
+ * archive is inflated once rather than twice.
+ *
+ * Directory entries (a name ending in `/`) are dropped. Throws like
+ * {@link ZipReader.read}.
+ */
+export async function repackZipWithinLimits(
+  bytes: Uint8Array,
+  limits?: ConvertLimits,
+  signal?: AbortSignal,
+): Promise<{ names: string[]; bytes: Uint8Array }> {
+  const { reader } = await open(bytes, limits, signal);
+  const names = reader.names();
+  const files: Record<string, Uint8Array> = {};
+  for (const name of names) {
+    const data = await reader.read(name);
+    if (name.endsWith('/') || data === undefined) continue;
+    files[name] = data;
+  }
+  signal?.throwIfAborted();
+  const { zipSync } = await importPeer('fflate', () => import('fflate'));
+  return { names, bytes: zipSync(files, { level: 0 }) };
 }
