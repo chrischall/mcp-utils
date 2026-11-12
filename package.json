@@ -55,6 +55,10 @@
     "./rich": {
       "import": "./dist/rich/index.js",
       "types": "./dist/rich/index.d.ts"
+    },
+    "./convert": {
+      "import": "./dist/convert/index.js",
+      "types": "./dist/convert/index.d.ts"
     }
   },
   "files": [
@@ -76,9 +80,14 @@
     "@fetchproxy/server": "^3.2.0",
     "@modelcontextprotocol/client": "^2.4.0",
     "@modelcontextprotocol/server": "^2.4.0",
+    "@napi-rs/canvas": "^1.1.1",
     "dotenv": ">=16.0.0",
+    "exceljs": "^4.4.0",
+    "fast-xml-parser": "^5.12.0",
+    "fflate": "^0.8.3",
     "node-html-parser": "^9.0.0",
     "undici": "^7.0.0 || ^8.0.0",
+    "unpdf": "^2.1.0",
     "vitest": "^4.1.0 || ^5.0.0",
     "zod": "^4.6.7"
   },
@@ -92,13 +101,28 @@
     "@modelcontextprotocol/client": {
       "optional": true
     },
+    "@napi-rs/canvas": {
+      "optional": true
+    },
     "dotenv": {
+      "optional": true
+    },
+    "exceljs": {
+      "optional": true
+    },
+    "fast-xml-parser": {
+      "optional": true
+    },
+    "fflate": {
       "optional": true
     },
     "node-html-parser": {
       "optional": true
     },
     "undici": {
+      "optional": true
+    },
+    "unpdf": {
       "optional": true
     },
     "vitest": {
@@ -109,11 +133,16 @@
     "@fetchproxy/server": "^3.6.3",
     "@modelcontextprotocol/client": "^2.4.0",
     "@modelcontextprotocol/server": "^2.4.0",
+    "@napi-rs/canvas": "^1.1.1",
     "@types/node": "^26.6.6",
     "@vitest/coverage-v8": "^5.1.0",
+    "exceljs": "^4.4.0",
+    "fast-xml-parser": "^5.12.0",
+    "fflate": "^0.8.3",
     "node-html-parser": "^9.0.7",
     "typescript": "^7.0.2",
     "undici": "^8.12.4",
+    "unpdf": "^2.1.0",
     "vitest": "^5.0.0",
     "zod": "^4.6.7"
   },

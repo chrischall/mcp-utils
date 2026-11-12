@@ -12,6 +12,7 @@
  *   - `@chrischall/mcp-utils/fetchproxy`  fetchproxy transport adapter
  *   - `@chrischall/mcp-utils/html`        opt-in HTML scraping helpers
  *   - `@chrischall/mcp-utils/test`        in-memory test harness
+ *   - `@chrischall/mcp-utils/convert`     attachments → model-readable content
  */
 
 export * from './cancel/index.js';

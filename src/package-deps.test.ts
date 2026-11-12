@@ -49,3 +49,35 @@ describe('declared dependencies', () => {
     expect([...missing]).toEqual([]);
   });
 });
+
+/** Relative module specifiers a source file imports or re-exports (static and dynamic). */
+function relativeImports(file: string): string[] {
+  const text = readFileSync(file, 'utf8');
+  const re = /^\s*(?:import|export)\b[^;'"]*?\bfrom\s+['"]([^'"]+)['"]|^\s*import\s+['"]([^'"]+)['"]|\bimport\s*\(\s*(?:\/\*[^*]*\*\/\s*)?['"]([^'"]+)['"]/gm;
+  return [...text.matchAll(re)].map((m) => (m[1] ?? m[2] ?? m[3])!);
+}
+
+describe('core barrel isolation', () => {
+  it('never reaches src/convert or its optional peers from src/index.ts', () => {
+    const convertPeers = new Set(['unpdf', 'exceljs', 'fflate', 'fast-xml-parser', '@napi-rs/canvas']);
+    const convertDir = join(root, 'src', 'convert');
+    const seen = new Set<string>();
+    const offenders: string[] = [];
+    const queue = [join(root, 'src', 'index.ts')];
+    while (queue.length > 0) {
+      const file = queue.pop()!;
+      if (seen.has(file)) continue;
+      seen.add(file);
+      if (file.startsWith(convertDir)) offenders.push(file.slice(root.length + 1));
+      for (const spec of relativeImports(file)) {
+        if (spec.startsWith('.')) {
+          queue.push(join(file, '..', spec.replace(/\.js$/, '.ts')));
+        } else if (convertPeers.has(packageName(spec))) {
+          offenders.push(`${spec} (${file.slice(root.length + 1)})`);
+        }
+      }
+    }
+    expect(seen.size).toBeGreaterThan(10);
+    expect(offenders).toEqual([]);
+  });
+});
