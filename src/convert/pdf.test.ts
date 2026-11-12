@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { McpToolError } from '../errors/index.js';
 import { makePdf } from './make-pdf.fixture.js';
-import { convertPdf, extractPdfText, isTextSparse, PDF_SPARSE_CHARS_PER_PAGE } from './pdf.js';
+import { convertPdf, extractPdfText, isTextSparse, joinTextItems, PDF_SPARSE_CHARS_PER_PAGE } from './pdf.js';
 import type { ConvertedPart } from './types.js';
 
 function text(part: ConvertedPart | undefined): string {
@@ -21,9 +21,7 @@ const para = (n: number, seed = 'word') => {
 describe('extractPdfText', () => {
   it('returns one string per page, lines joined by y-position', async () => {
     const bytes = makePdf(['Hello world\nSecond line', 'Page two']);
-    const r = await extractPdfText(bytes);
-    expect(r.pageCount).toBe(2);
-    expect(r.pages).toEqual(['Hello world\nSecond line', 'Page two']);
+    expect(await extractPdfText(bytes)).toEqual({ pageCount: 2, pages: ['Hello world\nSecond line', 'Page two'] });
   });
 
   it('keeps a blank line between paragraphs and collapses runs of spaces', async () => {
@@ -125,14 +123,36 @@ describe('convertPdf', () => {
     expect(r.notes.some((n) => n.includes('page 2 not included'))).toBe(true);
   });
 
-  it('cuts at a page boundary when the next page does not fit at all', async () => {
+  it('cuts at a page boundary when not even the next page heading fits', async () => {
     const bytes = makePdf([para(10, 'a'), para(200, 'b'), para(10, 'c')]);
     const first = `## Page 1\n\n${para(10, 'a')}\n\n`;
-    const r = await convertPdf(bytes, 'text', { maxTextBytes: Buffer.byteLength(first) + 15 });
+    // Leaves 11 bytes after page 1: one short of "\n## Page 2\n\n".
+    const r = await convertPdf(bytes, 'text', { maxTextBytes: Buffer.byteLength(first) + 10 });
     const t = text(r.parts[0]);
     expect(t).toBe(first.trimEnd() + '\n');
     expect(r.parts[0]).toMatchObject({ truncated: true });
     expect(r.notes.some((n) => n.includes('pages 2–3 not included'))).toBe(true);
+  });
+
+  it('cuts a first line longer than the remaining budget by characters, at a UTF-8 boundary', async () => {
+    const line = 'é'.repeat(60); // 2 UTF-8 bytes each
+    const head = '## Page 1\n\n';
+    // Room for the heading, 21 bytes of text and the newline: 10 whole "é", never half of one.
+    const max = Buffer.byteLength(head) + 22;
+    const r = await convertPdf(makePdf([line, para(10, 'b')]), 'text', { maxTextBytes: max });
+    expect(text(r.parts[0])).toBe(`${head}${'é'.repeat(10)}\n`);
+    expect(r.parts[0]).toMatchObject({ truncated: true });
+    expect(r.notes).toContain(`page 1: kept the first 10 characters of line 1 of 1 (the ${max}-byte text cap was reached)`);
+    expect(r.notes).toContain(`page 2 not included (the ${max}-byte text cap was reached)`);
+  });
+
+  it('counts every page read toward the scan check, even past the text cap', async () => {
+    // Page 1 alone averages well over the threshold; across all four pages it does not.
+    const bytes = makePdf([para(40, 'w'), '', '', '']);
+    const r = await convertPdf(bytes, 'auto', { maxTextBytes: 60 });
+    expect(r.notes).toContain('pages 2–4 not included (the 60-byte text cap was reached)');
+    expect(r.notes).toContain('this PDF has little or no text layer (likely scanned)');
+    expect(r.parts.filter((p) => p.type === 'image')).toHaveLength(4);
   });
 
   it('notes a PDF with little or no text layer (likely scanned)', async () => {
@@ -195,5 +215,21 @@ describe('convertPdf', () => {
     expect(err).toBeInstanceOf(McpToolError);
     expect((err as Error).message).toMatch(/^Could not read the PDF/);
     expect((err as Error).message).not.toMatch(/\n\s+at /);
+  });
+});
+
+describe('joinTextItems', () => {
+  const item = (str: string, y: number, hasEOL = false) => ({ str, hasEOL, transform: [1, 0, 0, 1, 72, y], width: 10 * str.length, height: 12 });
+
+  it('breaks lines on hasEOL and on a baseline move', () => {
+    expect(joinTextItems([item('one', 700, true), item('two', 700), item('three', 686)])).toBe('one\ntwo\nthree');
+  });
+
+  it('adds no blank line for an empty end-of-line item right after an end of line', () => {
+    expect(joinTextItems([item('one', 700, true), item('', 700, true), item('two', 686)])).toBe('one\ntwo');
+  });
+
+  it('still leaves a blank line for a paragraph-sized gap after an empty end-of-line item', () => {
+    expect(joinTextItems([item('one', 700, true), item('', 700, true), item('two', 650)])).toBe('one\n\ntwo');
   });
 });

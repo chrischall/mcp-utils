@@ -20,23 +20,27 @@
  * through the bounded zip reader first and exceljs is handed a fresh archive
  * rebuilt from the entries it inflated (see `repackZipWithinLimits`).
  *
- * Memory: exceljs builds the whole workbook model, and every non-empty cell is
- * kept until its sheet is written, so peak heap scales with the inflated XML
- * (up to `maxUnzippedBytes`, 200 MiB by default) — a hostile workbook within
- * that cap can still cost several GB. Lower `maxUnzippedBytes` where that
- * matters; the CSV output itself is bounded by `maxTextBytes`.
+ * Memory: the repacked archive holds the inflated entries once (up to
+ * `maxUnzippedBytes`, 200 MiB by default — entries are inflated straight into
+ * it, never also kept as a second copy) and stays alive while exceljs loads
+ * it; exceljs then builds the whole workbook model, and every non-empty cell
+ * is kept until its sheet is written. So peak heap is that archive plus
+ * exceljs's model, both scaling with the inflated XML — a hostile workbook
+ * within the cap can still cost several GB. Lower `maxUnzippedBytes` where
+ * that matters; the CSV output itself is bounded by `maxTextBytes`.
  */
 
 import type { Workbook, Worksheet } from 'exceljs';
 import { McpToolError } from '../errors/index.js';
 import { csvRow } from './csv.js';
+import { safeFileName } from './file-name.js';
 import { importPeer } from './peer.js';
 import { resolveConvertLimits, type ConvertLimits, type ConvertResult, type ConvertedPart } from './types.js';
 import { repackZipWithinLimits } from './zip-read.js';
 
 /** `<sheet name>.csv`, with `/\:*?"<>|` and control characters replaced by `_`. */
 export function sheetFileName(sheetName: string): string {
-  return `${sheetName.replace(/[/\\:*?"<>|\u0000-\u001f\u007f]/g, '_')}.csv`;
+  return `${safeFileName(sheetName)}.csv`;
 }
 
 function isoDate(d: Date): string {
@@ -196,7 +200,8 @@ export async function convertXlsx(bytes: Uint8Array, limits?: ConvertLimits, sig
     }
     if (truncated) {
       // Nothing more fits; later sheets are reported by the budget check above.
-      notes.push(`sheet "${ws.name}": kept rows 1–${kept} of ${sheet.lastRow} (the ${lim.maxTextBytes}-byte text cap was reached)`);
+      const what = kept === 0 ? 'no rows kept' : `kept rows 1–${kept}`;
+      notes.push(`sheet "${ws.name}": ${what} of ${sheet.lastRow} (the ${lim.maxTextBytes}-byte text cap was reached)`);
       budget = 0;
     }
 
