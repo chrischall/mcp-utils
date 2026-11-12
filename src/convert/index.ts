@@ -10,7 +10,7 @@
  *
  * The converters run on optional peers loaded with a dynamic `import()` only
  * when a format is converted (`exceljs` + `fflate` for workbooks, `unpdf` for
- * PDFs, `@napi-rs/canvas` for PDF page images — whose absence degrades to a
+ * PDFs, `fflate` + `fast-xml-parser` for decks, `@napi-rs/canvas` for PDF page images — whose absence degrades to a
  * text-only result with a note instead of throwing), so a server
  * that never converts a format need not install its library; this subpath
  * never enters the core barrel. Input is treated as hostile: zip archives are
@@ -33,3 +33,4 @@ export {
   type RenderedPdfPages,
   type RenderPdfPagesOptions,
 } from './pdf-images.js';
+export { convertPptx } from './pptx.js';

@@ -9,6 +9,7 @@ describe('@chrischall/mcp-utils/convert barrel', () => {
     expect(typeof convert.convertPdf).toBe('function');
     expect(typeof convert.extractPdfText).toBe('function');
     expect(typeof convert.isTextSparse).toBe('function');
+    expect(typeof convert.convertPptx).toBe('function');
     expect(convert.PDF_SPARSE_CHARS_PER_PAGE).toBe(80);
     expect(convert.DEFAULT_CONVERT_LIMITS.maxTextBytes).toBe(200 * 1024);
   });
