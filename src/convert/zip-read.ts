@@ -158,7 +158,23 @@ async function open(
   let inflatedTotal = 0;
   const counted = new Set<ZipEntryInfo>();
 
-  const readEntry = async (e: ZipEntryInfo): Promise<Uint8Array> => {
+  // Each entry is inflated at most once per archive: a re-read returns the
+  // same bytes (treat them as read-only). A part listed many times — one slide
+  // in sldIdLst again and again — must not cost a fresh inflation each time
+  // (#436); the bytes are already counted toward the running total.
+  const inflated = new Map<ZipEntryInfo, Promise<Uint8Array>>();
+  const readEntry = (e: ZipEntryInfo): Promise<Uint8Array> => {
+    let p = inflated.get(e);
+    if (!p) {
+      p = inflateEntry(e);
+      inflated.set(e, p);
+      // A failed read is not cached: the caller sees the error, and a retry fails the same way.
+      p.catch(() => inflated.delete(e));
+    }
+    return p;
+  };
+
+  const inflateEntry = async (e: ZipEntryInfo): Promise<Uint8Array> => {
     signal?.throwIfAborted();
     const name = e.name;
     const lh = e.localOffset;

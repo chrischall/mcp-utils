@@ -115,8 +115,23 @@ async function xmlParser(): Promise<XmlParse> {
   return (xml) => parser.parse(xml) as XNode[];
 }
 
+/** Parsed parts per archive: a part several slides share (a notes slide, a layout) is parsed once (#436). */
+const parsedParts = new WeakMap<ZipReader, Map<string, Promise<XNode[] | undefined>>>();
+
 /** Read and parse one XML part; `undefined` when the archive has no such entry. */
-async function readXml(zip: ZipReader, parse: XmlParse, path: string): Promise<XNode[] | undefined> {
+function readXml(zip: ZipReader, parse: XmlParse, path: string): Promise<XNode[] | undefined> {
+  let cache = parsedParts.get(zip);
+  if (!cache) parsedParts.set(zip, (cache = new Map()));
+  let p = cache.get(path);
+  if (!p) {
+    p = parseXmlPart(zip, parse, path);
+    cache.set(path, p);
+    p.catch(() => cache.delete(path));
+  }
+  return p;
+}
+
+async function parseXmlPart(zip: ZipReader, parse: XmlParse, path: string): Promise<XNode[] | undefined> {
   const text = await zip.readText(path);
   if (text === undefined) return undefined;
   if (/<!DOCTYPE/i.test(text)) throw fail(`${path} contains a DOCTYPE, which is refused.`);
@@ -483,13 +498,22 @@ export async function convertPptx(
   let budget = lim.maxTextBytes;
   let truncated = false;
   const readCount = Math.min(count, lim.maxPages);
+  // A slide part listed again is pointed at, never read and parsed again (#436).
+  const firstListing = new Map<string, number>();
+  let repeats = 0;
   for (let i = 0; i < readCount; i++) {
     signal?.throwIfAborted();
     const n = i + 1;
     const part = slideParts[i];
-    const { heading, body } = part
-      ? await renderSlide(zip, parse, part, n, images)
-      : { heading: `## Slide ${n}`, body: '*(slide content missing from the archive)*' };
+    const earlier = part === undefined ? undefined : firstListing.get(part);
+    if (part !== undefined && earlier === undefined) firstListing.set(part, n);
+    if (earlier !== undefined) repeats++;
+    const { heading, body } =
+      earlier !== undefined
+        ? { heading: `## Slide ${n}`, body: `*(same slide as slide ${earlier})*` }
+        : part
+          ? await renderSlide(zip, parse, part, n, images)
+          : { heading: `## Slide ${n}`, body: '*(slide content missing from the archive)*' };
     const block = body === '' ? `${heading}\n` : `${heading}\n\n${body}\n`;
     const sep = i === 0 ? '' : '\n';
     const size = Buffer.byteLength(sep + block);
@@ -525,6 +549,7 @@ export async function convertPptx(
     }
     break;
   }
+  if (repeats > 0) notes.push(`${repeats} slide listing${repeats === 1 ? '' : 's'} repeat an earlier slide (a slide listed more than once); each is shown as a pointer, not read again`);
   if (count > readCount) notes.push(`${pageRange(readCount + 1, count, 'slide')} not read (maxPages is ${lim.maxPages})`);
   notes.push(...images.notes());
 

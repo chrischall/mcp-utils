@@ -147,6 +147,21 @@ describe('convertPptx', () => {
     expect(md(r)).toBe('## Slide 1\n\n| Name | Value |\n| --- | --- |\n| a\\|b | 1 |\n\ninside group\n');
   });
 
+  // chrischall/mcp-utils#436: a deck listing one slide many times must not
+  // inflate and parse that slide again for every listing.
+  it('renders a slide listed again as a pointer to its first listing, without re-reading it', async () => {
+    const s1 = { file: 1, shapes: sp({ ph: 'title', paras: [para('Only once')] }) };
+    const bytes = deck([s1, s1, s1]);
+    const r = await convertPptx(bytes);
+    const text = md(r);
+    expect(text.match(/Only once/g)).toHaveLength(1);
+    expect(text).toContain('## Slide 2');
+    expect(text).toContain('same slide as slide 1');
+    expect(text).toContain('## Slide 3');
+    expect(r.count).toBe(3);
+    expect(r.notes.join(' ')).toMatch(/listed more than once/);
+  });
+
   it('marks hidden slides', async () => {
     const r = await convertPptx(deck([{ file: 1, shapes: sp({ ph: 'title', paras: [para('Secret')] }), attrs: ' show="0"' }]));
     expect(md(r)).toBe('## Slide 1: Secret (hidden)\n');
