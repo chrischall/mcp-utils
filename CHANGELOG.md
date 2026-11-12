@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.9.0](https://github.com/chrischall/mcp-utils/compare/v3.8.1...v3.9.0) (2026-11-12)
+
+
+### Features
+
+* **convert:** turn PDF, Excel and PowerPoint attachments into content a model can read ([#435](https://github.com/chrischall/mcp-utils/issues/435)) ([6a5f781](https://github.com/chrischall/mcp-utils/commit/6a5f781e0f3ed8c72820477f95323df972e6cd4e))
+
+
+### Bug Fixes
+
+* **convert:** never inflate or parse a pptx part twice ([#438](https://github.com/chrischall/mcp-utils/issues/438)) ([4a415ee](https://github.com/chrischall/mcp-utils/commit/4a415eeb260bc37ca5e11d8b746d005e00e1e947)), closes [#436](https://github.com/chrischall/mcp-utils/issues/436)
+* **convert:** tidy PDF text, halve workbook repack memory and guard the repack ([#440](https://github.com/chrischall/mcp-utils/issues/440)) ([8425431](https://github.com/chrischall/mcp-utils/commit/84254310061859ad61372c0c91b96e209095c58d))
+
 ## [3.8.1](https://github.com/chrischall/mcp-utils/compare/v3.8.0...v3.8.1) (2026-11-11)
 
 
