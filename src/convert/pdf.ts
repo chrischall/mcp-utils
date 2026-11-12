@@ -15,9 +15,10 @@
  * Every cap that bites is reported: `maxPages` with a "pages X–Y not read" note,
  * `maxTextBytes` with a cut at a page or line boundary (inside the line, at a
  * character boundary, when a page's first line alone is over what is left),
- * `truncated: true` and notes. Once the pages read already hold more text than
- * `maxTextBytes`, later pages are still read — every page counts toward the
- * scan check — but their text is not kept. A PDF whose text layer is sparse
+ * `truncated: true` and notes. In `convertPdf`, once the pages read already
+ * hold more text than `maxTextBytes`, later pages are still read — every page
+ * counts toward the scan check — but their text is not kept
+ * (`extractPdfText` returns every page up to `maxPages`). A PDF whose text layer is sparse
  * (see {@link isTextSparse}) is noted as likely scanned.
  */
 
@@ -280,8 +281,8 @@ function firstPages(n: number): number[] {
  * `maxPages` caps the pages read or rendered (note: "pages X–Y not read" /
  * "not rendered"), `maxTextBytes` the markdown (cut at a page or line
  * boundary — or by characters when a page's first line alone does not fit —
- * `truncated`, notes naming what was kept and the pages not included). A missing canvas never
- * throws; otherwise throws as {@link extractPdfText} does.
+ * `truncated`, notes naming what was kept and the pages not included). A
+ * missing canvas never throws; otherwise throws as {@link extractPdfText} does.
  */
 export async function convertPdf(
   bytes: Uint8Array,
