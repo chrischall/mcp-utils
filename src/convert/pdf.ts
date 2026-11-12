@@ -7,23 +7,28 @@
  * lines by their `hasEOL` flag and y-position, leaving a blank line where the
  * vertical gap is paragraph-sized and collapsing runs of spaces.
  * {@link convertPdf} turns that into one `text/markdown` part, `## Page N`
- * per page.
+ * per page, and — for a scan in mode `'auto'`, or always in mode `'images'`
+ * — page images rendered by `pdf-images.ts`.
  *
- * Hostile input: the pdf.js build unpdf bundles has no eval / `new
- * Function` path at all (the old `isEvalSupported` switch is gone with it);
- * it runs with `disableFontFace: true` (no font loading), `useSystemFonts:
- * false`, `enableXfa: false` and nothing to fetch from (the bytes are handed
- * over whole, range/stream/auto-fetch off); the signal is checked between
- * pages. Every cap that
- * bites is reported: `maxPages` with a "pages X–Y not read" note,
+ * Hostile input: the document is opened by `pdf-doc.ts` (no eval, no font
+ * loading, no XFA, nothing to fetch); the signal is checked between pages.
+ * Every cap that bites is reported: `maxPages` with a "pages X–Y not read" note,
  * `maxTextBytes` with a cut at a page or line boundary, `truncated: true` and
  * a note. A PDF whose text layer is sparse (see {@link isTextSparse}) is
  * noted as likely scanned.
  */
 
 import { McpToolError } from '../errors/index.js';
-import { importPeer } from './peer.js';
-import { resolveConvertLimits, type ConvertLimits, type ConvertMode, type ConvertResult, type ResolvedConvertLimits } from './types.js';
+import { describePdfError, pageRange, pdfBaseName, withPdf, type PdfDoc } from './pdf-doc.js';
+import { renderPdfDocPages } from './pdf-images.js';
+import {
+  resolveConvertLimits,
+  type ConvertedPart,
+  type ConvertLimits,
+  type ConvertMode,
+  type ConvertResult,
+  type ResolvedConvertLimits,
+} from './types.js';
 
 /** Average non-whitespace characters per page below which a PDF's text layer counts as sparse (likely scanned). */
 export const PDF_SPARSE_CHARS_PER_PAGE = 80;
@@ -106,61 +111,23 @@ function joinItems(items: readonly TextItemLike[]): string {
     .trim();
 }
 
-function describePdfError(err: unknown): string {
-  const name = (err as { name?: unknown } | null)?.name;
-  if (name === 'PasswordException') return 'the PDF is password-protected';
-  const msg = err instanceof Error ? err.message : String(err);
-  // One line, no stack, bounded: pdf.js messages can quote document bytes.
-  return (msg.split('\n')[0] ?? '').slice(0, 200) || 'unknown error';
-}
-
-function checkInput(bytes: Uint8Array, lim: ResolvedConvertLimits): void {
-  if (bytes.length > lim.maxInputBytes) {
-    throw new McpToolError(`The PDF is ${bytes.length} bytes, over the ${lim.maxInputBytes}-byte input cap.`, { kind: 'too_large' });
-  }
-}
-
-async function extract(bytes: Uint8Array, lim: ResolvedConvertLimits, signal?: AbortSignal): Promise<PdfText> {
-  signal?.throwIfAborted();
-  checkInput(bytes, lim);
-  const { getDocumentProxy } = await importPeer('unpdf', () => import('unpdf'));
-  signal?.throwIfAborted();
-  let doc: Awaited<ReturnType<typeof getDocumentProxy>>;
-  try {
-    // pdf.js may transfer (detach) the buffer it is given; hand it a copy.
-    doc = await getDocumentProxy(bytes.slice(), {
-      // No `isEvalSupported`: the pdf.js build unpdf bundles has no eval /
-      // `new Function` path left to switch off, and no longer accepts it.
-      disableFontFace: true,
-      enableXfa: false,
-      useSystemFonts: false,
-      disableAutoFetch: true,
-      disableStream: true,
-      disableRange: true,
-      verbosity: 0,
-    });
-  } catch (err) {
-    throw new McpToolError(`Could not read the PDF: ${describePdfError(err)}`, { kind: 'unknown', cause: err });
-  }
-  try {
-    const pageCount = doc.numPages;
-    const pages: string[] = [];
-    const last = Math.min(pageCount, lim.maxPages);
-    for (let n = 1; n <= last; n++) {
-      signal?.throwIfAborted();
-      try {
-        const page = await doc.getPage(n);
-        const content = await page.getTextContent();
-        pages.push(joinItems(content.items as TextItemLike[]));
-        page.cleanup();
-      } catch (err) {
-        throw new McpToolError(`Could not read the PDF: page ${n}: ${describePdfError(err)}`, { kind: 'unknown', cause: err });
-      }
+/** Read the text of pages 1..min(pageCount, maxPages) of an open document. */
+async function readPages(doc: PdfDoc, lim: ResolvedConvertLimits, signal?: AbortSignal): Promise<PdfText> {
+  const pageCount = doc.numPages;
+  const pages: string[] = [];
+  const last = Math.min(pageCount, lim.maxPages);
+  for (let n = 1; n <= last; n++) {
+    signal?.throwIfAborted();
+    try {
+      const page = await doc.getPage(n);
+      const content = await page.getTextContent();
+      pages.push(joinItems(content.items as TextItemLike[]));
+      page.cleanup();
+    } catch (err) {
+      throw new McpToolError(`Could not read the PDF: page ${n}: ${describePdfError(err)}`, { kind: 'unknown', cause: err });
     }
-    return { pages, pageCount };
-  } finally {
-    await doc.loadingTask.destroy().catch(() => undefined);
   }
+  return { pages, pageCount };
 }
 
 /**
@@ -171,43 +138,17 @@ async function extract(bytes: Uint8Array, lim: ResolvedConvertLimits, signal?: A
  * stack).
  */
 export async function extractPdfText(bytes: Uint8Array, limits?: ConvertLimits, signal?: AbortSignal): Promise<PdfText> {
-  return extract(bytes, resolveConvertLimits(limits), signal);
-}
-
-/** `<base>.md` from an attachment file name (extension dropped, unsafe characters `_`). */
-function markdownName(fileName: string | undefined): string {
-  const leaf = (fileName ?? '').split(/[/\\]/).pop() ?? '';
-  const base = leaf.replace(/\.pdf$/i, '').replace(/[:*?"<>|\u0000-\u001f\u007f]/g, '_').trim();
-  return `${base === '' ? 'document' : base}.md`;
-}
-
-function range(from: number, to: number, noun: string): string {
-  return from === to ? `${noun} ${from}` : `${noun}s ${from}–${to}`;
-}
-
-/**
- * Convert a PDF to one `text/markdown` part (`## Page N` then the page's
- * text), named `<base>.md` after `fileName` (`document.md` without one).
- *
- * `mode` `'text'` and `'auto'` both return the text layer; a sparse one (see
- * {@link isTextSparse}) adds the note {@link PDF_SPARSE_NOTE}. Page images are
- * not rendered here, so `'images'` also returns the text, with a note saying
- * so. `maxPages` caps the pages read (note: "pages X–Y not read"),
- * `maxTextBytes` the markdown (cut at a page or line boundary, `truncated`,
- * notes naming what was kept). Throws as {@link extractPdfText} does.
- */
-export async function convertPdf(
-  bytes: Uint8Array,
-  mode: ConvertMode = 'auto',
-  limits?: ConvertLimits,
-  signal?: AbortSignal,
-  fileName?: string,
-): Promise<ConvertResult> {
   const lim = resolveConvertLimits(limits);
-  const { pages, pageCount } = await extract(bytes, lim, signal);
-  const notes: string[] = [];
-  if (mode === 'images') notes.push('page images are not available; returned the text layer instead');
+  return withPdf(bytes, lim, signal, (doc) => readPages(doc, lim, signal));
+}
 
+/** The text layer as one `text/markdown` part, honouring `maxTextBytes`, plus notes on what was cut. */
+function markdownPart(
+  { pages, pageCount }: PdfText,
+  lim: ResolvedConvertLimits,
+  fileName: string | undefined,
+): { part: ConvertedPart; notes: string[] } {
+  const notes: string[] = [];
   let text = '';
   let budget = lim.maxTextBytes;
   let truncated = false;
@@ -245,17 +186,79 @@ export async function convertPdf(
     }
     const firstOut = kept > 0 ? n + 1 : n;
     if (firstOut <= pages.length) {
-      notes.push(`${range(firstOut, pages.length, 'page')} not included (the ${lim.maxTextBytes}-byte text cap was reached)`);
+      notes.push(`${pageRange(firstOut, pages.length)} not included (the ${lim.maxTextBytes}-byte text cap was reached)`);
     }
     break;
   }
-  if (pageCount > pages.length) notes.push(`${range(pages.length + 1, pageCount, 'page')} not read (maxPages is ${lim.maxPages})`);
+  if (pageCount > pages.length) notes.push(`${pageRange(pages.length + 1, pageCount)} not read (maxPages is ${lim.maxPages})`);
   if (isTextSparse(pages)) notes.push(PDF_SPARSE_NOTE);
-
   return {
-    format: 'pdf',
-    parts: [{ type: 'text', name: markdownName(fileName), mimeType: 'text/markdown', text, ...(truncated ? { truncated: true } : {}) }],
+    part: { type: 'text', name: `${pdfBaseName(fileName)}.md`, mimeType: 'text/markdown', text, ...(truncated ? { truncated: true } : {}) },
     notes,
-    count: pageCount,
   };
+}
+
+/** 1..n */
+function firstPages(n: number): number[] {
+  return Array.from({ length: Math.max(0, n) }, (_, i) => i + 1);
+}
+
+/**
+ * Convert a PDF to model-readable parts, named after `fileName`
+ * (`document` without one).
+ *
+ * - `'text'`: one `text/markdown` part, `## Page N` then the page's text
+ *   (`<base>.md`). A sparse text layer (see {@link isTextSparse}) adds the
+ *   note {@link PDF_SPARSE_NOTE}.
+ * - `'auto'`: the same, and when the text layer is sparse (a scan) ALSO
+ *   images of the first pages read (`<base>-page-<N>.jpg`, up to
+ *   `maxImages` / `maxImageBytes`).
+ * - `'images'`: images of pages 1..`maxImages` only, no text part, with a
+ *   note of the page count. If no page could be rendered (e.g.
+ *   `@napi-rs/canvas` is not installed) it falls back to the text layer,
+ *   with notes saying so.
+ *
+ * `maxPages` caps the pages read or rendered (note: "pages X–Y not read" /
+ * "not rendered"), `maxTextBytes` the markdown (cut at a page or line
+ * boundary, `truncated`, notes naming what was kept). A missing canvas never
+ * throws; otherwise throws as {@link extractPdfText} does.
+ */
+export async function convertPdf(
+  bytes: Uint8Array,
+  mode: ConvertMode = 'auto',
+  limits?: ConvertLimits,
+  signal?: AbortSignal,
+  fileName?: string,
+): Promise<ConvertResult> {
+  const lim = resolveConvertLimits(limits);
+  return withPdf(bytes, lim, signal, async (doc) => {
+    const pageCount = doc.numPages;
+
+    if (mode === 'images') {
+      const renderable = Math.min(pageCount, lim.maxPages);
+      const rendered = await renderPdfDocPages(doc, firstPages(renderable), lim, signal, { fileName });
+      if (rendered.images.length > 0 || pageCount === 0) {
+        const notes = [`the PDF has ${pageCount} ${pageCount === 1 ? 'page' : 'pages'}; returned page images only`, ...rendered.notes];
+        if (pageCount > renderable) notes.push(`${pageRange(renderable + 1, pageCount)} not rendered (maxPages is ${lim.maxPages})`);
+        return { format: 'pdf', parts: rendered.images, notes, count: pageCount };
+      }
+      const { part, notes } = markdownPart(await readPages(doc, lim, signal), lim, fileName);
+      return {
+        format: 'pdf',
+        parts: [part],
+        notes: [...rendered.notes, 'returned the text layer instead of page images', ...notes],
+        count: pageCount,
+      };
+    }
+
+    const text = await readPages(doc, lim, signal);
+    const { part, notes } = markdownPart(text, lim, fileName);
+    const parts: ConvertedPart[] = [part];
+    if (mode === 'auto' && isTextSparse(text.pages)) {
+      const rendered = await renderPdfDocPages(doc, firstPages(text.pages.length), lim, signal, { fileName });
+      parts.push(...rendered.images);
+      notes.push(...rendered.notes);
+    }
+    return { format: 'pdf', parts, notes, count: pageCount };
+  });
 }

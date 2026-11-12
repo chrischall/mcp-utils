@@ -147,10 +147,47 @@ describe('convertPdf', () => {
     expect(r.notes.some((n) => n.includes('likely scanned'))).toBe(false);
   });
 
-  it('returns the text layer with a note for mode images (no rendering here)', async () => {
-    const r = await convertPdf(makePdf([para(30)]), 'images');
-    expect(text(r.parts[0])).toContain('## Page 1');
-    expect(r.notes).toContain('page images are not available; returned the text layer instead');
+  it('returns only page images for mode images, with a note of the page count', async () => {
+    const r = await convertPdf(makePdf([para(30), 'two', 'three']), 'images', {}, undefined, 'Deck.pdf');
+    expect(r.parts.map((p) => [p.type, p.name])).toEqual([
+      ['image', 'Deck-page-1.jpg'],
+      ['image', 'Deck-page-2.jpg'],
+      ['image', 'Deck-page-3.jpg'],
+    ]);
+    expect(r.count).toBe(3);
+    expect(r.notes).toContain('the PDF has 3 pages; returned page images only');
+  });
+
+  it('renders at most maxImages pages for mode images and notes the rest', async () => {
+    const r = await convertPdf(makePdf(['a', 'b', 'c']), 'images', { maxImages: 2 });
+    expect(r.parts.filter((p) => p.type === 'image')).toHaveLength(2);
+    expect(r.notes).toContain('page 3 not rendered (maxImages is 2)');
+  });
+
+  it('renders no more than maxPages pages for mode images', async () => {
+    const r = await convertPdf(makePdf(['a', 'b', 'c']), 'images', { maxPages: 1 });
+    expect(r.parts.filter((p) => p.type === 'image')).toHaveLength(1);
+    expect(r.notes).toContain('pages 2–3 not rendered (maxPages is 1)');
+  });
+
+  it('adds page images to the text for a sparse (scanned) PDF in mode auto', async () => {
+    const r = await convertPdf(makePdf(['', '']), 'auto', {}, undefined, 'scan.pdf');
+    expect(r.parts.map((p) => [p.type, p.name])).toEqual([
+      ['text', 'scan.md'],
+      ['image', 'scan-page-1.jpg'],
+      ['image', 'scan-page-2.jpg'],
+    ]);
+    expect(r.notes).toContain('this PDF has little or no text layer (likely scanned)');
+  });
+
+  it('adds no images in mode auto when the text layer is real', async () => {
+    const r = await convertPdf(makePdf([para(30)]), 'auto');
+    expect(r.parts.every((p) => p.type === 'text')).toBe(true);
+  });
+
+  it('never renders images in mode text, even for a sparse PDF', async () => {
+    const r = await convertPdf(makePdf(['']), 'text');
+    expect(r.parts.every((p) => p.type === 'text')).toBe(true);
   });
 
   it('throws a clear McpToolError for a corrupt PDF', async () => {

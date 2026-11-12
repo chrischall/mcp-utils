@@ -10,7 +10,8 @@
  *
  * The converters run on optional peers loaded with a dynamic `import()` only
  * when a format is converted (`exceljs` + `fflate` for workbooks, `unpdf` for
- * PDFs), so a server
+ * PDFs, `@napi-rs/canvas` for PDF page images — whose absence degrades to a
+ * text-only result with a note instead of throwing), so a server
  * that never converts a format need not install its library; this subpath
  * never enters the core barrel. Input is treated as hostile: zip archives are
  * read through a bounded reader (declared AND actual inflated sizes capped),
@@ -24,3 +25,11 @@ export { csvField, csvRow, toCsv } from './csv.js';
 export { assertZipWithinLimits, openZip, repackZipWithinLimits, type ZipEntryInfo, type ZipReader } from './zip-read.js';
 export { cellText, convertXlsx, sheetFileName } from './xlsx.js';
 export { convertPdf, extractPdfText, isTextSparse, PDF_SPARSE_CHARS_PER_PAGE, PDF_SPARSE_NOTE, type PdfText } from './pdf.js';
+export {
+  PDF_IMAGE_JPEG_QUALITY,
+  PDF_IMAGE_MAX_SIDE,
+  PDF_IMAGES_UNAVAILABLE_NOTE,
+  renderPdfPages,
+  type RenderedPdfPages,
+  type RenderPdfPagesOptions,
+} from './pdf-images.js';
