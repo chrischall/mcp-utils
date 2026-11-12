@@ -9,7 +9,8 @@
  * as per-slide Markdown plus their pictures.
  *
  * The converters run on optional peers loaded with a dynamic `import()` only
- * when a format is converted (`exceljs` + `fflate` for workbooks), so a server
+ * when a format is converted (`exceljs` + `fflate` for workbooks, `unpdf` for
+ * PDFs), so a server
  * that never converts a format need not install its library; this subpath
  * never enters the core barrel. Input is treated as hostile: zip archives are
  * read through a bounded reader (declared AND actual inflated sizes capped),
@@ -22,3 +23,4 @@ export * from './types.js';
 export { csvField, csvRow, toCsv } from './csv.js';
 export { assertZipWithinLimits, openZip, repackZipWithinLimits, type ZipEntryInfo, type ZipReader } from './zip-read.js';
 export { cellText, convertXlsx, sheetFileName } from './xlsx.js';
+export { convertPdf, extractPdfText, isTextSparse, PDF_SPARSE_CHARS_PER_PAGE, PDF_SPARSE_NOTE, type PdfText } from './pdf.js';
