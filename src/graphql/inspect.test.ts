@@ -103,12 +103,19 @@ describe('inspectGraphqlDocument on hostile input', () => {
     ['argument brackets', `query { a(${'['.repeat(100_000)}) }`],
     ['many fields', `query { ${'a '.repeat(100_000)}}`],
   ])('stays linear on 200 KB of %s', (_label, doc) => {
-    const t = performance.now();
-    try {
-      inspectGraphqlDocument(doc);
-    } catch {
-      /* malformed is fine — the time is what is measured */
-    }
-    expect(performance.now() - t).toBeLessThan(100);
+    // Best of three against a generous budget: a quadratic or backtracking
+    // scan of 200 KB takes seconds, so 500 ms still catches one, while a
+    // single noisy-neighbour pause on a shared CI runner (142 ms against the
+    // old 100 ms budget, mcp-utils#438) no longer fails the build.
+    const runs = Array.from({ length: 3 }, () => {
+      const t = performance.now();
+      try {
+        inspectGraphqlDocument(doc);
+      } catch {
+        /* malformed is fine — the time is what is measured */
+      }
+      return performance.now() - t;
+    });
+    expect(Math.min(...runs)).toBeLessThan(500);
   });
 });
