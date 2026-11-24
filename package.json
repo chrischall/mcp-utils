@@ -135,7 +135,7 @@
     "@modelcontextprotocol/server": "^2.4.0",
     "@napi-rs/canvas": "^1.1.1",
     "@types/node": "^26.6.6",
-    "@vitest/coverage-v8": "^5.1.0",
+    "@vitest/coverage-v8": "^5.1.1",
     "exceljs": "^4.4.0",
     "fast-xml-parser": "^5.12.1",
     "fflate": "^0.8.3",
